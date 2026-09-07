@@ -6,7 +6,7 @@ return [
         'tns' => env('DB_TNS', ''),
         'host' => env('DB_HOST', ''),
         'port' => env('DB_PORT', '1521'),
-        'database' => env('DB_DATABASE', ''),
+        'database' => env('DB_DATABASE', 'orcl'),
         'service_name' => env('DB_SERVICE_NAME', ''),
         'username' => env('DB_USERNAME', ''),
         'password' => env('DB_PASSWORD', ''),
