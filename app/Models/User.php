@@ -12,6 +12,13 @@ class User extends Authenticatable
     use HasApiTokens, HasFactory, Notifiable;
 
     /**
+     * The database connection that should be used by the model.
+     *
+     * @var string
+     */
+    protected $connection = 'oracle';
+
+    /**
      * The table associated with the model.
      *
      * @var string
