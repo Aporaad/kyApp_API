@@ -30,7 +30,13 @@ class User extends Authenticatable
      *
      * @var string
      */
-    protected $primaryKey = 'USER_ID';
+    /**
+     * The primary key associated with the table.
+     * Note: Oracle PDO returns column attributes in lowercase.
+     *
+     * @var string
+     */
+    protected $primaryKey = 'user_id';
 
     /**
      * Indicates if the model should be timestamped.
@@ -68,15 +74,48 @@ class User extends Authenticatable
      */
     protected $hidden = [
         'USER_PASSWORD',
+        'user_password',
         'remember_token',
     ];
+
+    /**
+     * Case-insensitive attribute getter for Oracle column compatibility.
+     *
+     * @param  string  $key
+     * @return mixed
+     */
+    public function getAttribute($key)
+    {
+        $value = parent::getAttribute($key);
+        if ($value !== null) {
+            return $value;
+        }
+
+        $lowerKey = strtolower($key);
+        if ($lowerKey !== $key) {
+            $value = parent::getAttribute($lowerKey);
+            if ($value !== null) {
+                return $value;
+            }
+        }
+
+        $upperKey = strtoupper($key);
+        if ($upperKey !== $key) {
+            $value = parent::getAttribute($upperKey);
+            if ($value !== null) {
+                return $value;
+            }
+        }
+
+        return null;
+    }
 
     /**
      * Get the password for the user.
      */
     public function getAuthPassword(): ?string
     {
-        return $this->USER_PASSWORD;
+        return $this->getAttribute('user_password');
     }
 
     /**
@@ -84,6 +123,6 @@ class User extends Authenticatable
      */
     public function getAuthIdentifierName(): string
     {
-        return 'USER_ID';
+        return 'user_id';
     }
 }

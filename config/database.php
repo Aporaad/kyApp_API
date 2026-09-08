@@ -121,7 +121,7 @@ return [
             'service_name' => env('DB_SERVICE_NAME', 'orcl'),
             'username' => env('DB_USERNAME', 'ACCOUNTS'),
             'password' => env('DB_PASSWORD', 'acc'),
-            'charset' => 'AL32UTF8',
+            'charset' => env('DB_CHARSET', 'AL32UTF8'),
             'prefix' => '',
             'prefix_schema' => 'accounts',
         ],

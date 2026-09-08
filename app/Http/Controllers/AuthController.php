@@ -66,16 +66,26 @@ class AuthController extends Controller
 
         // التحقق من حالة تفعيل الحساب
         // Check if the user account is active
-        if ($user->IS_ACTIVATED != 1) {
+        $isActivated = (int) ($user->is_activated ?? $user->IS_ACTIVATED ?? 0);
+        if ($isActivated !== 1) {
             return response()->json([
                 'success' => false,
                 'message' => 'هذا الحساب معطل، يرجى مراجعة إدارة النظام / Account is deactivated.',
             ], 403);
         }
 
-        // مطابقة كلمة المرور (دعم التشفير أو الكلمات المخزنة في النظام الحالي)
-        // Verify password (supports Hash or plain-text legacy database storage)
-        $passwordMatches = Hash::check($password, $user->USER_PASSWORD) || $user->USER_PASSWORD === $password;
+        // مطابقة كلمة المرور (دعم التشفير أو الكلمات المخزنة كنص صريح في النظام القديم)
+        // Verify password (supports Hash or plain-text legacy database storage safely)
+        $userPassword = (string) ($user->user_password ?? $user->USER_PASSWORD ?? '');
+        $passwordMatches = ($userPassword === $password);
+
+        if (! $passwordMatches && (str_starts_with($userPassword, '$2y$') || str_starts_with($userPassword, '$2a$') || str_starts_with($userPassword, '$argon2'))) {
+            try {
+                $passwordMatches = Hash::check($password, $userPassword);
+            } catch (\Throwable $e) {
+                $passwordMatches = false;
+            }
+        }
 
         if (! $passwordMatches) {
             return response()->json([
@@ -94,13 +104,13 @@ class AuthController extends Controller
             'message' => 'تم تسجيل الدخول بنجاح / Logged in successfully.',
             'token' => $token,
             'user' => [
-                'id' => $user->USER_ID,
-                'user_no' => $user->USER_NO,
-                'username' => $user->USER_NAME_EN ?? $user->USER_NAME_AR,
-                'name_ar' => $user->USER_NAME_AR,
-                'name_en' => $user->USER_NAME_EN,
-                'user_type' => $user->USER_TYPE,
-                'branch_no' => $user->BRANCH_NO,
+                'id' => $user->user_id ?? $user->USER_ID ?? $user->getKey(),
+                'user_no' => $user->user_no ?? $user->USER_NO,
+                'username' => $user->user_name_en ?? $user->USER_NAME_EN ?? $user->user_name_ar ?? $user->USER_NAME_AR,
+                'name_ar' => $user->user_name_ar ?? $user->USER_NAME_AR,
+                'name_en' => $user->user_name_en ?? $user->USER_NAME_EN,
+                'user_type' => $user->user_type ?? $user->USER_TYPE,
+                'branch_no' => $user->branch_no ?? $user->BRANCH_NO,
             ],
         ], 200);
     }
@@ -116,13 +126,13 @@ class AuthController extends Controller
         return response()->json([
             'success' => true,
             'user' => [
-                'id' => $user->USER_ID,
-                'user_no' => $user->USER_NO,
-                'username' => $user->USER_NAME_EN ?? $user->USER_NAME_AR,
-                'name_ar' => $user->USER_NAME_AR,
-                'name_en' => $user->USER_NAME_EN,
-                'user_type' => $user->USER_TYPE,
-                'branch_no' => $user->BRANCH_NO,
+                'id' => $user->user_id ?? $user->USER_ID ?? $user->getKey(),
+                'user_no' => $user->user_no ?? $user->USER_NO,
+                'username' => $user->user_name_en ?? $user->USER_NAME_EN ?? $user->user_name_ar ?? $user->USER_NAME_AR,
+                'name_ar' => $user->user_name_ar ?? $user->USER_NAME_AR,
+                'name_en' => $user->user_name_en ?? $user->USER_NAME_EN,
+                'user_type' => $user->user_type ?? $user->USER_TYPE,
+                'branch_no' => $user->branch_no ?? $user->BRANCH_NO,
             ],
         ]);
     }
