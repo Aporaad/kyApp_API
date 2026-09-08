@@ -39,37 +39,26 @@ class ArabicEncoding
             return $str;
         }
 
-        // إذا كان النص يحتوي بالفعل على حروف عربية صريحة ولا يحتوي على رموز مشوهة
-        if (preg_match('/^[\x{0600}-\x{06FF}\s\d\p{P}]+$/u', $str)) {
+        // إذا كان النص لا يحتوي على أي محارف أعلى من 127
+        $hasHighAscii = false;
+        $len = strlen($str);
+        for ($i = 0; $i < $len; $i++) {
+            if (ord($str[$i]) >= 0x80) {
+                $hasHighAscii = true;
+                break;
+            }
+        }
+        if (!$hasHighAscii) {
             return $str;
         }
 
-        // 1. محاولة تحويل البايتات عبر جدول CP1256_MAP
-        $result = '';
-        $len = strlen($str);
-        $convertedAny = false;
-
-        for ($i = 0; $i < $len; $i++) {
-            $byte = ord($str[$i]);
-            if ($byte >= 0x80 && isset(self::CP1256_MAP[$byte])) {
-                $result .= self::CP1256_MAP[$byte];
-                $convertedAny = true;
-            } else {
-                $result .= $str[$i];
-            }
-        }
-
-        if ($convertedAny && preg_match('/[\x{0600}-\x{06FF}]/u', $result)) {
-            return $result;
-        }
-
-        // 2. إذا كانت السلسلة UTF-8 ولكنها تمثل محارف ISO-8859-1 (مثل Î, Ç, á)
-        // نحول من UTF-8 (Latin1 chars) إلى بايتات خام ثم نترجمها عبر CP1256
+        // 1. أولاً: فحص المحارف إذا كانت UTF-8 مشوهة قادمة من تحويل Oracle (Latin-1 chars like Î, Ç, á, etc.)
+        // يتم تفكيك السلسلة كمحارف UTF-8 وفحص أكوادها بين 0x80 و 0xFF
         $utf8ToRaw = '';
-        $chars = preg_split('//u', $str, -1, PREG_SPLIT_NO_EMPTY);
         $hasLatin1Mojibake = false;
+        $chars = @preg_split('//u', $str, -1, PREG_SPLIT_NO_EMPTY);
 
-        if ($chars) {
+        if (is_array($chars) && !empty($chars)) {
             foreach ($chars as $ch) {
                 $code = mb_ord($ch, 'UTF-8');
                 if ($code >= 0x80 && $code <= 0xFF && isset(self::CP1256_MAP[$code])) {
@@ -84,7 +73,24 @@ class ArabicEncoding
             }
         }
 
-        // 3. محاولة أخيرة عبر mb_convert_encoding و iconv
+        // 2. إذا كانت السلسلة عبارة عن بايتات خام Windows-1256 وليست UTF-8
+        $rawConverted = '';
+        $rawHasArabic = false;
+        for ($i = 0; $i < $len; $i++) {
+            $byte = ord($str[$i]);
+            if ($byte >= 0x80 && isset(self::CP1256_MAP[$byte])) {
+                $rawConverted .= self::CP1256_MAP[$byte];
+                $rawHasArabic = true;
+            } else {
+                $rawConverted .= $str[$i];
+            }
+        }
+
+        if ($rawHasArabic && preg_match('/[\x{0600}-\x{06FF}]/u', $rawConverted)) {
+            return $rawConverted;
+        }
+
+        // 3. محاولة تحويل عبر mb_convert_encoding أو iconv
         try {
             $conv = @mb_convert_encoding($str, 'UTF-8', 'Windows-1256');
             if ($conv && preg_match('/[\x{0600}-\x{06FF}]/u', $conv)) {
