@@ -18,3 +18,19 @@ DELETE FROM PERSONAL_ACCESS_TOKENS WHERE TOKENABLE_TYPE = 'TestUser';
 COMMIT;
 ```
 
+## [2026-09-09 00:24:21]
+- **النموذج المنفذ / AI Model:** Gemini 3.7 Flash (Medium)
+- **الغرض / Purpose:** استعلام كشف حساب العامل من جدول قيود اليومية وحساب الرصيد الافتتاحي وتحديد أحدث حركة.
+- **كود SQL / SQL Command:**
+```sql
+-- 1. تحديد تاريخ أحدث حركة لحساب العامل
+SELECT MAX(TRUNC(ENTRY_DATE)) as LATEST_DATE FROM JOURNAL_ENTRY_REC WHERE ACC_NO = :acc_no;
+
+-- 2. استعلام حركات كشف الحساب خلال الفترة المحددة
+SELECT ENTRY_NO, SUB_ENTRY_NO, TO_CHAR(ENTRY_DATE, 'DD/MM/YYYY') as ENTRY_DATE, ENTRY_TYPE_NAME, DETAILS, BALANCE_S, ENTRY_MNT, DEBIT, CREDIT, ACC_NO FROM JOURNAL_ENTRY_REC WHERE ACC_NO = :acc_no AND TRUNC(ENTRY_DATE) >= TO_DATE(:from_date, 'DD/MM/YYYY') AND TRUNC(ENTRY_DATE) <= TO_DATE(:to_date, 'DD/MM/YYYY') ORDER BY ENTRY_DATE ASC, ENTRY_NO ASC;
+
+-- 3. احتساب الرصيد الافتتاحي لما قبل الفترة
+SELECT COALESCE(SUM(NVL(DEBIT, 0)), 0) as TOTAL_DEBIT, COALESCE(SUM(NVL(CREDIT, 0)), 0) as TOTAL_CREDIT FROM JOURNAL_ENTRY_REC WHERE ACC_NO = :acc_no AND TRUNC(ENTRY_DATE) < TO_DATE(:from_date, 'DD/MM/YYYY');
+```
+
+

@@ -41,19 +41,21 @@ class CustomerController extends Controller
 
             // دعم البحث الشامل (بالرقم، بالاسم، برقم الهاتف 1 و 2، برقم الحساب)
             if (!empty($search)) {
-                $searchEncoded = ArabicEncoding::encodeForOracle($search);
-                $query->where(function ($q) use ($search, $searchEncoded) {
+                $oracleSearch = ArabicEncoding::toOracleSearchChars($search);
+                $query->where(function ($q) use ($search, $oracleSearch) {
                     if (is_numeric($search)) {
                         $q->where('CUST_NO', (int)$search)
                           ->orWhere('TEL1', 'LIKE', '%' . $search . '%')
                           ->orWhere('TEL2', 'LIKE', '%' . $search . '%')
                           ->orWhere('ACC_NO', (int)$search);
                     } else {
-                        $q->whereRaw("UPPER(CUST_NAME) LIKE UPPER(?)", ['%' . $search . '%'])
-                          ->orWhereRaw("UPPER(CUST_NAME) LIKE UPPER(?)", ['%' . $searchEncoded . '%'])
+                        $q->where('CUST_NAME', 'LIKE', '%' . $oracleSearch . '%')
+                          ->orWhere('CUST_NAME', 'LIKE', '%' . $search . '%')
                           ->orWhere('TEL1', 'LIKE', '%' . $search . '%')
                           ->orWhere('TEL2', 'LIKE', '%' . $search . '%')
-                          ->orWhereRaw("UPPER(ADDR) LIKE UPPER(?)", ['%' . $search . '%']);
+                          ->orWhere('ADDR', 'LIKE', '%' . $oracleSearch . '%')
+                          ->orWhere('ADDR', 'LIKE', '%' . $search . '%')
+                          ->orWhere('PRE_CUST_NAME', 'LIKE', '%' . $oracleSearch . '%');
                     }
                 });
             }

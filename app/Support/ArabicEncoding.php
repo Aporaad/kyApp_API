@@ -127,6 +127,30 @@ class ArabicEncoding
     }
 
     /**
+     * تحويل سلسلة البحث العربية UTF-8 إلى المحارف اللاتينية المطابقة لبايتات Windows-1256 في أوراكل
+     * Convert UTF-8 Arabic search query to matching Oracle CP1256 Latin-1 chars
+     */
+    public static function toOracleSearchChars(?string $str): ?string
+    {
+        if ($str === null || $str === '') {
+            return $str;
+        }
+
+        $res = '';
+        $cp1256Bytes = @iconv('UTF-8', 'Windows-1256//IGNORE', $str);
+        if ($cp1256Bytes !== false && $cp1256Bytes !== '') {
+            $len = strlen($cp1256Bytes);
+            for ($i = 0; $i < $len; $i++) {
+                $byte = ord($cp1256Bytes[$i]);
+                $res .= mb_chr($byte, 'UTF-8');
+            }
+            return $res;
+        }
+
+        return $str;
+    }
+
+    /**
      * معالجة كائن أو مصفوفة بيانات كاملة وإصلاح كل الحقول النصية
      */
     public static function cleanData($data)
@@ -149,3 +173,5 @@ class ArabicEncoding
         return $data;
     }
 }
+
+
