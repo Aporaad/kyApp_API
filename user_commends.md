@@ -78,3 +78,65 @@ Exited (1).
 
 اما كشف الحساب الخاص بهم فيوجد فيه اخطاء كثيره ومن ضمنها بطئ في جلب البيانات وايضا لايتم عرض جميع الاعمده بالواجهه وتكون الاحجام متجاويه مع الشاشه بل يتم عرضهن بجم ثابت ويحتاج تمرير جانبي لعرض كل الاعمده وانا لااريد ذالك 
 ```
+## [2026-09-13 18:21:22]
+- **النموذج المنفذ / AI Model:** Gemini 3.8 Flash (Medium)
+- **نص الأمر / Command:**
+```text
+ايش سبب المشكله بعدما غيرت اصدار قاعده البيانات من 10 الى 11
+
+@[TerminalName: php, ProcessId: 20136] 
+"""
+  Press Ctrl+C to stop the server
+
+  2026-09-13 18:19:00 /api/hello .............................................................................. ~ 9s   
+  2026-09-13 18:19:10 /api/hello ........................................................................ ~ 503.05ms   
+  2026-09-13 18:19:24 /api/auth/login ..................................................................... ~ 0.79ms   
+  2026-09-13 18:19:25 /api/auth/login ......................................................................... ~ 2s   
+PS C:\Users\Mujeeb\Desktop\arslan\accounts_api> php artisan serve --host=0.0.0.0 --port=8000
+PHP Warning:  PHP Startup: Unable to load dynamic library 'oci8_19' (tried: C:\xampp\php\ext\oci8_19 (The specified module could not be found), C:\xampp\php\ext\php_oci8_19.dll (The specified procedure could not be found)) in Unknown on line 0
+
+Warning: PHP Startup: Unable to load dynamic library 'oci8_19' (tried: C:\xampp\php\ext\oci8_19 (The specified module could not be found), C:\xampp\php\ext\php_oci8_19.dll (The specified procedure could not be found)) in Unknown on line 0  PHP Warning:  PHP Startup: Unable to load dynamic library 'oci8_19' (tried: C:\xampp\php\ext\oci8_19 (The specified module could not be found), C:\xampp\php\ext\php_oci8_19.dll (The specified procedure could not be found)) in Unknown on line 0
+
+   INFO  Server running on [http://0.0.0.0:8000].
+
+  Press Ctrl+C to stop the server
+
+"""
+```
+
+## [2026-09-13 19:49:10]
+- **النموذج المنفذ / AI Model:** Gemini 3.8 Flash (Medium)
+- **نص الأمر / Command:**
+```text
+ايش سبب مشكله عدم تسجيل الدخول الى البرنامج 
+"""
+ "message": "Error Code    : 1400\r\nError Message : ORA-01400: cannot insert NULL into (\"ACCOUNTS\".\"PERSONAL_ACCESS_TOKENS\".\"ID\")\r\nPosition      : 0\r\nStatement     : insert into \"PERSONAL_ACCESS_TOKENS\" (\"NAME\", \"TOKEN\", \"ABILITIES\", \"EXPIRES_AT\", \"TOKENABLE_ID\", \"TOKENABLE_TYPE\", \"UPDATED_AT\", \"CREATED_AT\") values (:p0, :p1, :p2, :p3, :p4, :p5, :p6, :p7) returning \"ID\" into :p8\r\nBindings      : [ky_app_employee,628fc48b4b00036c7e7540a886216e298fb054fd48e50e67ad3a3551c1828cd1,[\"*\"],,21,App\\Models\\User,2026-09-13 16:44:29,2026-09-13 16:44:29,0]\r\n",
+    "exception": "Yajra\\Pdo\\Oci8\\Exceptions\\Oci8Exception",
+    "file": "C:\\Users\\Mujeeb\\Desktop\\arslan\\accounts_api\\vendor\\yajra\\laravel-pdo-via-oci8\\src\\Pdo\\Oci8\\Statement.php",
+    "line": 798,
+""
+وفي الكونسول 
+"""
+*** Request ***
+uri: http://192.168.0.11:8000/api/auth/login
+method: POST
+responseType: ResponseType.json
+followRedirects: true
+persistentConnection: true
+connectTimeout: 0:00:15.000000
+sendTimeout: null
+receiveTimeout: 0:00:15.000000
+transformTimeout: null
+receiveDataWhenStatusError: true
+extra: {}
+data:
+{username: arslan, password: 1254, user_type: employee}
+
+[🔔 Dio] This request is not a CORS "simple request" and will trigger a preflight (OPTIONS) request: the Content-Type "application/json" is not a CORS-safelisted value (application/x-www-form-urlencoded, multipart/form-data, text/plain). If the server does not handle CORS preflight, the request will fail. See https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS#simple_requests
+...
+DioException [bad response]: This exception was thrown because the response has a status code of 500 and RequestOptions.validateStatus was configured to throw for this status code.
+...
+ORA-01400: cannot insert NULL into ("ACCOUNTS"."PERSONAL_ACCESS_TOKENS"."ID")
+"""
+@mcp:oracledb:
+```

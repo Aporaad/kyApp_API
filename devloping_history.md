@@ -35,4 +35,27 @@
     - حل مشكلة `RenderFlex overflowed by 12 pixels` في شريط عنوان التطبيق `EmployeeMainLayout`.
     - إضافة ورقة خيارات الطباعة والتصدير (PDF / Excel / طباعة مباشرة).
 
+## [2026-09-13 18:21:22]
+- **المهمة / Task:** تشخيص سبب تحذير PHP Startup الخاص بمكتبة `php_oci8_19.dll` بعد تثبيت أوراكل 11g.
+- **التشخيص الفني والحلول / Technical Diagnosis & Fix:**
+  - عند تثبيت Oracle Database 11g تم إدراج مساره `D:\app\Mujeeb\product\11.0.2\bin` في مقدمة متغير البيئة `PATH` في النظام.
+  - ملف `php.ini` مفعل فيه ملحق `extension=oci8_19` (المخصص للربط عبر Oracle Instant Client 19c).
+  - عند تشغيل PHP يبحث النظام بالترتيب عن ملف `oci.dll` فيجد ملف Oracle 11g أولاً بدلاً من `C:\instantclient_19_32`، ونظراً لاختلاف الدوال بين الإصدارين يظهر خطأ `The specified procedure could not be found`.
+  - الحل الجذري هو تقديم مسار `C:\instantclient_19_32` في أول الـ PATH قبل مسار Oracle 11g ليعمل PHP مع قواعد 11g بسلاسة تامة.
+
+## [2026-09-13 20:00:24]
+- **المهمة / Task:** تشخيص وحل مشكلة فشل تسجيل الدخول في التطبيق وظهور خطأ `ORA-01400: cannot insert NULL into ("ACCOUNTS"."PERSONAL_ACCESS_TOKENS"."ID")`.
+- **التشخيص الفني والحلول / Technical Diagnosis & Fix:**
+  - **السبب الفني:**
+    - عند قيام المستخدم بتسجيل الدخول، يقوم `AuthController` باستدعاء مكتبة Laravel Sanctum لإنشاء رمز وصول للمستخدم عبر `$user->createToken('ky_app_employee')`.
+    - مكتبة Sanctum تقوم بتنفيذ استعلام `INSERT` في جدول `PERSONAL_ACCESS_TOKENS` دون تحديد قيمة العمود `ID` وتعتمد على خاصية التوليد التلقائي (Auto-Increment / Identity Column).
+    - في إصدارات أوراكل القديمة (مثل Oracle 11g)، لا تتوفر أعمدة الهوية التلقائية (`GENERATED AS IDENTITY`) المتوفرة في 12c فما فوق، بل يعتمد محرك أوراكل على زوج من (Sequence + Trigger).
+    - كان الجدول يحتوي على المتتالية `PERSONAL_ACCESS_TOKENS_ID_SEQ` ولكن مشغل الإدراج التلقائي `PERSONAL_ACCESS_TOKENS_ID_TRG` كان مفقوداً، مما تسبب في إرسال `NULL` لحقل `ID` الإلزامي ورمي الاستثناء `ORA-01400` ومن ثم رد السيرفر بخطأ 500.
+  - **الحل الجذري:**
+    - تم إنشاء الـ Trigger تلقائياً `PERSONAL_ACCESS_TOKENS_ID_TRG` لملء عمود `ID` من المتتالية `PERSONAL_ACCESS_TOKENS_ID_SEQ.NEXTVAL` عند الإدراج.
+    - تم إنشاء التريجرات التلقائية لبقية جداول Laravel ذات المتتاليات المشابهة (`MIGRATIONS`, `JOBS`, `FAILED_JOBS`).
+    - تم اختبار نقطة النهاية `/api/auth/login` والتأكد من تسجيل الدخول بنجاح وإرجاع التوكن بنجاح تام (Status 200).
+
+
+
 

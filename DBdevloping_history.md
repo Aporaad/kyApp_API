@@ -13,3 +13,10 @@
   - تطبيق دالة `TO_DATE(..., 'DD/MM/YYYY')` مع `TRUNC(ENTRY_DATE)` لضمان مطابقة التاريخ الزمني بدقة متناهية.
   - احتساب أحدث تاريخ حركة `MAX(TRUNC(ENTRY_DATE))` لتحديد أول 30 يوماً افتراضياً تلقائياً، واستخراج مجموع المدين والدائن لما قبل الفترة لتحديد الرصيد الافتتاحي بدقة.
 
+## [2026-09-13 20:00:24]
+- **العملية / Operation:** إنشاء مشغلات تلقائية (Triggers) على جداول Laravel لمعالجة المفاتيح التلقائية (Auto-Increment) في Oracle 11g.
+- **التفاصيل / Details:**
+  - تم تشخيص سبب خطأ تسجيل الدخول `ORA-01400: cannot insert NULL into ("ACCOUNTS"."PERSONAL_ACCESS_TOKENS"."ID")` بأن قاعدة بيانات Oracle 11g لا تدعم أعمدة الهوية الافتراضية (Identity Columns) وتعتمد على Sequences و Triggers.
+  - تم العثور على المتتالية `PERSONAL_ACCESS_TOKENS_ID_SEQ` مع غياب المشغل المقابل لها.
+  - تم إنشاء المشغل `PERSONAL_ACCESS_TOKENS_ID_TRG` لتعيين قيمة المفتاح الأساسي `ID` تلقائياً من `PERSONAL_ACCESS_TOKENS_ID_SEQ.NEXTVAL` عند إدراج التوكن إذا كان فارغاً.
+  - تم إنشاء مشغلات مماثلة للجداول التابعة لمكتبات Laravel (`MIGRATIONS_ID_TRG`، `JOBS_ID_TRG`، `FAILED_JOBS_ID_TRG`) لضمان عدم تكرار المشكلة في مهام النظام الأخرى.

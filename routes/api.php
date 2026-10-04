@@ -1,6 +1,8 @@
 <?php
 
+use App\Http\Controllers\AccountController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\CurrencyController;
 use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\TableQueryController;
@@ -71,3 +73,38 @@ Route::delete('/workers/tailors/{id}',            [WorkerController::class, 'des
 Route::patch('/workers/tailors/{id}/toggle',      [WorkerController::class, 'toggleTailor'])->where('id', '[0-9]+');
 Route::get('/workers/tailors/{id}/statement',     [WorkerController::class, 'statementTailor'])->where('id', '[0-9]+');
 
+// ============================================================
+// مسارات الحسابات - Accounts Management Routes
+// ============================================================
+
+// هيكل الشجرة المحاسبية
+Route::get('/accounts/account',                    [AccountController::class, 'getAccounts']);
+Route::get('/accounts/main',                       [AccountController::class, 'getAccMain']);
+Route::get('/accounts/sub',                        [AccountController::class, 'getAccSub']);
+Route::get('/accounts/sub-group',                  [AccountController::class, 'getAccSubGroup']);
+Route::get('/accounts/tree',                       [AccountController::class, 'getAccountTree']);
+
+// الحسابات المالية (CHART_ACC)
+Route::get('/accounts/chart',                      [AccountController::class, 'getChartAccounts']);
+Route::post('/accounts/chart',                     [AccountController::class, 'createChartAccount']);
+Route::put('/accounts/chart/{accNo}',              [AccountController::class, 'updateChartAccount'])->where('accNo', '[0-9]+');
+
+// مجموعات الحسابات الجزئي
+Route::post('/accounts/sub-group',                 [AccountController::class, 'createSubGroup']);
+Route::put('/accounts/sub-group/{groupId}',        [AccountController::class, 'updateSubGroup'])->where('groupId', '[0-9]+');
+
+// كشوفات الحسابات
+Route::get('/accounts/chart/{accNo}/statement',    [AccountController::class, 'getAccountStatement'])->where('accNo', '[0-9]+');
+Route::get('/accounts/statement-detail',           [AccountController::class, 'getDetailedStatement']);
+
+// ============================================================
+// مسارات العملات وأسعار الصرف - Currency Routes
+// ============================================================
+Route::get('/currencies',                          [CurrencyController::class, 'index']);
+Route::post('/currencies',                         [CurrencyController::class, 'store']);
+Route::put('/currencies/{curNo}',                  [CurrencyController::class, 'update'])->where('curNo', '[0-9]+');
+Route::delete('/currencies/{curNo}',               [CurrencyController::class, 'destroy'])->where('curNo', '[0-9]+');
+Route::get('/currencies/{curNo}/prices',           [CurrencyController::class, 'getPrices'])->where('curNo', '[0-9]+');
+Route::post('/currencies/{curNo}/prices',          [CurrencyController::class, 'addPrice'])->where('curNo', '[0-9]+');
+Route::put('/currencies/{curNo}/prices/{seq}',     [CurrencyController::class, 'updatePrice'])->where('curNo', '[0-9]+')->where('seq', '[0-9]+');
+Route::delete('/currencies/{curNo}/prices/{seq}',  [CurrencyController::class, 'deletePrice'])->where('curNo', '[0-9]+')->where('seq', '[0-9]+');
