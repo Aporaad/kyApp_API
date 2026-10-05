@@ -23,7 +23,7 @@ class User extends Authenticatable
      *
      * @var string
      */
-    protected $table = 'NEW_USERS';
+    protected $table = 'APP_USERS';
 
     /**
      * The primary key associated with the table.
@@ -65,6 +65,13 @@ class User extends Authenticatable
         'CASH_ACC_NO',
         'USER_TYPE',
         'ALLOW_BANK_ACC',
+        // حقول المقاييس الحيوية
+        'DEVICE_TOKEN',
+        'DEVICE_NAME',
+        'PLATFORM',
+        'BIOMETRIC_ENABLED',
+        'BIOMETRIC_REGISTERED_AT',
+        'BIOMETRIC_LAST_USED',
     ];
 
     /**
@@ -76,6 +83,8 @@ class User extends Authenticatable
         'USER_PASSWORD',
         'user_password',
         'remember_token',
+        'DEVICE_TOKEN',
+        'device_token',
     ];
 
     /**

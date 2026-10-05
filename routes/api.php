@@ -14,12 +14,19 @@ use Illuminate\Support\Facades\Route;
 // Authentication & Login routes
 Route::post('/auth/login', [AuthController::class, 'login']);
 
+// مسار تسجيل الدخول بالبصمة (عام — بدون توكن)
+Route::post('/auth/biometric/login', [AuthController::class, 'biometricLogin']);
+
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/auth/logout', [AuthController::class, 'logout']);
     Route::get('/auth/me', [AuthController::class, 'me']);
     Route::get('/user', function (Request $request) {
         return $request->user();
     });
+
+    // مسارات البصمة المحمية بالتوكن
+    Route::post('/auth/biometric/register', [AuthController::class, 'registerBiometric']);
+    Route::delete('/auth/biometric/revoke', [AuthController::class, 'revokeBiometric']);
 });
 
 Route::get('/hello', function () {

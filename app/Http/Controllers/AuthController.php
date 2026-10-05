@@ -143,8 +143,6 @@ class AuthController extends Controller
      */
     public function logout(Request $request): JsonResponse
     {
-        // حذف التوكن الحالي المستخدم في الطلب
-        // Delete the current access token used for this request
         if ($request->user() && $request->user()->currentAccessToken()) {
             $request->user()->currentAccessToken()->delete();
         }
@@ -154,4 +152,155 @@ class AuthController extends Controller
             'message' => 'تم تسجيل الخروج بنجاح / Logged out successfully.',
         ]);
     }
+
+    /**
+     * تسجيل جهاز المستخدم للمصادقة البيومترية
+     * Register device for biometric authentication
+     */
+    public function registerBiometric(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'device_token' => ['required', 'string', 'max:512'],
+            'device_name'  => ['required', 'string', 'max:200'],
+            'platform'     => ['required', 'string', 'in:android,ios'],
+        ], [
+            'device_token.required' => 'معرّف الجهاز مطلوب.',
+            'device_name.required'  => 'اسم الجهاز مطلوب.',
+            'platform.required'     => 'المنصة مطلوبة (android أو ios).',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'بيانات غير مكتملة.',
+                'errors'  => $validator->errors(),
+            ], 422);
+        }
+
+        $user = $request->user();
+
+        // التحقق من عدم استخدام نفس الـ device_token من قِبل مستخدم آخر
+        $existingUser = \App\Models\User::query()
+            ->whereRaw('DEVICE_TOKEN = ?', [$request->input('device_token')])
+            ->where('user_id', '!=', $user->user_id ?? $user->USER_ID)
+            ->first();
+
+        if ($existingUser) {
+            return response()->json([
+                'success' => false,
+                'message' => 'هذا الجهاز مسجّل لمستخدم آخر، يرجى التواصل مع الإدارة.',
+            ], 409);
+        }
+
+        // حفظ بيانات البصمة في APP_USERS
+        \App\Models\User::where('user_id', $user->user_id ?? $user->USER_ID)
+            ->update([
+                'DEVICE_TOKEN'          => $request->input('device_token'),
+                'DEVICE_NAME'           => $request->input('device_name'),
+                'PLATFORM'              => $request->input('platform'),
+                'BIOMETRIC_ENABLED'     => 1,
+                'BIOMETRIC_REGISTERED_AT' => now(),
+            ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'تم تسجيل البصمة بنجاح / Biometric registered successfully.',
+        ]);
+    }
+
+    /**
+     * تسجيل الدخول باستخدام المقاييس الحيوية
+     * Login using biometric authentication
+     */
+    public function biometricLogin(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'user_id'      => ['required'],
+            'device_token' => ['required', 'string', 'max:512'],
+        ], [
+            'user_id.required'      => 'معرّف المستخدم مطلوب.',
+            'device_token.required' => 'معرّف الجهاز مطلوب.',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'بيانات غير مكتملة.',
+                'errors'  => $validator->errors(),
+            ], 422);
+        }
+
+        $userId      = (int) $request->input('user_id');
+        $deviceToken = (string) $request->input('device_token');
+
+        // البحث عن المستخدم بالـ user_id والـ device_token
+        $user = \App\Models\User::query()
+            ->where('user_id', $userId)
+            ->whereRaw('DEVICE_TOKEN = ?', [$deviceToken])
+            ->where('biometric_enabled', 1)
+            ->first();
+
+        if (! $user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'فشل التحقق، يرجى إعادة تفعيل البصمة من الإعدادات.',
+            ], 401);
+        }
+
+        // التحقق من حالة تفعيل الحساب
+        $isActivated = (int) ($user->is_activated ?? $user->IS_ACTIVATED ?? 0);
+        if ($isActivated !== 1) {
+            return response()->json([
+                'success' => false,
+                'message' => 'هذا الحساب معطل، يرجى مراجعة إدارة النظام.',
+            ], 403);
+        }
+
+        // تحديث تاريخ آخر استخدام للبصمة
+        \App\Models\User::where('user_id', $userId)
+            ->update(['BIOMETRIC_LAST_USED' => now()]);
+
+        // إصدار توكن جديد
+        $token = $user->createToken('ky_biometric_login')->plainTextToken;
+
+        return response()->json([
+            'success' => true,
+            'message' => 'تم تسجيل الدخول بالبصمة بنجاح / Biometric login successful.',
+            'token'   => $token,
+            'user'    => [
+                'id'        => $user->user_id ?? $user->USER_ID ?? $user->getKey(),
+                'user_no'   => $user->user_no ?? $user->USER_NO,
+                'username'  => $user->user_name_en ?? $user->USER_NAME_EN ?? $user->user_name ?? $user->USER_NAME,
+                'name_ar'   => $user->user_name_ar ?? $user->USER_NAME_AR,
+                'name_en'   => $user->user_name_en ?? $user->USER_NAME_EN,
+                'user_type' => $user->user_type ?? $user->USER_TYPE,
+                'branch_no' => $user->branch_no ?? $user->BRANCH_NO,
+                'biometric_enabled' => true,
+            ],
+        ], 200);
+    }
+
+    /**
+     * إلغاء تسجيل البصمة للجهاز الحالي
+     * Revoke biometric registration for current device
+     */
+    public function revokeBiometric(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        \App\Models\User::where('user_id', $user->user_id ?? $user->USER_ID)
+            ->update([
+                'DEVICE_TOKEN'            => null,
+                'DEVICE_NAME'             => null,
+                'PLATFORM'                => null,
+                'BIOMETRIC_ENABLED'       => 0,
+                'BIOMETRIC_REGISTERED_AT' => null,
+            ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'تم إلغاء تسجيل البصمة بنجاح / Biometric revoked successfully.',
+        ]);
+    }
 }
+
