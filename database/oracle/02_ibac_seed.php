@@ -23,9 +23,11 @@
  *    Bound statements only — never string interpolation.
  */
 
+use App\Support\AppConfig;
 use App\Support\ArabicEncoding;
 use App\Support\PermissionCatalog;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 
 $oracle = DB::connection('oracle');
 
@@ -206,6 +208,155 @@ $settings = [
         'max' => null,
         'lockable' => 0,
         'sort' => 100,
+    ],
+
+    // ---------------------------------------------------------------------
+    // تهيئة التطبيق: هوية الشركة والمظهر وكلمة سر إعدادات اتصال API
+    // Application configuration: company identity, theming, and the API-settings password.
+    //
+    // القيم الافتراضية مرجعها `AppConfig::DEFAULTS` حتى لا يتباعد البذر عن احتياطي الكود، والنصوص
+    // العربية تُمرَّر عبر `toOracleSearchChars()` لأنها تُكتب خام في عمود القيمة (لا يصلحها المغلق).
+    // Defaults reference AppConfig::DEFAULTS so the seed never drifts from the code fallback, and
+    // Arabic text passes through toOracleSearchChars() because the value column is written raw.
+    //
+    // ⚠️ `api_settings_password` يُبذر كمجزّأة bcrypt للكلمة الافتراضية ولا يُخزَّن نصاً صريحاً أبداً؛
+    // وعلى المشغّل تغييرها من التطبيق بعد أول دخول. المفتاح مقفل (IS_LOCKABLE=1) فلا يُعدَّل إلا
+    // من `PUT /app-config/api-password` خلف `permission:app_config.api_manage`.
+    // api_settings_password is seeded as a bcrypt digest of the default password, never plaintext;
+    // the operator should change it in-app after first login. It is locked, editable only via
+    // PUT /app-config/api-password behind permission:app_config.api_manage.
+    // ---------------------------------------------------------------------
+    [
+        'key' => AppConfig::COMPANY_NAME,
+        'value' => ArabicEncoding::toOracleSearchChars(AppConfig::DEFAULTS[AppConfig::COMPANY_NAME]),
+        'type' => 'string',
+        'name_ar' => 'اسم الشركة',
+        'desc_ar' => 'اسم الشركة الظاهر في التطبيق وشاشة الدخول والتقارير',
+        'min' => null,
+        'max' => null,
+        'lockable' => 0,
+        'sort' => 110,
+    ],
+    [
+        'key' => AppConfig::COMPANY_ADDRESS,
+        'value' => AppConfig::DEFAULTS[AppConfig::COMPANY_ADDRESS],
+        'type' => 'string',
+        'name_ar' => 'عنوان الشركة',
+        'desc_ar' => 'العنوان الرسمي للشركة',
+        'min' => null,
+        'max' => null,
+        'lockable' => 0,
+        'sort' => 120,
+    ],
+    [
+        'key' => AppConfig::COMPANY_WEBSITE,
+        'value' => AppConfig::DEFAULTS[AppConfig::COMPANY_WEBSITE],
+        'type' => 'string',
+        'name_ar' => 'الموقع الإلكتروني للشركة',
+        'desc_ar' => 'رابط الموقع الرسمي للشركة',
+        'min' => null,
+        'max' => null,
+        'lockable' => 0,
+        'sort' => 130,
+    ],
+    [
+        'key' => AppConfig::COMPANY_PHONE,
+        'value' => AppConfig::DEFAULTS[AppConfig::COMPANY_PHONE],
+        'type' => 'string',
+        'name_ar' => 'هاتف الشركة',
+        'desc_ar' => 'رقم هاتف التواصل مع الشركة',
+        'min' => null,
+        'max' => null,
+        'lockable' => 0,
+        'sort' => 140,
+    ],
+    [
+        'key' => AppConfig::APP_NAME,
+        'value' => ArabicEncoding::toOracleSearchChars(AppConfig::DEFAULTS[AppConfig::APP_NAME]),
+        'type' => 'string',
+        'name_ar' => 'اسم التطبيق',
+        'desc_ar' => 'الاسم الظاهر في عنوان التطبيق',
+        'min' => null,
+        'max' => null,
+        'lockable' => 0,
+        'sort' => 150,
+    ],
+    [
+        'key' => AppConfig::THEME_PRIMARY_COLOR,
+        'value' => AppConfig::DEFAULTS[AppConfig::THEME_PRIMARY_COLOR],
+        'type' => 'string',
+        'name_ar' => 'اللون الأساسي',
+        'desc_ar' => 'اللون الأساسي لهوية التطبيق بصيغة #RRGGBB',
+        'min' => null,
+        'max' => null,
+        'lockable' => 0,
+        'sort' => 160,
+    ],
+    [
+        'key' => AppConfig::THEME_SECONDARY_COLOR,
+        'value' => AppConfig::DEFAULTS[AppConfig::THEME_SECONDARY_COLOR],
+        'type' => 'string',
+        'name_ar' => 'اللون الثانوي',
+        'desc_ar' => 'اللون الثانوي لهوية التطبيق بصيغة #RRGGBB',
+        'min' => null,
+        'max' => null,
+        'lockable' => 0,
+        'sort' => 170,
+    ],
+    [
+        'key' => AppConfig::THEME_BACKGROUND_COLOR,
+        'value' => AppConfig::DEFAULTS[AppConfig::THEME_BACKGROUND_COLOR],
+        'type' => 'string',
+        'name_ar' => 'لون الخلفية',
+        'desc_ar' => 'لون خلفية الشاشات بصيغة #RRGGBB',
+        'min' => null,
+        'max' => null,
+        'lockable' => 0,
+        'sort' => 180,
+    ],
+    [
+        'key' => AppConfig::THEME_TEXT_PRIMARY_COLOR,
+        'value' => AppConfig::DEFAULTS[AppConfig::THEME_TEXT_PRIMARY_COLOR],
+        'type' => 'string',
+        'name_ar' => 'لون الخط الرئيسي',
+        'desc_ar' => 'لون العناوين والنصوص الرئيسية بصيغة #RRGGBB',
+        'min' => null,
+        'max' => null,
+        'lockable' => 0,
+        'sort' => 190,
+    ],
+    [
+        'key' => AppConfig::THEME_TEXT_SECONDARY_COLOR,
+        'value' => AppConfig::DEFAULTS[AppConfig::THEME_TEXT_SECONDARY_COLOR],
+        'type' => 'string',
+        'name_ar' => 'لون الخط العادي',
+        'desc_ar' => 'لون النصوص الثانوية بصيغة #RRGGBB',
+        'min' => null,
+        'max' => null,
+        'lockable' => 0,
+        'sort' => 200,
+    ],
+    [
+        'key' => AppConfig::THEME_FONT_FAMILY,
+        'value' => AppConfig::DEFAULTS[AppConfig::THEME_FONT_FAMILY],
+        'type' => 'string',
+        'name_ar' => 'خط التطبيق',
+        'desc_ar' => 'عائلة الخط المستخدمة في التطبيق ضمن القائمة المسموحة',
+        'min' => null,
+        'max' => null,
+        'lockable' => 0,
+        'sort' => 210,
+    ],
+    [
+        'key' => AppConfig::API_SETTINGS_PASSWORD,
+        'value' => Hash::make('A1.b2.c3.d4'),
+        'type' => 'string',
+        'name_ar' => 'كلمة سر إعدادات اتصال API',
+        'desc_ar' => 'كلمة سر ثابتة لفتح إعدادات اتصال الخادم (مجزّأة bcrypt ومقفلة)',
+        'min' => null,
+        'max' => null,
+        'lockable' => 1,
+        'sort' => 220,
     ],
 ];
 

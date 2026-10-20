@@ -219,6 +219,16 @@ final class PermissionCatalog
             ],
             'extra' => ['security_manage' => 'إدارة الإعدادات الحساسة للمستخدمين والجلسات'],
         ],
+        // إعدادات التطبيق: هوية الشركة والمظهر وإعدادات اتصال API
+        // Application configuration: company identity, theming, and API connection settings.
+        'app_config' => [
+            'name_ar' => 'إعدادات التطبيق',
+            'core' => [
+                'view' => 'عرض إعدادات التطبيق',
+                'update' => 'تعديل معلومات الشركة والمظهر',
+            ],
+            'extra' => ['api_manage' => 'إدارة إعدادات اتصال API'],
+        ],
         'system' => [
             'name_ar' => 'النظام',
             'core' => [],
@@ -358,6 +368,7 @@ final class PermissionCatalog
             'admin_flag_manage' => 'Manage admin flag',
             'terminate' => 'Terminate session',
             'security_manage' => 'Manage security settings',
+            'api_manage' => 'Manage API connection settings',
         ];
 
         return ($labels[$actionCode] ?? ucfirst($actionCode)).' — '.ucfirst($moduleCode);

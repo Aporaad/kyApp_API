@@ -44,9 +44,11 @@ function sealedUngrantedUser(): User
 }
 
 test('no business route is public any more', function () {
-    // القائمة صارت عقداً: ما عدا الدخولَين وفحص الاتصال، كل مسار أعمال يتطلب جلسة
-    // The public surface is now a contract: apart from the two sign-in verbs and the connectivity
-    // probe, every business route demands a session.
+    // القائمة صارت عقداً: ما عدا الدخولَين وفحص الاتصال ونقطتَي تهيئة التطبيق العامتين (قراءة
+    // الحمولة بلا سر، وتحقق كلمة سر API مقيّد المعدل)، كل مسار أعمال يتطلب جلسة.
+    // The public surface is a contract: apart from the two sign-in verbs, the connectivity probe, and
+    // the two public app-config routes (the secret-free payload read and the rate-limited API-password
+    // verify), every business route demands a session.
     $public = [];
 
     foreach (Route::getRoutes() as $route) {
@@ -64,7 +66,13 @@ test('no business route is public any more', function () {
     $found = array_values(array_unique($public));
     sort($found);
 
-    $allowed = ['api/auth/biometric/login', 'api/auth/login', 'api/hello'];
+    $allowed = [
+        'api/app-config',
+        'api/app-config/verify-api-password',
+        'api/auth/biometric/login',
+        'api/auth/login',
+        'api/hello',
+    ];
 
     expect($found)->toBe($allowed);
 });

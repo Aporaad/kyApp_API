@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AccountController;
+use App\Http\Controllers\AppConfigController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CurrencyController;
 use App\Http\Controllers\CustomerController;
@@ -20,6 +21,19 @@ Route::post('/auth/login', [AuthController::class, 'login']);
 
 // مسار تسجيل الدخول بالبصمة (عام — بدون توكن)
 Route::post('/auth/biometric/login', [AuthController::class, 'biometricLogin']);
+
+// ============================================================
+// تهيئة التطبيق العامة — تُقرأ قبل المصادقة لرسم شاشة الدخول بالهوية الصحيحة
+// Public application configuration — read before auth to paint the login screen correctly.
+//
+// `GET /app-config` حمولة بلا سر (تستثني كلمة سر API)، و`verify-api-password` عامة ومقيّدة المعدل
+// لأن شاشة الدخول قد تحتاج فتح إعدادات API بينما الرابط الحالي خاطئ (بلا توكن بعد).
+// GET /app-config is a secret-free payload; verify-api-password is public and rate-limited because
+// the login screen may need to unlock the API settings while the current URL is wrong (no token yet).
+// ============================================================
+Route::get('/app-config', [AppConfigController::class, 'publicConfig']);
+Route::post('/app-config/verify-api-password', [AppConfigController::class, 'verifyApiPassword'])
+    ->middleware('throttle:5,1');
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/auth/logout', [AuthController::class, 'logout']);
@@ -113,6 +127,22 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::put('/settings', [SettingController::class, 'update'])
         ->middleware('permission:settings.update');
+});
+
+// ============================================================
+// كتابة تهيئة التطبيق وكلمة سر إعدادات API (خلف auth + permission)
+// Writing app configuration and the API-settings password (behind auth + permission).
+//
+// العلامة التجارية خلف `app_config.update`، وكلمة سر API المقفلة خلف `app_config.api_manage` الأرفع:
+// من يعدّل الألوان لا يملك بالضرورة تغيير كلمة سر اتصال الخادم.
+// Branding sits behind app_config.update; the locked API password behind the higher app_config.api_manage:
+// whoever edits the colors does not necessarily hold the power to change the server-connection password.
+// ============================================================
+Route::middleware('auth:sanctum')->group(function () {
+    Route::put('/app-config', [AppConfigController::class, 'update'])
+        ->middleware('permission:app_config.update');
+    Route::put('/app-config/api-password', [AppConfigController::class, 'updateApiPassword'])
+        ->middleware('permission:app_config.api_manage');
 });
 
 Route::get('/hello', function () {

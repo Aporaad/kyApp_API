@@ -61,6 +61,34 @@ class SettingsStore
     ];
 
     /**
+     * المفاتيح «الساخنة» التي يقرؤها مسار الطلبات (سياسة الجلسة وتفعيل البصمة)
+     * The "hot" keys read on the request path (session policy + the biometric kill-switch).
+     *
+     * لماذا قائمة صريحة؟ تهيئة التطبيق (`company_*` و`theme_*`) أُضيفت إلى الجدول نفسه، ونصوصها
+     * (كالعنوان) قد تدفع حمولة الكاش فوق سقف `ORA-01461`. بحصر الكاش في المفاتيح الساخنة تبقى
+     * نسخة سياسة الجلسة صغيرة ومستقرة مهما زاد نص العلامة التجارية، وتُقرأ بقية المفاتيح من
+     * القاعدة مباشرة في المسارات النادرة (الإقلاع/الإدارة).
+     * Why an explicit list: app-config keys (company_* and theme_*) share the same table, and their
+     * (an address, say) can push the cached blob past the ORA-01461 bound. Caching only the hot keys
+     * keeps the session policy's copy small and stable no matter how much branding text is added;
+     * the rest are read straight from Oracle on rare paths (startup/admin).
+     *
+     * @var list<string>
+     */
+    private const HOT_KEYS = [
+        'session_idle_minutes',
+        'session_absolute_days',
+        'session_touch_threshold_minutes',
+        'single_active_session_per_device',
+        'password_min_length',
+        'max_failed_logins',
+        'lockout_minutes',
+        'biometric_login_enabled',
+        'activity_log_retention_days',
+        'maintenance_message',
+    ];
+
+    /**
      * الاستعلام المرجعي لكل الإعدادات بترتيب العرض
      * Canonical query for all settings in display order
      */
@@ -79,6 +107,28 @@ class SettingsStore
      */
     public function all(): array
     {
+        $slim = [];
+
+        foreach ($this->fetch() as $key => $setting) {
+            $slim[$key] = $this->slim($setting);
+        }
+
+        return $slim;
+    }
+
+    /**
+     * الإعدادات الساخنة فقط (المقروءة في مسار الطلبات) مع نسخة كاش قصيرة
+     * Only the hot settings (read on the request path), with a short-lived cache.
+     *
+     * حجم هذه الحمولة محصور بعدد المفاتيح الساخنة وقيمها الرقمية/القصيرة، فلا يقترب من سقف
+     * `ORA-01461` مهما أُضيفت إعدادات تهيئة طويلة.
+     * This payload is bounded by the hot keys and their short/numeric values, so it never approaches
+     * the ORA-01461 ceiling however many long branding settings are added.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    public function hot(): array
+    {
         $cached = Cache::get(self::CACHE_KEY);
 
         if (is_array($cached)) {
@@ -88,11 +138,13 @@ class SettingsStore
         $slim = [];
 
         foreach ($this->fetch() as $key => $setting) {
-            $slim[$key] = array_intersect_key($setting, array_flip(self::CACHED_FIELDS));
+            if (! in_array($key, self::HOT_KEYS, true)) {
+                continue;
+            }
+
+            $slim[$key] = $this->slim($setting);
         }
 
-        // الحجم غير متوقع (مئات الإعدادات مستقبلاً) ⇒ بلا كاش ولا خطأ: نقرأ من القاعدة كل مرة
-        // If the blob outgrows the safe bound, skip the cache rather than break every request.
         if (strlen(serialize($slim)) <= self::MAX_CACHE_BYTES) {
             Cache::put(self::CACHE_KEY, $slim, self::CACHE_TTL);
         }
@@ -101,12 +153,60 @@ class SettingsStore
     }
 
     /**
+     * نسخة مصغّرة لصف إعداد تقتصر على حقول الكاش
+     * Slim a setting row down to the cached fields
+     *
+     * @param  array<string, mixed>  $setting
+     * @return array<string, mixed>
+     */
+    private function slim(array $setting): array
+    {
+        return array_intersect_key($setting, array_flip(self::CACHED_FIELDS));
+    }
+
+    /**
+     * قراءة صف إعداد واحد غير ساخن مباشرة من القاعدة (بلا كاش)
+     * Read a single non-hot setting straight from Oracle (uncached)
+     *
+     * @return array<string, mixed>|null
+     */
+    private function fetchOne(string $key): ?array
+    {
+        $rows = DB::connection('oracle')->select(
+            'SELECT SETTING_ID, SETTING_KEY, SETTING_VALUE, VALUE_TYPE, MIN_VALUE, MAX_VALUE,
+                    IS_LOCKABLE, SORT_ORDER
+               FROM ACCOUNTS.APP_SETTINGS
+              WHERE SETTING_KEY = :setting_key',
+            ['setting_key' => $key]
+        );
+
+        if ($rows === []) {
+            return null;
+        }
+
+        $row = $this->lowercaseKeys((array) $rows[0]);
+
+        return $this->slim([
+            'setting_id' => (int) ($row['setting_id'] ?? 0),
+            'key' => (string) ($row['setting_key'] ?? $key),
+            'value' => $row['setting_value'] ?? '',
+            'value_type' => (string) ($row['value_type'] ?? 'string'),
+            'min_value' => isset($row['min_value']) ? (int) $row['min_value'] : null,
+            'max_value' => isset($row['max_value']) ? (int) $row['max_value'] : null,
+            'lockable' => (int) ($row['is_lockable'] ?? 0),
+            'sort_order' => (int) ($row['sort_order'] ?? 0),
+        ]);
+    }
+
+    /**
      * قيمة الإعداد بعد تحويله إلى نوعه المعلن (int|bool|string|json)
      * The setting value cast to its declared type (int|bool|string|json)
      */
     public function get(string $key, mixed $default = null): mixed
     {
-        $setting = $this->all()[$key] ?? null;
+        // الساخنة من الكاش، وغيرها قراءة مباشرة نادرة (الإقلاع/الإدارة)
+        // Hot keys come from the cache; the rest are a rare direct read (startup/admin).
+        $setting = $this->hot()[$key] ?? $this->fetchOne($key);
 
         if ($setting === null) {
             return $default;
@@ -139,6 +239,30 @@ class SettingsStore
         }
 
         return in_array((string) $value, ['1', 'true', 'yes'], true);
+    }
+
+    /**
+     * القيمة الخام لإعداد كما هي مخزّنة (بلا تحويل نوع ولا إصلاح عربية)
+     * The raw stored value of a setting — no type cast, no mojibake repair.
+     *
+     * تُستخدم لقراءة تجزئة كلمة سر إعدادات API: تجزئة bcrypt نص ASCII صرف يجب أن يُقرأ حرفياً،
+     * وتمريره عبر `fixMojibake` خطر لا داعي له لأنه قد يمسّ تسلسلاً يبدو كعربية مشوّهة.
+     * Used for the API-settings password hash: a bcrypt digest is pure ASCII and must be read
+     * verbatim, so running fixMojibake over it is an unnecessary risk.
+     */
+    public function raw(string $key, ?string $default = null): ?string
+    {
+        // الساخنة من الكاش، وغيرها قراءة مباشرة نادرة — نفس مسار `get()` بلا التحويل النهائي
+        // Hot keys from the cache, the rest a rare direct read — same path as get(), minus the cast.
+        $setting = $this->hot()[$key] ?? $this->fetchOne($key);
+
+        if ($setting === null) {
+            return $default;
+        }
+
+        $value = $setting['value'] ?? '';
+
+        return is_string($value) ? $value : (string) $value;
     }
 
     /**

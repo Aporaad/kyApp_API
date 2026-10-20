@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use App\Support\ActivityLogger;
+use App\Support\AppConfig;
 use App\Support\PermissionResolver;
 use App\Support\SettingsStore;
 use Illuminate\Http\JsonResponse;
@@ -53,6 +54,14 @@ class SettingController extends Controller
             // إضافية هنا تُعيد تشويهها إلى رموز
             // definitions() already repaired these once: a second cleanData() re-corrupts them.
             foreach ($this->settings->definitions() as $setting) {
+                // إعدادات التطبيق (الهوية/المظهر/كلمة سر API) لها شاشتها ومتحكمها الخاص؛ لا تُخلط
+                // بإعدادات الأمان حتى لا تظهر كلمة سر مقفلة أو لون في شاشة لا تخصّه.
+                // App-config keys (identity/theming/API password) have their own screen and controller;
+                // keep them off the security list so a locked password or a color never shows here.
+                if (in_array($setting['key'], AppConfig::keys(), true)) {
+                    continue;
+                }
+
                 $data[] = [
                     'setting_id' => (int) $setting['setting_id'],
                     'key' => $setting['key'],
@@ -124,6 +133,18 @@ class SettingController extends Controller
         }
 
         $items = $request->input('items', []);
+
+        // مفاتيح تهيئة التطبيق لا تُكتب من شاشة إعدادات الأمان — لها مسارها المخصّص `PUT /app-config`
+        // App-config keys are never written from the security screen; they have their own route.
+        $configKeys = $this->appConfigKeysRequested($items);
+
+        if ($configKeys !== []) {
+            return response()->json([
+                'success' => false,
+                'message' => 'هذه المفاتيح تتبع تهيئة التطبيق وتُعدَّل من شاشتها الخاصة / These keys belong to app configuration.',
+                'errors' => ['app_config_keys' => $configKeys],
+            ], 422);
+        }
 
         // المفتاح المقفل لا يُلمس إلا بصلاحية حساسة صريحة: قفل «مفتاح في السلوك الأمني» ليس زينة
         // A locked key needs the sensitive-management grant explicitly: IS_LOCKABLE is a control.
@@ -233,6 +254,29 @@ class SettingController extends Controller
         }
 
         return $locked;
+    }
+
+    /**
+     * مفاتيح تهيئة التطبيق الواردة في طلب حفظ إعدادات الأمان (يجب أن تُرفض)
+     * App-config keys smuggled into a security-settings save (they must be refused)
+     *
+     * @param  array<int, mixed>  $items
+     * @return list<string>
+     */
+    private function appConfigKeysRequested(array $items): array
+    {
+        $configKeys = AppConfig::keys();
+        $found = [];
+
+        foreach ($items as $item) {
+            $key = trim((string) ($item['key'] ?? ''));
+
+            if ($key !== '' && in_array($key, $configKeys, true) && ! in_array($key, $found, true)) {
+                $found[] = $key;
+            }
+        }
+
+        return $found;
     }
 
     /**

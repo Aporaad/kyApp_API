@@ -43,7 +43,9 @@ function ibacAdminUser(): User
 }
 
 test('catalog gives every module its core actions in fixed order', function () {
-    expect(PermissionCatalog::count())->toBe(93);
+    // 97 = 93 سابقة + 4 لوحدة `app_config` (منح عام + view + update + api_manage)
+    // 97 = the prior 93 plus 4 for the app_config module (wildcard + view + update + api_manage).
+    expect(PermissionCatalog::count())->toBe(97);
 
     foreach (PermissionCatalog::grouped() as $module) {
         $coreCodes = array_map(
@@ -106,7 +108,9 @@ test('settings store returns typed session values', function () {
         ->and($settings->bool('biometric_login_enabled', false))->toBeBool()
         // مفتاح غير معروف لا يكسر المسار السريع: يرجع الافتراضي
         ->and($settings->int('no_such_setting', 7))->toBe(7)
-        ->and($settings->definitions())->toHaveCount(10);
+        // 22 = 10 إعدادات أمان + 12 صفاً لتهيئة التطبيق (بذر app_config)
+        // 22 = the 10 security settings plus the 12 app-configuration rows.
+        ->and($settings->definitions())->toHaveCount(22);
 });
 
 test('settings store refuses an unknown key', function () {

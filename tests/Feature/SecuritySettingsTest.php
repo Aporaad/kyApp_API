@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\User;
+use App\Support\AppConfig;
 use App\Support\ArabicEncoding;
 use App\Support\PermissionCatalog;
 use App\Support\PermissionResolver;
@@ -108,7 +109,16 @@ test('the settings screen gets every key with its arabic label and typed value',
 
     $settings = app(SettingsStore::class);
 
-    expect($response->json('meta.total'))->toBe(count($settings->definitions()));
+    // شاشة إعدادات الأمان تعرض مفاتيح الأمان وحدها: مفاتيح تهيئة التطبيق (AppConfig::keys) معزولة
+    // في شاشتها ومتحكمها الخاص، فالعدد المتوقع هو تعريفات الأمان بعد استبعاد مفاتيح التهيئة.
+    // The security screen lists only security keys; app-config keys live in their own screen and
+    // controller, so the expected total is the definitions after excluding the app-config keys.
+    $securityCount = count(array_filter(
+        $settings->definitions(),
+        static fn (array $definition): bool => ! in_array($definition['key'], AppConfig::keys(), true)
+    ));
+
+    expect($response->json('meta.total'))->toBe($securityCount);
 
     $byKey = [];
 
@@ -189,13 +199,15 @@ test('a settings batch must be a non-empty list of keyed items', function () {
 test('an unknown setting key is refused before any write', function () {
     Sanctum::actingAs(settingsAdminUser(), ['*']);
 
+    $before = settingsRowCount('SELECT COUNT(*) AS TOTAL FROM ACCOUNTS.APP_SETTINGS');
+
     $this->putJson('/api/settings', ['items' => [['key' => 'no_such_setting', 'value' => 5]]])
         ->assertStatus(422)
         ->assertJsonPath('success', false);
 
-    // المفتاح غير المعروف لا يُنشأ ولا يُخمَّن: عدد الصفوف كما كان تماماً
-    // An unknown key is neither created nor cached: the row count is exactly as it was.
-    expect(settingsRowCount('SELECT COUNT(*) AS TOTAL FROM ACCOUNTS.APP_SETTINGS'))->toBe(10);
+    // المفتاح غير المعروف لا يُنشأ ولا يُخمَّن: عدد الصفوف كما كان تماماً (بلا رقم ثابت يتقادم)
+    // An unknown key is neither created nor cached: the row count is unchanged (no brittle literal).
+    expect(settingsRowCount('SELECT COUNT(*) AS TOTAL FROM ACCOUNTS.APP_SETTINGS'))->toBe($before);
 });
 
 test('a value outside the declared bounds is refused and the row is untouched', function () {
