@@ -27,7 +27,7 @@ class ArabicEncoding
         0xE0 => 'à', 0xE1 => 'ل', 0xE2 => 'â', 0xE3 => 'م', 0xE4 => 'ن', 0xE5 => 'ه', 0xE6 => 'و', 0xE7 => 'ç',
         0xE8 => 'è', 0xE9 => 'é', 0xEA => 'ê', 0xEB => 'ë', 0xEC => 'ى', 0xED => 'ي', 0xEE => 'î', 0xEF => 'ï',
         0xF0 => 'ً', 0xF1 => 'ٌ', 0xF2 => 'ٍ', 0xF3 => 'َ', 0xF4 => 'ô', 0xF5 => 'ُ', 0xF6 => 'ِ', 0xF7 => '÷',
-        0xF8 => 'ّ', 0xF9 => 'ù', 0xFA => 'ْ', 0xFB => 'û', 0xFC => 'ü', 0xFD => '',  0xFE => '',  0xFF => 'ے'
+        0xF8 => 'ّ', 0xF9 => 'ù', 0xFA => 'ْ', 0xFB => 'û', 0xFC => 'ü', 0xFD => '',  0xFE => '',  0xFF => 'ے',
     ];
 
     /**
@@ -48,7 +48,24 @@ class ArabicEncoding
                 break;
             }
         }
-        if (!$hasHighAscii) {
+        if (! $hasHighAscii) {
+            return $str;
+        }
+
+        // حصانة التكرار: نص سليم فعلاً (محارف عربية UTF-8 بلا أي محرف لاتيني أعلى من 127) لا يُصلَح مرةً
+        // ثانية. إصلاحُ السليم يُنتج رموزاً: `موظف` بايتاتها UTF-8 (D9 88…) تنطبق عليها مطابقة CP1256 فتصير
+        // `ظ…ظˆط¸ظپ`، وهو بالضبط ما ظهر في شاشتي الجلسات وإعدادات الأمان حين مرّت القيم المُصلَحة على
+        // `cleanData()` مرة أخرى. المعيار الآمن: UTF-8 صالح + يحوي عرب + لا يحوي محرفاً في 0x80–0xFF؛
+        // أمّا التشويه الحقيقي فيأتي دائماً كمحارف لاتينية في هذا المدى، فيمرّ من الحاصرات ويُسْتَمّ.
+        // Idempotence guard: already-correct Arabic (valid UTF-8, Arabic letters, no Latin-1 char in
+        // 0x80–0xFF) must never be repaired a second time — repairing it maps its UTF-8 bytes through
+        // CP1256 and produces symbols (`موظف` → `ظ…ظˆط¸ظپ`), which is exactly what the sessions and
+        // security-settings screens showed when an already-repaired payload passed `cleanData()` again.
+        // Genuine mojibake always carries a 0x80–0xFF character, so it still falls through to the steps
+        // below; raw CP1256 bytes are not valid UTF-8 in practice, so this never hides a real repair.
+        if (mb_check_encoding($str, 'UTF-8')
+            && preg_match('/[\x{0600}-\x{06FF}]/u', $str) === 1
+            && preg_match('/[\x{0080}-\x{00FF}]/u', $str) !== 1) {
             return $str;
         }
 
@@ -58,7 +75,7 @@ class ArabicEncoding
         $hasLatin1Mojibake = false;
         $chars = @preg_split('//u', $str, -1, PREG_SPLIT_NO_EMPTY);
 
-        if (is_array($chars) && !empty($chars)) {
+        if (is_array($chars) && ! empty($chars)) {
             foreach ($chars as $ch) {
                 $code = mb_ord($ch, 'UTF-8');
                 if ($code >= 0x80 && $code <= 0xFF && isset(self::CP1256_MAP[$code])) {
@@ -96,39 +113,32 @@ class ArabicEncoding
             if ($conv && preg_match('/[\x{0600}-\x{06FF}]/u', $conv)) {
                 return $conv;
             }
-        } catch (\Throwable $e) {}
-
-        return $str;
-    }
-
-    /**
-     * تحويل النص العربي UTF-8 إلى ترميز Windows-1256 لقاعدة بيانات Oracle
-     */
-    public static function encodeForOracle(?string $str): ?string
-    {
-        if ($str === null || $str === '') {
-            return $str;
+        } catch (\Throwable $e) {
         }
 
-        try {
-            if (preg_match('/[\x{0600}-\x{06FF}]/u', $str)) {
-                $converted = @iconv('UTF-8', 'Windows-1256//IGNORE', $str);
-                if ($converted !== false && $converted !== '') {
-                    return $converted;
-                }
-                $mb = @mb_convert_encoding($str, 'Windows-1256', 'UTF-8');
-                if ($mb !== false && $mb !== '') {
-                    return $mb;
-                }
-            }
-        } catch (\Throwable $e) {}
-
         return $str;
     }
 
     /**
-     * تحويل سلسلة البحث العربية UTF-8 إلى المحارف اللاتينية المطابقة لبايتات Windows-1256 في أوراكل
-     * Convert UTF-8 Arabic search query to matching Oracle CP1256 Latin-1 chars
+     * المسار الوحيد الصحيح للتعامل مع العربية عند البحث **وعند الكتابة** في أوراكل
+     * The only correct path for Arabic — both searching and writing to Oracle.
+     *
+     * لماذا لا نرسل بايتات Windows-1256 الخام؟ لأن اتصال التطبيق بترميز عميل `AL32UTF8`
+     * وقاعدة البيانات `WE8MSWIN1252`، فأي بايت >= 0x80 يصل كأbytes UTF-8 غير صالحة تستبدلها
+     * أوراكل بعلامة الاستبدال `0xBF` (تم إثباته: `خالد سالم` ⇒ `DUMP` = `bf,bf,bf` أي ثلاثة
+     * محارف بدل تسعة، والبيانات تُتلف).
+     * Why not raw CP1256 bytes: the app connects as AL32UTF8 while the database is WE8MSWIN1252,
+     * so every byte >= 0x80 arrives as an invalid UTF-8 sequence and Oracle substitutes 0xBF,
+     * destroying the value (proved: `خالد سالم` → DUMP `bf,bf,bf`, three chars instead of nine).
+     *
+     * الصحيح: تحويل كل بايت CP1256 إلى المحرف اللاتيني الذي يحمل نفس الكود (`0xD6` ⇒ `U+00D6`)
+     * فيرسله العميل كـ UTF-8 من محرفين، وتستقر أوراكل على البايت الأصلي `0xD6` تماماً كما تخزّنه
+     * أنظمة الشركة القديمة. الناتج صالح للقراءة المزدوجة (`LIKE`) وللكتابة (`INSERT`/`UPDATE`).
+     * Correct approach: map each CP1256 byte to the Latin-1 char with the same code, which the
+     * AL32UTF8 client transports so that it lands as the original byte — exactly what the legacy
+     * system stores. The result is valid both for `LIKE` searches and for INSERT/UPDATE.
+     *
+     * Convert UTF-8 Arabic to the Oracle CP1256 Latin-1 chars (search + write).
      */
     public static function toOracleSearchChars(?string $str): ?string
     {
@@ -144,6 +154,7 @@ class ArabicEncoding
                 $byte = ord($cp1256Bytes[$i]);
                 $res .= mb_chr($byte, 'UTF-8');
             }
+
             return $res;
         }
 
@@ -155,12 +166,17 @@ class ArabicEncoding
      */
     public static function cleanData($data)
     {
-        if (is_null($data)) return null;
-        if (is_string($data)) return self::fixMojibake($data);
+        if (is_null($data)) {
+            return null;
+        }
+        if (is_string($data)) {
+            return self::fixMojibake($data);
+        }
         if (is_array($data)) {
             foreach ($data as $k => $v) {
                 $data[$k] = self::cleanData($v);
             }
+
             return $data;
         }
         if (is_object($data)) {
@@ -168,10 +184,10 @@ class ArabicEncoding
             foreach ($arr as $k => $v) {
                 $arr[$k] = self::cleanData($v);
             }
+
             return (object) $arr;
         }
+
         return $data;
     }
 }
-
-

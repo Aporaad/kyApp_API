@@ -16,7 +16,9 @@ use Illuminate\Support\Facades\Validator;
 class CustomerController extends Controller
 {
     private const TABLE_CUST = 'ACCOUNTS.CUST';
+
     private const MAX_LIMIT = 500;
+
     private const DEFAULT_LIMIT = 100;
 
     /**
@@ -40,22 +42,22 @@ class CustomerController extends Controller
                 ]);
 
             // دعم البحث الشامل (بالرقم، بالاسم، برقم الهاتف 1 و 2، برقم الحساب)
-            if (!empty($search)) {
+            if (! empty($search)) {
                 $oracleSearch = ArabicEncoding::toOracleSearchChars($search);
                 $query->where(function ($q) use ($search, $oracleSearch) {
                     if (is_numeric($search)) {
-                        $q->where('CUST_NO', (int)$search)
-                          ->orWhere('TEL1', 'LIKE', '%' . $search . '%')
-                          ->orWhere('TEL2', 'LIKE', '%' . $search . '%')
-                          ->orWhere('ACC_NO', (int)$search);
+                        $q->where('CUST_NO', (int) $search)
+                            ->orWhere('TEL1', 'LIKE', '%'.$search.'%')
+                            ->orWhere('TEL2', 'LIKE', '%'.$search.'%')
+                            ->orWhere('ACC_NO', (int) $search);
                     } else {
-                        $q->where('CUST_NAME', 'LIKE', '%' . $oracleSearch . '%')
-                          ->orWhere('CUST_NAME', 'LIKE', '%' . $search . '%')
-                          ->orWhere('TEL1', 'LIKE', '%' . $search . '%')
-                          ->orWhere('TEL2', 'LIKE', '%' . $search . '%')
-                          ->orWhere('ADDR', 'LIKE', '%' . $oracleSearch . '%')
-                          ->orWhere('ADDR', 'LIKE', '%' . $search . '%')
-                          ->orWhere('PRE_CUST_NAME', 'LIKE', '%' . $oracleSearch . '%');
+                        $q->where('CUST_NAME', 'LIKE', '%'.$oracleSearch.'%')
+                            ->orWhere('CUST_NAME', 'LIKE', '%'.$search.'%')
+                            ->orWhere('TEL1', 'LIKE', '%'.$search.'%')
+                            ->orWhere('TEL2', 'LIKE', '%'.$search.'%')
+                            ->orWhere('ADDR', 'LIKE', '%'.$oracleSearch.'%')
+                            ->orWhere('ADDR', 'LIKE', '%'.$search.'%')
+                            ->orWhere('PRE_CUST_NAME', 'LIKE', '%'.$oracleSearch.'%');
                     }
                 });
             }
@@ -93,7 +95,7 @@ class CustomerController extends Controller
                 ->where('CUST_NO', $custNo)
                 ->first();
 
-            if (!$customer) {
+            if (! $customer) {
                 return response()->json([
                     'success' => false,
                     'message' => "العميل رقم [{$custNo}] غير موجود / Customer [{$custNo}] not found.",
@@ -102,7 +104,7 @@ class CustomerController extends Controller
 
             return response()->json([
                 'success' => true,
-                'data' => ArabicEncoding::cleanData((array)$customer),
+                'data' => ArabicEncoding::cleanData((array) $customer),
             ]);
         } catch (\Throwable $e) {
             return $this->errorResponse('خطأ في جلب بيانات العميل', $e);
@@ -117,16 +119,16 @@ class CustomerController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'cust_name' => ['required', 'string', 'max:150'],
-            'addr'      => ['nullable', 'string', 'max:200'],
-            'tel1'      => ['nullable', 'string', 'max:20'],
-            'tel2'      => ['nullable', 'string', 'max:20'],
-            'postbox'   => ['nullable', 'string', 'max:20'],
-            'email'     => ['nullable', 'email', 'max:100'],
-            'fax'       => ['nullable', 'string', 'max:20'],
-            'acc_no'    => ['nullable', 'integer'],
+            'addr' => ['nullable', 'string', 'max:200'],
+            'tel1' => ['nullable', 'string', 'max:20'],
+            'tel2' => ['nullable', 'string', 'max:20'],
+            'postbox' => ['nullable', 'string', 'max:20'],
+            'email' => ['nullable', 'email', 'max:100'],
+            'fax' => ['nullable', 'string', 'max:20'],
+            'acc_no' => ['nullable', 'integer'],
             'limited_balance' => ['nullable', 'numeric'],
-            'pre_cust_name'   => ['nullable', 'string', 'max:150'],
-            'stopping_cust'   => ['nullable', 'integer', 'in:0,1'],
+            'pre_cust_name' => ['nullable', 'string', 'max:150'],
+            'stopping_cust' => ['nullable', 'integer', 'in:0,1'],
         ], [
             'cust_name.required' => 'اسم العميل مطلوب / Customer name is required.',
             'cust_name.max' => 'اسم العميل لا يتجاوز 150 حرفاً.',
@@ -146,25 +148,25 @@ class CustomerController extends Controller
             $maxCustNo = DB::connection('oracle')
                 ->table(self::TABLE_CUST)
                 ->max('CUST_NO');
-            $newCustNo = (int)($maxCustNo ?? 0) + 1;
+            $newCustNo = (int) ($maxCustNo ?? 0) + 1;
 
-            $custName = trim((string)$request->input('cust_name'));
-            $addr = $request->input('addr') ? trim((string)$request->input('addr')) : null;
-            $preCustName = $request->input('pre_cust_name') ? trim((string)$request->input('pre_cust_name')) : null;
+            $custName = trim((string) $request->input('cust_name'));
+            $addr = $request->input('addr') ? trim((string) $request->input('addr')) : null;
+            $preCustName = $request->input('pre_cust_name') ? trim((string) $request->input('pre_cust_name')) : null;
 
             $data = [
-                'CUST_NO'         => $newCustNo,
-                'CUST_NAME'       => ArabicEncoding::encodeForOracle($custName) ?? $custName,
-                'ADDR'            => $addr ? (ArabicEncoding::encodeForOracle($addr) ?? $addr) : null,
-                'TEL1'            => $request->input('tel1') ? trim((string)$request->input('tel1')) : null,
-                'TEL2'            => $request->input('tel2') ? trim((string)$request->input('tel2')) : null,
-                'POSTBOX'         => $request->input('postbox') ? trim((string)$request->input('postbox')) : null,
-                'EMAIL'           => $request->input('email') ? trim((string)$request->input('email')) : null,
-                'FAX'             => $request->input('fax') ? trim((string)$request->input('fax')) : null,
-                'ACC_NO'          => $request->input('acc_no') ? (int)$request->input('acc_no') : null,
-                'LIMITED_BALANCE' => $request->input('limited_balance') ? (float)$request->input('limited_balance') : null,
-                'PRE_CUST_NAME'   => $preCustName ? (ArabicEncoding::encodeForOracle($preCustName) ?? $preCustName) : null,
-                'STOPPING_CUST'   => (int)($request->input('stopping_cust') ?? 0),
+                'CUST_NO' => $newCustNo,
+                'CUST_NAME' => ArabicEncoding::toOracleSearchChars($custName) ?? $custName,
+                'ADDR' => $addr ? (ArabicEncoding::toOracleSearchChars($addr) ?? $addr) : null,
+                'TEL1' => $request->input('tel1') ? trim((string) $request->input('tel1')) : null,
+                'TEL2' => $request->input('tel2') ? trim((string) $request->input('tel2')) : null,
+                'POSTBOX' => $request->input('postbox') ? trim((string) $request->input('postbox')) : null,
+                'EMAIL' => $request->input('email') ? trim((string) $request->input('email')) : null,
+                'FAX' => $request->input('fax') ? trim((string) $request->input('fax')) : null,
+                'ACC_NO' => $request->input('acc_no') ? (int) $request->input('acc_no') : null,
+                'LIMITED_BALANCE' => $request->input('limited_balance') ? (float) $request->input('limited_balance') : null,
+                'PRE_CUST_NAME' => $preCustName ? (ArabicEncoding::toOracleSearchChars($preCustName) ?? $preCustName) : null,
+                'STOPPING_CUST' => (int) ($request->input('stopping_cust') ?? 0),
             ];
 
             DB::connection('oracle')->table(self::TABLE_CUST)->insert($data);
@@ -187,16 +189,16 @@ class CustomerController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'cust_name' => ['required', 'string', 'max:150'],
-            'addr'      => ['nullable', 'string', 'max:200'],
-            'tel1'      => ['nullable', 'string', 'max:20'],
-            'tel2'      => ['nullable', 'string', 'max:20'],
-            'postbox'   => ['nullable', 'string', 'max:20'],
-            'email'     => ['nullable', 'email', 'max:100'],
-            'fax'       => ['nullable', 'string', 'max:20'],
-            'acc_no'    => ['nullable', 'integer'],
+            'addr' => ['nullable', 'string', 'max:200'],
+            'tel1' => ['nullable', 'string', 'max:20'],
+            'tel2' => ['nullable', 'string', 'max:20'],
+            'postbox' => ['nullable', 'string', 'max:20'],
+            'email' => ['nullable', 'email', 'max:100'],
+            'fax' => ['nullable', 'string', 'max:20'],
+            'acc_no' => ['nullable', 'integer'],
             'limited_balance' => ['nullable', 'numeric'],
-            'pre_cust_name'   => ['nullable', 'string', 'max:150'],
-            'stopping_cust'   => ['nullable', 'integer', 'in:0,1'],
+            'pre_cust_name' => ['nullable', 'string', 'max:150'],
+            'stopping_cust' => ['nullable', 'integer', 'in:0,1'],
         ], [
             'cust_name.required' => 'اسم العميل مطلوب / Customer name is required.',
         ]);
@@ -215,29 +217,29 @@ class CustomerController extends Controller
                 ->where('CUST_NO', $custNo)
                 ->exists();
 
-            if (!$exists) {
+            if (! $exists) {
                 return response()->json([
                     'success' => false,
                     'message' => "العميل رقم [{$custNo}] غير موجود / Customer [{$custNo}] not found.",
                 ], 404);
             }
 
-            $custName = trim((string)$request->input('cust_name'));
-            $addr = $request->input('addr') ? trim((string)$request->input('addr')) : null;
-            $preCustName = $request->input('pre_cust_name') ? trim((string)$request->input('pre_cust_name')) : null;
+            $custName = trim((string) $request->input('cust_name'));
+            $addr = $request->input('addr') ? trim((string) $request->input('addr')) : null;
+            $preCustName = $request->input('pre_cust_name') ? trim((string) $request->input('pre_cust_name')) : null;
 
             $data = [
-                'CUST_NAME'       => ArabicEncoding::encodeForOracle($custName) ?? $custName,
-                'ADDR'            => $addr ? (ArabicEncoding::encodeForOracle($addr) ?? $addr) : null,
-                'TEL1'            => $request->input('tel1') ? trim((string)$request->input('tel1')) : null,
-                'TEL2'            => $request->input('tel2') ? trim((string)$request->input('tel2')) : null,
-                'POSTBOX'         => $request->input('postbox') ? trim((string)$request->input('postbox')) : null,
-                'EMAIL'           => $request->input('email') ? trim((string)$request->input('email')) : null,
-                'FAX'             => $request->input('fax') ? trim((string)$request->input('fax')) : null,
-                'ACC_NO'          => $request->input('acc_no') ? (int)$request->input('acc_no') : null,
-                'LIMITED_BALANCE' => $request->input('limited_balance') ? (float)$request->input('limited_balance') : null,
-                'PRE_CUST_NAME'   => $preCustName ? (ArabicEncoding::encodeForOracle($preCustName) ?? $preCustName) : null,
-                'STOPPING_CUST'   => (int)($request->input('stopping_cust') ?? 0),
+                'CUST_NAME' => ArabicEncoding::toOracleSearchChars($custName) ?? $custName,
+                'ADDR' => $addr ? (ArabicEncoding::toOracleSearchChars($addr) ?? $addr) : null,
+                'TEL1' => $request->input('tel1') ? trim((string) $request->input('tel1')) : null,
+                'TEL2' => $request->input('tel2') ? trim((string) $request->input('tel2')) : null,
+                'POSTBOX' => $request->input('postbox') ? trim((string) $request->input('postbox')) : null,
+                'EMAIL' => $request->input('email') ? trim((string) $request->input('email')) : null,
+                'FAX' => $request->input('fax') ? trim((string) $request->input('fax')) : null,
+                'ACC_NO' => $request->input('acc_no') ? (int) $request->input('acc_no') : null,
+                'LIMITED_BALANCE' => $request->input('limited_balance') ? (float) $request->input('limited_balance') : null,
+                'PRE_CUST_NAME' => $preCustName ? (ArabicEncoding::toOracleSearchChars($preCustName) ?? $preCustName) : null,
+                'STOPPING_CUST' => (int) ($request->input('stopping_cust') ?? 0),
             ];
 
             DB::connection('oracle')->table(self::TABLE_CUST)
@@ -265,7 +267,7 @@ class CustomerController extends Controller
                 ->where('CUST_NO', $custNo)
                 ->exists();
 
-            if (!$exists) {
+            if (! $exists) {
                 return response()->json([
                     'success' => false,
                     'message' => "العميل رقم [{$custNo}] غير موجود / Customer [{$custNo}] not found.",
@@ -301,7 +303,7 @@ class CustomerController extends Controller
                 ->where('CUST_NO', $custNo)
                 ->first();
 
-            if (!$customer) {
+            if (! $customer) {
                 return response()->json([
                     'success' => false,
                     'message' => "العميل رقم [{$custNo}] غير موجود / Customer [{$custNo}] not found.",
@@ -356,6 +358,7 @@ class CustomerController extends Controller
                 if ($fromDateFilter && $rawDate && $rawDate < $fromDateFilter) {
                     $openingBalance = $bal;
                     $runningBalance = $bal;
+
                     continue;
                 }
 
@@ -377,39 +380,39 @@ class CustomerController extends Controller
                 $runningBalance = $bal;
 
                 $filteredRows[] = [
-                    'entry_no'        => $r['ENTRY_NO'] ?? $r['entry_no'] ?? null,
-                    'sub_entry_no'    => $r['SUB_ENTRY_NO'] ?? $r['sub_entry_no'] ?? null,
-                    'entry_date'      => $entryDate,
+                    'entry_no' => $r['ENTRY_NO'] ?? $r['entry_no'] ?? null,
+                    'sub_entry_no' => $r['SUB_ENTRY_NO'] ?? $r['sub_entry_no'] ?? null,
+                    'entry_date' => $entryDate,
                     'entry_type_name' => ArabicEncoding::fixMojibake($r['ENTRY_TYPE_NAME'] ?? $r['entry_type_name'] ?? ''),
-                    'details'         => ArabicEncoding::fixMojibake(trim((string)($r['DETAILS'] ?? $r['details'] ?? ''))),
-                    'balance_s'       => $bal,
-                    'entry_mnt'       => $mnt,
-                    'debit'           => $debit,
-                    'credit'          => $credit,
-                    'cust_name'       => ArabicEncoding::fixMojibake($r['CUST_NAME'] ?? $r['cust_name'] ?? ''),
-                    'cust_no'         => $r['CUST_NO'] ?? $r['cust_no'] ?? null,
-                    'acc_no'          => $r['ACC_NO'] ?? $r['acc_no'] ?? null,
+                    'details' => ArabicEncoding::fixMojibake(trim((string) ($r['DETAILS'] ?? $r['details'] ?? ''))),
+                    'balance_s' => $bal,
+                    'entry_mnt' => $mnt,
+                    'debit' => $debit,
+                    'credit' => $credit,
+                    'cust_name' => ArabicEncoding::fixMojibake($r['CUST_NAME'] ?? $r['cust_name'] ?? ''),
+                    'cust_no' => $r['CUST_NO'] ?? $r['cust_no'] ?? null,
+                    'acc_no' => $r['ACC_NO'] ?? $r['acc_no'] ?? null,
                 ];
             }
 
             $finalBalance = count($filteredRows) > 0 ? $runningBalance : $openingBalance;
 
-            $cleanedCustomer = ArabicEncoding::cleanData((array)$customer);
+            $cleanedCustomer = ArabicEncoding::cleanData((array) $customer);
 
             return response()->json([
-                'success'  => true,
+                'success' => true,
                 'customer' => $cleanedCustomer,
-                'data'     => $filteredRows,
-                'summary'  => [
-                    'total_rows'      => count($filteredRows),
-                    'total_debit'     => $totalDebit,
-                    'total_credit'    => $totalCredit,
+                'data' => $filteredRows,
+                'summary' => [
+                    'total_rows' => count($filteredRows),
+                    'total_debit' => $totalDebit,
+                    'total_credit' => $totalCredit,
                     'opening_balance' => $openingBalance,
-                    'final_balance'   => $finalBalance,
-                    'from_date'       => $fromDateParam ?: ($firstDate ?: date('d/m/Y')),
-                    'to_date'         => $toDateParam ?: ($lastDate ?: date('d/m/Y')),
-                    'currency'        => 'يمني YR',
-                    'account_title'   => ($cleanedCustomer['ACC_NO'] ?? $cleanedCustomer['acc_no'] ?? '12310000') . ' عملاء الكبودي للخياطة',
+                    'final_balance' => $finalBalance,
+                    'from_date' => $fromDateParam ?: ($firstDate ?: date('d/m/Y')),
+                    'to_date' => $toDateParam ?: ($lastDate ?: date('d/m/Y')),
+                    'currency' => 'يمني YR',
+                    'account_title' => ($cleanedCustomer['ACC_NO'] ?? $cleanedCustomer['acc_no'] ?? '12310000').' عملاء الكبودي للخياطة',
                 ],
             ]);
         } catch (\Throwable $e) {
@@ -423,7 +426,9 @@ class CustomerController extends Controller
     private function parseDateToIso(string $dateStr): ?string
     {
         $d = trim($dateStr);
-        if (empty($d)) return null;
+        if (empty($d)) {
+            return null;
+        }
 
         try {
             if (strpos($d, '/') !== false) {
@@ -433,9 +438,11 @@ class CustomerController extends Controller
                     if (strlen($parts[0]) === 4) {
                         return sprintf('%04d-%02d-%02d', $parts[0], $parts[1], $parts[2]);
                     }
+
                     return sprintf('%04d-%02d-%02d', $parts[2], $parts[1], $parts[0]);
                 }
             }
+
             return Carbon::parse($d)->format('YYYY-MM-DD');
         } catch (\Throwable $e) {
             return null;
@@ -449,8 +456,8 @@ class CustomerController extends Controller
     {
         return response()->json([
             'success' => false,
-            'message' => $msg . ' / Database error.',
-            'error'   => config('app.debug') ? $e->getMessage() : null,
+            'message' => $msg.' / Database error.',
+            'error' => config('app.debug') ? $e->getMessage() : null,
         ], 500);
     }
 }

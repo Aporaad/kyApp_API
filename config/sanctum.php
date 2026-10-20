@@ -48,9 +48,33 @@ return [
     | considered expired. This will override any values set in the token's
     | "expires_at" attribute, but first-party sessions are not affected.
     |
+    | ⚠️ يجب أن تبقى null — نظام الجلسات في ky_apps لا يعمل هنا.
+    | `Sanctum\Guard` يقارن هذه القيمة بـ `created_at` أي بعمر مطلق ثابت: أي رقم يجعل
+    | التطبيق يطرد المستخدم النشيط بعد انتهائه أثناء عمله، وهذا يخالف المتطلب.
+    | التجديد الانزلاقي ومهلة الخمول يديرهما `App\Support\SessionPolicy` عبر عمود
+    | `EXPIRES_AT` المرتبط بـ `session_idle_minutes` في جدول APP_SETTINGS.
+    | MUST stay null. Any number here becomes a hard absolute age (Guard compares it to
+    | `created_at`) and would disconnect active users. Sliding renewal and idle expiry are
+    | implemented by `App\Support\SessionPolicy` on the `expires_at` column, driven by the
+    | `session_idle_minutes` row of APP_SETTINGS.
+    |
     */
 
     'expiration' => null,
+
+    /*
+    |--------------------------------------------------------------------------
+    | Track Last Used At
+    |--------------------------------------------------------------------------
+    |
+    | Sanctum يكتب `LAST_USED_AT` عند كل طلب مصادق عليه، وشاشة «الجلسات النشطة»
+    | تعتمد عليه لعرض آخر نشاط حقيقي لكل جلسة. لا تعطّل هذه القيمة.
+    | Sanctum stamps `LAST_USED_AT` on every authenticated request; the active-sessions
+    | screen reads it as the real "last activity" value. Do not disable.
+    |
+    */
+
+    'last_used_at' => true,
 
     /*
     |--------------------------------------------------------------------------

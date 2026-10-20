@@ -57,7 +57,6 @@ class User extends Authenticatable
         'IS_ACTIVATED',
         'NOTE',
         'BRANCH_NO',
-        'USER_NO',
         'CREATED_ON',
         'CREATED_BY',
         'LAST_UPDATED_ON',
@@ -65,6 +64,7 @@ class User extends Authenticatable
         'CASH_ACC_NO',
         'USER_TYPE',
         'ALLOW_BANK_ACC',
+        'IS_ADMIN',
         // حقول المقاييس الحيوية
         'DEVICE_TOKEN',
         'DEVICE_NAME',
@@ -86,6 +86,35 @@ class User extends Authenticatable
         'DEVICE_TOKEN',
         'device_token',
     ];
+
+    /**
+     * أنواع الأعمدة — أوراكل يعيد الأرقام كنصوص، والتحويل يوحّد المقارنات
+     * Column casts — Oracle hands numbers back as strings; casting keeps comparisons honest.
+     *
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'user_id' => 'integer',
+            'is_activated' => 'integer',
+            'is_admin' => 'integer',
+            'user_type' => 'integer',
+            'branch_no' => 'integer',
+            'biometric_enabled' => 'integer',
+        ];
+    }
+
+    /**
+     * هل المستخدم مدير نظام؟ الصفة تُخزَّن خارج جدول المنح، لذلك لا يمكن إلغاؤها
+     * بخطأ في تحرير صلاحيات المستخدم — وهذا هو ضمان عدم الإقفال (D1).
+     * Is this user a system administrator? The flag lives outside the grant table, so a bad
+     * grant edit can never revoke it — that is the anti-lockout guarantee (D1).
+     */
+    public function isAdmin(): bool
+    {
+        return (int) $this->getAttribute('IS_ADMIN') === 1;
+    }
 
     /**
      * Case-insensitive attribute getter for Oracle column compatibility.

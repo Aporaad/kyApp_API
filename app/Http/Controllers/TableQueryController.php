@@ -26,6 +26,39 @@ class TableQueryController extends Controller
     private const DEFAULT_ROW_LIMIT = 50;
 
     /**
+     * جداول ممنوعة حتى على صلاحية النظام: كلها جداول اعتمادات أو جلسة أو بنية داخلية، وقيمتها
+     * الكاملة قابلة للتسريب في استعلام واحد (كلمة مرور، توكن، محفظة كاش).
+     * Tables denied even to the system wildcard: each is a credential, session, or internal
+     * infrastructure table whose entire contents leak in a single query (password, token, cache).
+     */
+    private const DENIED_TABLES = [
+        'APP_USERS',
+        'PERSONAL_ACCESS_TOKENS',
+        'APP_USERS_PERMISSIONS',
+        'CACHE',
+        'CACHE_LOCKS',
+        'MIGRATIONS',
+        'JOBS',
+        'FAILED_JOBS',
+        'SESSIONS',
+        'PASSWORD_RESET_TOKENS',
+        'USERS',
+    ];
+
+    /**
+     * أعمدة تُحذف من أي صف قبل إرجاعه: البادئة/الطول لأن أسماء هذا المشروع مشتقة منها
+     * Columns stripped from any row before it is returned: prefix/length because this project's
+     * column names are all derived from these tokens.
+     */
+    private const DENIED_COLUMNS = [
+        'PASSWORD',
+        'DEVICE_TOKEN',
+        'TOKEN',
+        'SECRET',
+        'KEY',
+    ];
+
+    /**
      * استعلام البيانات من جدول محدد بعدد صفوف معين
      * Fetch records from a specified table with a given row count
      */
@@ -75,6 +108,17 @@ class TableQueryController extends Controller
         $tableName = strtoupper(trim((string) $rawTableName));
         $limit = (int) $rawLimit;
 
+        // الرفض قبل أي وصول للقاعدة: اسم الجدول وحده كافٍ للقرار، فلا داعي لاستعلام وجوده
+        // Deny before any database touch: the table name alone is enough to decide, so there is no
+        // reason to run an existence query for a table we will not read.
+        if (in_array($tableName, self::DENIED_TABLES, true)) {
+            return response()->json([
+                'success' => false,
+                'message' => "الجدول [{$tableName}] محجوب عن هذا المسار لأنه يحمل بيانات اعتماد أو جلسات أو بنية داخلية / Table [{$tableName}] is denied: it holds credentials, session, or internal infrastructure data.",
+                'errors' => ['table_name' => ['restricted_table']],
+            ], 403);
+        }
+
         try {
             // التحقق من وجود الجدول داخل مخطط المستخدم في أوراكل قبل تنفيذ الاستعلام
             // Verify if the table exists in the connected Oracle user schema
@@ -97,12 +141,22 @@ class TableQueryController extends Controller
                 ->limit($limit)
                 ->get();
 
+            // تنقيح الأعمدة الحساسة: الجدول غير ممنوع قد يبقى حاملاً عمود اعتماد (كلمة مرور مخزّنة
+            // في جدول عمل، أو توكن في جدول جلسة مخصص). الحذف هنا لا على اسم الجدول كي لا يُفاجأ
+            // المستخدم بصفّ ناقص في جدول يظنه بريئاً.
+            // Sensitive-column scrubbing: an allowed table may still carry a credential column
+            // (a stored password on a business table, a token on a session-ish one). We drop by
+            // column name, not by table name, so a table the user believes is benign cannot
+            // surprise them with a silently missing field later.
+            [$rows, $redacted] = $this->redactSensitiveColumns($data);
+
             return response()->json([
                 'success' => true,
                 'table' => $tableName,
                 'count' => $data->count(),
                 'limit' => $limit,
-                'data' => $data,
+                'redacted_columns' => $redacted,
+                'data' => $rows,
             ], 200);
 
         } catch (\Throwable $e) {
@@ -114,5 +168,47 @@ class TableQueryController extends Controller
                 'error' => config('app.debug') ? $e->getMessage() : null,
             ], 500);
         }
+    }
+
+    /**
+     * إزالة الأعمدة الحساسة من صفوف الاستعلام مع إبقاء ترتيب الأعمدة الباقي كما هو
+     * Strip sensitive columns from the fetched rows, keeping the remaining column order intact.
+     *
+     * @param  iterable<int, object>  $rows
+     * @return array{0: array<int, array<string, mixed>>, 1: array<int, string>}
+     *                                                                           الصفوف المنقّحة + أسماء الأعمدة التي حُذفت (مرّة واحدة، لا لكل صف)
+     *                                                                           The scrubbed rows + the distinct column names that were dropped (listed once, not per row)
+     */
+    private function redactSensitiveColumns(iterable $rows): array
+    {
+        $clean = [];
+        $dropped = [];
+
+        foreach ($rows as $row) {
+            $asArray = (array) $row;
+            $cleanRow = [];
+
+            foreach ($asArray as $column => $value) {
+                $upper = strtoupper((string) $column);
+
+                $isSensitive = false;
+                foreach (self::DENIED_COLUMNS as $needle) {
+                    if (str_contains($upper, $needle)) {
+                        $isSensitive = true;
+                        $dropped[$upper] = true;
+
+                        break;
+                    }
+                }
+
+                if (! $isSensitive) {
+                    $cleanRow[$column] = $value;
+                }
+            }
+
+            $clean[] = $cleanRow;
+        }
+
+        return [$clean, array_keys($dropped)];
     }
 }
