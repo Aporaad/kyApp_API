@@ -435,15 +435,29 @@ class CustomerController extends Controller
                 // DD/MM/YYYY
                 $parts = explode('/', $d);
                 if (count($parts) === 3) {
-                    if (strlen($parts[0]) === 4) {
-                        return sprintf('%04d-%02d-%02d', $parts[0], $parts[1], $parts[2]);
+                    $year = strlen($parts[0]) === 4 ? (int) $parts[0] : (int) $parts[2];
+                    $month = (int) $parts[1];
+                    $day = strlen($parts[0]) === 4 ? (int) $parts[2] : (int) $parts[0];
+
+                    // حماية من التواريخ المشوهة: نرفض أي سنة/شهر/يوم خارج النطاق المنطقي.
+                    // Reject absurd dates so garbage never reaches the client UI.
+                    if ($year < 1900 || $year > 2100 || $month < 1 || $month > 12 || $day < 1 || $day > 31) {
+                        return null;
                     }
 
-                    return sprintf('%04d-%02d-%02d', $parts[2], $parts[1], $parts[0]);
+                    return sprintf('%04d-%02d-%02d', $year, $month, $day);
                 }
             }
 
-            return Carbon::parse($d)->format('YYYY-MM-DD');
+            // 'Y-m-d' وليس 'YYYY-MM-DD': في PHP كل Y تُكرّر السنة، وM اسم الشهر
+            // وD اسم اليوم — فتنتج سلسلة مشوهة تكسر منتقي التاريخ على العميل.
+            // Use 'Y-m-d': repeated format letters produce garbage output.
+            $parsed = Carbon::parse($d);
+            if ($parsed->year < 1900 || $parsed->year > 2100) {
+                return null;
+            }
+
+            return $parsed->format('Y-m-d');
         } catch (\Throwable $e) {
             return null;
         }

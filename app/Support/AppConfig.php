@@ -25,7 +25,15 @@ final class AppConfig
      */
     public const COMPANY_NAME = 'company_name';
 
+    /**
+     * الصيغة الإنجليزية لاسم الشركة وعنوانها — تظهر في الجهة اليسرى من ترويسة التقارير
+     * English variants of the company name and address — they fill the left side of the report letterhead.
+     */
+    public const COMPANY_NAME_EN = 'company_name_en';
+
     public const COMPANY_ADDRESS = 'company_address';
+
+    public const COMPANY_ADDRESS_EN = 'company_address_en';
 
     public const COMPANY_WEBSITE = 'company_website';
 
@@ -63,7 +71,11 @@ final class AppConfig
      */
     public const DEFAULTS = [
         self::COMPANY_NAME => 'الكبودي للخياطة الرجالية',
+        // الاسم الإنجليزي لا يُترك فارغاً: ترويسة التقارير تعرضه في الجهة اليسرى دائماً
+        // The English name is never blank: the report letterhead always prints its left column.
+        self::COMPANY_NAME_EN => "ALKABODI FOR MEN's TAILORING",
         self::COMPANY_ADDRESS => '',
+        self::COMPANY_ADDRESS_EN => 'Airport Street - Next to Al-shayef House',
         self::COMPANY_WEBSITE => '',
         self::COMPANY_PHONE => '',
         self::APP_NAME => 'الكبودي للخياطة الرجاليه',
@@ -91,7 +103,9 @@ final class AppConfig
      */
     public const WRITABLE_KEYS = [
         self::COMPANY_NAME,
+        self::COMPANY_NAME_EN,
         self::COMPANY_ADDRESS,
+        self::COMPANY_ADDRESS_EN,
         self::COMPANY_WEBSITE,
         self::COMPANY_PHONE,
         self::APP_NAME,

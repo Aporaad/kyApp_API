@@ -318,6 +318,8 @@ Route::middleware('auth:sanctum')->group(function () {
         ->where('accNo', '[0-9]+');
     Route::get('/accounts/statement-detail', [AccountController::class, 'getDetailedStatement'])
         ->middleware('permission:accounts.statement');
+    Route::get('/accounts/group-statement', [AccountController::class, 'getGroupStatement'])
+        ->middleware('permission:accounts.statement');
 });
 
 // ============================================================

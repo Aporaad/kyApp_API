@@ -79,7 +79,10 @@ class SessionAdminController extends Controller
           JOIN ACCOUNTS.APP_USERS u ON u.USER_ID = t.TOKENABLE_ID
     SQL;
 
-    public function __construct(private readonly ActivityLogger $activity) {}
+    public function __construct(
+        private readonly ActivityLogger $activity,
+        private readonly SessionPolicy $sessions,
+    ) {}
 
     /**
      * قائمة الجلسات مع البحث والفلترة والترقيم — الأحدث نشاطاً أولاً
@@ -89,9 +92,17 @@ class SessionAdminController extends Controller
      * العبارة نصاً، وقائمة بيضاء صغيرة لا تغطي تعبير `NVL` المستخدم هنا.
      * Ordering is fixed (last activity, then id) and is not a request parameter: any user-supplied
      * column would be spliced into the SQL, and a small whitelist cannot cover the NVL expression.
+     *
+     * القائمة تكنس المنتهي قبل أن تقرأ: «فور انتهائها» عملياً تحتاج من يفتح الشاشة، لأن صاحب الجلسة
+     * المنتهية قد لا يفتح التطبيق مرة أخرى فلا يمرّ أبداً بمسار الرفض الذي يحذفها.
+     * The listing sweeps expired tokens before reading: "immediately on expiry" still needs someone to
+     * open the screen, because the owner of an expired session may never use the app again and so
+     * never hits the rejection path that deletes it.
      */
     public function index(Request $request): JsonResponse
     {
+        $this->sessions->purgeExpired();
+
         $limit = min(max((int) $request->input('limit', self::DEFAULT_LIMIT), 1), self::MAX_LIMIT);
         $page = max((int) $request->input('page', 1), 1);
 
@@ -373,10 +384,12 @@ class SessionAdminController extends Controller
      * شكل صف الجلسة: أسماء مقروءة + حالة + دقائق متبقية + تلميح «هذا الجهاز»
      * Shape a session row: readable names, status, minutes left, and the "this device" hint
      *
-     * الدقائق المتبقية من `SessionPolicy::toDate()` نفسها التي تحمي قراءة التواريخ الفارغة، فتُحسب
-     * بنفس المصدر الذي تستخدمه السياسة عند الرفض.
-     * Minutes remaining reuse SessionPolicy::toDate(), the same reader that makes empty Oracle
-     * dates safe, so the UI and the policy agree on what "expired" means.
+     * الدقائق المتبقية من `SessionPolicy::toDate()` نفسها التي تحمي قراءة التواريخ الفارغة، وتُقارن
+     * بـ `SessionPolicy::dbNow()` لا `now()`: العمود مكتوب على ساعة القاعدة، فمقارنته بساعة PHP
+     * كانت تُظهر «منتهية» و`minutes_left = 0` لكل جلسة قبل أوانها بثلاث ساعات.
+     * Minutes remaining reuse SessionPolicy::toDate(), the reader that makes empty Oracle dates safe,
+     * and compare against dbNow() rather than now(): the column is written on the database clock, so
+     * comparing it to PHP's UTC clock marked every session expired three hours early.
      *
      * @param  array<string, mixed>  $row
      * @return array<string, mixed>
@@ -411,7 +424,7 @@ class SessionAdminController extends Controller
                 'disabled' => 'حساب معطّل',
                 default => 'نشطة',
             },
-            'minutes_left' => $expiresAt === null ? null : max(0, $expiresAt->diffInMinutes(now(), false)),
+            'minutes_left' => $expiresAt === null ? null : max(0, $expiresAt->diffInMinutes(SessionPolicy::dbNow(), false)),
             'is_current' => $currentTokenId !== null && $currentTokenId === $tokenId,
         ];
     }

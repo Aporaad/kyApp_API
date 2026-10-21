@@ -4,6 +4,7 @@ namespace App\Support;
 
 use Carbon\Carbon;
 use DateTimeInterface;
+use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\PersonalAccessToken;
 
 /**
@@ -38,10 +39,43 @@ use Laravel\Sanctum\PersonalAccessToken;
  * PERSONAL_ACCESS_TOKENS: idle/absolute rejection erases the token itself, and purgeExpired() sweeps
  * the leftovers on login and on the sessions screen. Every deletion is best-effort — a failed delete
  * neither blocks the rejection nor blows up the request.
+ *
+ * ⏰ كل حساب زمني هنا يمرّ بـ `dbNow()` لا `now()`. التطبيق مضبوط على `timezone => 'UTC'` بينما
+ * `SYSDATE` في القاعدة `+03:00`، وكان الخلل مزدوجاً: كتابةُ `now()` تجعل الموعد يخزّن متأخراً ثلاث
+ * ساعات فتبدو الجلسات «منتهية» على الشاشة التي تقارن بـ `SYSDATE`، وكتابةُ `expireTokens()` لـ
+ * `SYSDATE - 1` تُقرأ هنا كأنها في المستقبل ثلاث ساعات فلا تُرفض الجلسة المنهية ولا يسقط المستخدم.
+ * `dbNow()` يزيح ساعة PHP إلى زمن القاعدة بإزاحة تُقاس مرة واحدة في الطلب، فيتطابق Writer/Reader/
+ * الشاشة/العميل على مرجع واحد دون تغيير `app.timezone` العام (كان سيُعيد تأريخ بقية الأقسام).
+ * Every time read/write here goes through `dbNow()`, never `now()`: the app runs on UTC while Oracle
+ * runs at +03:00, and that split broke both directions — PHP-written deadlines looked expired to the
+ * screen's SYSDATE comparison, and a SYSDATE-1 termination looked like a future expiry here, so a
+ * cut session kept working for three hours. dbNow() shifts PHP time onto the database clock with an
+ * offset measured once per request, aligning writer, reader, sessions screen and client watchdog
+ * without touching the global app.timezone (which would re-date every other module).
  */
 class SessionPolicy
 {
+    /**
+     * إزاحة ساعة PHP عن ساعة القاعدة بالثواني، محسوبة مرة واحدة لكل طلب
+     * PHP-to-database clock offset in seconds, measured once per request
+     *
+     * `null` تعني لم تُقَس بعد، وقيمتها `0` عند تعذّر القراءة (اختبارات بلا أوراكل، أو عطل اتصال)
+     * فالسلوك يرجع إلى ساعة PHP كما كان — لا يتعطّل الدخول بسبب قياس الإزاحة.
+     * null means not measured yet; it falls back to 0 when the read fails (Oracle-less tests, or a
+     * connection problem), so the policy degrades to plain PHP time rather than blocking sign-in.
+     */
+    private static ?int $clockOffset = null;
+
     public function __construct(private readonly SettingsStore $settings) {}
+
+    /**
+     * «الآن» بمرجع زمن القاعدة — المصدر الوحيد للوقت داخل سياسة الجلسات
+     * "Now" on the database clock — the single source of time inside the session policy
+     */
+    public static function dbNow(): Carbon
+    {
+        return Carbon::now()->addSeconds(self::clockOffset());
+    }
 
     /**
      * تاريخ من أي شكل يعيده بهائق: null/false/نص/كائن تاريخ ⇒ Carbon أو null
@@ -58,6 +92,38 @@ class SessionPolicy
         }
 
         return Carbon::parse((string) $value);
+    }
+
+    /**
+     * فرق الثواني بين `SYSDATE` وساعة PHP، بإشارة موجبة حين تكون القاعدة متقدمة
+     * Signed seconds from PHP time to SYSDATE, positive when the database clock is ahead
+     *
+     * `SYSDATE` تخدمها أوراكل كـ TEXT هنا لا كـ DATE، فالتحويل نصّي بصيغة ثابتة لا يعتمد على
+     * `NLS_DATE_FORMAT` الخاص بالجلسة. والنتيجة تُخزَّن ساكنة لأن الطلب الواحد لا يحتاج أدق من
+     * ثانية، ولأن قياسها عند كل `slide()` يعني استعلاماً إضافياً على كل طلب مُصادَق.
+     * Oracle serves SYSDATE as text here, so it is formatted explicitly instead of trusting the
+     * session's NLS_DATE_FORMAT. The result is cached per request: one request never needs finer
+     * precision, and measuring inside slide() would add a query to every authenticated call.
+     */
+    private static function clockOffset(): int
+    {
+        if (self::$clockOffset !== null) {
+            return self::$clockOffset;
+        }
+
+        try {
+            $row = (array) DB::connection('oracle')->selectOne(
+                "SELECT TO_CHAR(SYSDATE, 'YYYY-MM-DD HH24:MI:SS') AS DB_NOW FROM DUAL"
+            );
+
+            $dbNow = Carbon::parse((string) ($row['DB_NOW'] ?? $row['db_now'] ?? ''));
+
+            self::$clockOffset = $dbNow->getTimestamp() - Carbon::now()->getTimestamp();
+        } catch (\Throwable) {
+            self::$clockOffset = 0;
+        }
+
+        return self::$clockOffset;
     }
 
     /**
@@ -96,7 +162,7 @@ class SessionPolicy
 
         $createdAt = self::toDate($accessToken->created_at);
 
-        if ($createdAt !== null && $createdAt->lt(now()->subDays($absoluteDays))) {
+        if ($createdAt !== null && $createdAt->lt(self::dbNow()->subDays($absoluteDays))) {
             $this->discard($accessToken);
 
             return false;
@@ -121,18 +187,43 @@ class SessionPolicy
      * Sweep every expired session: called on successful sign-in and on the sessions screen
      *
      * «فور انتهائها» عملياً: الجلسة المنتهية تُمسح عند أول طلب يفشل بها (في `validate()`)، وهذا
-     * التنظيف يكنس البقايا حتى لو لم يعد أصحابها يفتحون التطبيق أبداً. لا يمسّ الجلسات الحية ولا
-     * القديمة بلا موعد (`EXPIRES_AT IS NULL`).
+     * التنظيف يكنس البقايا حتى لو لم يعد أصحابها يفتحون التطبيق أبداً.
      * "Immediately on expiry" in practice: the expired token is erased by the first failing request
      * (in `validate()`), and this sweep catches the leftovers even when their owners never reopen
-     * the app. Live sessions and legacy NULL-expiry rows are untouched.
+     * the app.
+     *
+     * فرعان للانتهاء، وكلاهما على ساعة القاعدة:
+     *  1) `EXPIRES_AT` تجاوز `SYSDATE` — نهاية خمول معروفة الموعد.
+     *  2) `EXPIRES_AT` فارغ مع خمول يتجاوز المهلة — وهذه هي التراكمات القديمة تحديداً: كل جلسة
+     *     حيّة تحصل على موعد من `slide()` في أول طلب بعد عمل السياسة، فصفّ بلا موعد يعني أنه لم
+     *     يُستخدم منذ ذلك الحين. تركها يعني «جلسات لا تنتهي أبداً» تظهر على الشاشة «نشطة» للأبد.
+     * Two expiry branches, both measured on the database clock:
+     *  1) EXPIRES_AT already past SYSDATE — a dated idle expiry.
+     *  2) EXPIRES_AT is NULL and the session has been idle beyond the window — this is precisely the
+     *     accumulation: any live session gets a deadline from slide() on its first request after the
+     *     policy went live, so a NULL deadline means it has not been used since. Leaving those rows
+     *     puts sessions on the admin screen that never end and show as "active" forever.
      */
     public function purgeExpired(): void
     {
+        $idleMinutes = max(1, $this->settings->int('session_idle_minutes', 240));
+
         try {
             PersonalAccessToken::query()
-                ->whereNotNull('expires_at')
-                ->where('expires_at', '<', now())
+                ->where(function ($query) use ($idleMinutes) {
+                    $query
+                        ->where(function ($dated) {
+                            $dated->whereNotNull('expires_at')
+                                ->where('expires_at', '<', self::dbNow());
+                        })
+                        ->orWhere(function ($legacy) use ($idleMinutes) {
+                            $legacy->whereNull('expires_at')
+                                ->whereRaw(
+                                    'COALESCE(last_used_at, created_at) < ?',
+                                    [self::dbNow()->subMinutes($idleMinutes)]
+                                );
+                        });
+                })
                 ->delete();
         } catch (\Throwable) {
             // تنظيف بيتي بأفضل جهد: فشله لا يجوز أن يمنع الدخول أو يُفجّر القائمة
@@ -166,7 +257,12 @@ class SessionPolicy
     private function slide(PersonalAccessToken $token, int $idleMinutes): void
     {
         $thresholdMinutes = max(1, $this->settings->int('session_touch_threshold_minutes', 5));
-        $newExpiry = now()->addMinutes($idleMinutes);
+
+        // الموعد يُحسب على ساعة القاعدة لا ساعة PHP: العمود يقارَن لاحقاً بـ `SYSDATE` في شاشة
+        // الجلسات، وبكتابة واحدة متّقة المرجع تصحّ القراءة والمقارنة والصدور للعميل معاً
+        // The deadline is computed on the database clock, not PHP's: the column is later compared to
+        // SYSDATE by the sessions screen, so one write reference keeps read, compare and header right.
+        $newExpiry = self::dbNow()->addMinutes($idleMinutes);
 
         $expiresAt = self::toDate($token->expires_at);
 
@@ -178,7 +274,7 @@ class SessionPolicy
 
         $token->forceFill([
             'expires_at' => $newExpiry,
-            'updated_at' => now(),
+            'updated_at' => self::dbNow(),
         ])->saveQuietly();
     }
 }

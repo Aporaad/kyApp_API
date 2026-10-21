@@ -82,7 +82,7 @@ app/
 │   ├── AuthController.php            login/logout/me + biometric enroll/login/revoke + myPermissions
 │   ├── UserAdminController.php       IBAC user administration (list/show/store/update/toggle/destroy/activity)
 │   ├── PermissionController.php      catalog read + per-user grant read + atomic sync
-│   ├── SessionAdminController.php    active sessions: index / terminate one / terminate a user's
+│   ├── SessionAdminController.php    active sessions: index (+ dead-row sweep) / terminate one / terminate a user's
 │   ├── SettingController.php         security & session settings (read/update with bounds)
 │   ├── AccountController.php         chart-of-accounts tree, CHART_ACC CRUD, statements
 │   ├── CustomerController.php        customer CRUD + statement (ACCOUNTS.CUST)
@@ -91,7 +91,9 @@ app/
 │   ├── InvoiceController.php         read-only SALES_BILL (envelope + encoding, phase 7)
 │   ├── TableQueryController.php      "top N from any table" debug endpoint + deny list
 │   └── Controller.php                empty abstract base (Laravel 12)
-├── Http/Middleware/EnsurePermission.php  ← the `permission:<code>` guard (401 → 403 by name)
+├── Http/Middleware/
+│   ├── EnsurePermission.php        ← the `permission:<code>` guard (401 → 403 by name)
+│   └── AppendSessionExpiry.php     ← adds `X-Session-Expires-At` to every authenticated response
 ├── Models/User.php             ← the ONLY model (Oracle APP_USERS, HasApiTokens, isAdmin())
 ├── Providers/AppServiceProvider.php
 │       singletons: SettingsStore, PermissionResolver, PermissionGrantSync, ActivityLogger,
@@ -101,7 +103,8 @@ app/
     ├── PermissionCatalog.php   the 17 modules / 93 codes + Arabic names (single source of truth)
     ├── PermissionResolver.php  can()/canAny()/canAll()/payloadFor()/forget() — deny-by-default
     ├── PermissionGrantSync.php atomic replace of a user's grants (+ anti-escalation)
-    ├── SessionPolicy.php       idle sliding renewal, absolute cap, prime() on issue
+    ├── SessionPolicy.php       idle sliding renewal, absolute cap, prime() on issue,
+    │                           dbNow() (Oracle clock), discard() on rejection, purgeExpired()
     ├── SettingsStore.php       APP_SETTINGS read/write with bounds + 3000-byte cache cap
     └── ActivityLogger.php      writes APP_USER_ACTIVITY with Arabic through the write path
 database/oracle/               ← IBAC DDL & seeding, applied by hand (NOT migrations)
@@ -116,13 +119,16 @@ database/oracle/               ← IBAC DDL & seeding, applied by hand (NOT migr
 `app/Enums`, `app/Console`, `app/Jobs`, `app/Exceptions`.
 
 There are **no Form Requests, no API Resources, no Policies, no Enums**. Validation is inline in
-controllers; responses are hand-built arrays. `app/Http/Middleware` holds exactly one class (the
-permission guard) and `app/Support` holds the seven classes above — do not grow either by accident.
+controllers; responses are hand-built arrays. `app/Http/Middleware` holds exactly the two classes
+above (the permission guard and the session-deadline header) and `app/Support` holds the seven
+classes — do not grow either by accident.
 
 `bootstrap/app.php` is no longer pristine: `withMiddleware()` registers the **`permission` alias**
-(`EnsurePermission`). `withExceptions()` is still empty, and there is still no published CORS config
-(framework-default `HandleCors` applies). `bootstrap/providers.php` registers only
-`AppServiceProvider`.
+(`EnsurePermission`) and appends **`AppendSessionExpiry` to the `api` group**, so every API response
+carries the session's deadline without any controller knowing about it. `withExceptions()` is still
+empty, and there is still no published CORS config (framework-default `HandleCors` applies — the
+middleware sets `Access-Control-Expose-Headers` for the web build). `bootstrap/providers.php`
+registers only `AppServiceProvider`.
 
 This flatness is the current reality, not an ideal. When adding a feature, **match the neighbouring
 controller**; propose a refactor separately rather than introducing a new layer drive-by.
@@ -158,6 +164,11 @@ Route::get('/customers')->middleware('permission:customers.view');
 `EnsurePermission` answers **401** with the session message when there is no user (a route that forgot
 `auth:sanctum`), and **403** naming the missing permission in Arabic when the grant is absent:
 `errors: { permission: ["customers.update"] }`. `IS_ADMIN = 1` passes unconditionally.
+
+Every response out of the `api` group also carries **`X-Session-Expires-At`** — the token's deadline as
+`YYYY-MM-DD HH:MM:SS` in Oracle's own clock, added by `AppendSessionExpiry` from the already-loaded
+`currentAccessToken()` (no extra query, no body change). It is a convenience for the client's watchdog,
+**not** a security boundary: the server re-decides every request regardless of what it last advertised.
 
 > ✅ `selectFromTable` is now behind `system.*` and additionally refuses 11 sensitive tables
 > (`APP_USERS`, token/cache/jobs infrastructure, …) with `errors.table_name = restricted_table`
@@ -351,10 +362,24 @@ Sanctum::$accessTokenAuthenticationCallback = fn ($token, $isValid) => $sessionP
 | Step | Condition | Result |
 |---|---|---|
 | 1 | `IS_ACTIVATED != 1` | 401 — a disabled account loses access immediately, valid token or not |
-| 2 | `EXPIRES_AT` in the past | 401 — idle window elapsed |
-| 3 | `CREATED_AT + session_absolute_days` elapsed | 401 — absolute cap |
+| 2 | `EXPIRES_AT` in the past | **delete the row** + 401 — idle window elapsed |
+| 3 | `CREATED_AT + session_absolute_days` elapsed | **delete the row** + 401 — absolute cap |
 | 4 | otherwise | accept + **sliding renewal**, write-throttled |
 
+- **All time in this class is `SessionPolicy::dbNow()` — the Oracle clock**, never `Carbon::now()`.
+  `config/app.php` is `UTC` while `SYSDATE` is `+03:00`, so a PHP-written deadline read by a
+  `SYSDATE` comparison (or the other way round) mis-dates every session by three hours; that split was
+  what made the sessions screen report every session as expired and let terminated sessions keep
+  working. The offset is measured once per request from `SELECT TO_CHAR(SYSDATE, …) FROM DUAL` and
+  cached in a static; with no Oracle reachable it falls back to `0` so the unit tests still run.
+  Do **not** "fix" this by changing `app.timezone` — that re-dates every other module. See trap C12.
+- `discard()` deletes the rejected token (steps 2 and 3) so a dead session never lingers, and it is a
+  silent no-op on an unsaved model — which is why the tests stay write-free.
+- `purgeExpired()` sweeps rows the app never gets a request for, in two branches: a dated expiry in the
+  past, and `EXPIRES_AT IS NULL AND COALESCE(last_used_at, created_at) < dbNow − idle` (the legacy rows
+  predating the policy; a live session always gets a deadline from `slide()`). It runs on
+  `AuthController@login` / `biometricLogin` (after `prime()`) and at the top of `SessionAdminController@index`,
+  best-effort inside a `try/catch` — a sweep failure must never break the endpoint it piggybacks on.
 - Idle window `session_idle_minutes` (default **240**), absolute cap `session_absolute_days`
   (default **14**), throttle `session_touch_threshold_minutes` (default **5**) ⇒ roughly one
   `UPDATE` per session per five minutes. `EXPIRES_AT IS NULL` (legacy sessions) are accepted and
@@ -364,7 +389,8 @@ Sanctum::$accessTokenAuthenticationCallback = fn ($token, $isValid) => $sessionP
 - Writes use `saveQuietly()` and set `updated_at` explicitly (Oracle gives that column no default and
   Sanctum does not fill it on this path).
 - Rejection rides the client's existing path: 401 → `ErrorInterceptor` → `clearAll()` →
-  `forceLogout()` → `/login`.
+  `forceLogout()` → `/login`. The client additionally watches the advertised deadline locally and logs
+  out within 30 s even with no request to fail — see the root [`../AGENTS.md`](../AGENTS.md) §4.
 
 ### `app/Models/User.php` — the only model
 
@@ -584,16 +610,18 @@ Notes:
 ## 10. Testing (Pest 3)
 
 `tests/Pest.php` binds `Tests\TestCase` to `tests/Feature`, with **`RefreshDatabase` commented out**
-(you cannot refresh a legacy Oracle schema). **12 files, 114 tests, 759 assertions.**
+(you cannot refresh a legacy Oracle schema). **12 files, 127 tests** (669 assertions measured against
+the live instance; two session-shape cases **skip** when `PERSONAL_ACCESS_TOKENS` is empty, so the
+exact pass/assert counts move with the data).
 
 | File | Covers |
 |---|---|
 | `tests/Feature/AuthTest.php` | login validation → 422; bad credentials → 401; `/api/auth/me` and `/api/auth/logout` reject unauthenticated → 401 |
 | `tests/Feature/TableQueryTest.php` | `/api/selectFromTable` success shape; 404 unknown table; 422 on an injection attempt; 422 on `limit > 1000`; plus the sealed behaviour (restricted table refused, sensitive columns redacted) |
-| `tests/Feature/IbacCoreTest.php` | catalog integrity, resolver rules (admin bypass, `system.*`, literal, module wildcard, deny-by-default), session policy, `EnsurePermission` 401/403 |
+| `tests/Feature/IbacCoreTest.php` | catalog integrity, resolver rules (admin bypass, `system.*`, literal, module wildcard, deny-by-default), session policy, `EnsurePermission` 401/403, **`dbNow()` vs `SYSDATE`**, the sweep (dead rows gone, live rows untouched), `AppendSessionExpiry` with and without a deadline |
 | `tests/Feature/UsersAdminTest.php` | user administration: auth required, named-permission 403, validation, self-protection, last-admin guard, activity trail shape |
 | `tests/Feature/PermissionSyncTest.php` | `PUT /users/{id}/permissions` atomic replace, unknown codes 422, anti-escalation, session termination on change |
-| `tests/Feature/ActiveSessionsTest.php` | session listing shape, idle/expiry derivation, terminate by token and by user, self-session rules |
+| `tests/Feature/ActiveSessionsTest.php` | session listing shape, idle/expiry derivation, terminate by token and by user, self-session rules. Per-row assertions **skip** when `purgeExpired()` leaves the table empty (nobody signed in) — a live row is not a fixture |
 | `tests/Feature/SecuritySettingsTest.php` | settings read/write, per-type bounds, locked settings, `settings.update` guard |
 | `tests/Feature/BusinessRoutesSealedTest.php` | **the route-sealing gate**: no public route outside the three, every business route carries a `permission:` guard, 401/403 samples per module, the invoice envelope |
 | `tests/Unit/ArabicWritePathTest.php` | the Arabic **write contract** for Oracle — bound codepoints equal the CP1256 byte list, no raw-byte binding, read-back equality, and `encodeForOracle()` stays deleted. Runs with **no** Oracle connection |
@@ -608,7 +636,14 @@ Notes:
 > 🚫 **IBAC feature tests are deliberately read-only** against the live legacy schema — they never
 > create or delete a user. Write routes are covered by their **refusal** branches (422/403/404/409),
 > which return before any `INSERT`. Do not add tests that write to `CUST`, `ENTRY_MAIN`, or any other
-> ERP table without explicit user approval.
+> ERP table without explicit user approval. The single accepted exception is `PERSONAL_ACCESS_TOKENS`
+> itself, where the write *is* the behaviour under test (the sweep case in `IbacCoreTest`).
+>
+> `Laravel\Sanctum\PersonalAccessToken` carries **no `$connection`**, so it follows the *default*
+> connection — sqlite `:memory:` in tests, where no such table exists. A test that exercises the token
+> model against Oracle must set `config(['database.default' => 'oracle'])` and restore it in
+> `finally`. Anything not persisted (`new PersonalAccessToken`) never issues a query, which is why
+> `discard()` and the policy cases run write-free.
 
 **Nothing covers** customers, workers, accounts, currencies, or biometrics end to end. If you touch a
 controller, adding a Pest feature test for it is welcome. Read the `testing-best-practices` skill in
@@ -651,7 +686,7 @@ controller, adding a Pest feature test for it is welcome. Read the `testing-best
 | S2 | ~~`selectFromTable` exposes arbitrary tables~~ **CLOSED (phase 7)** — behind `system.*`, with an 11-table deny list and `PASSWORD`/`DEVICE_TOKEN`/`TOKEN`/`SECRET`/`KEY` column redaction that reports `redacted_columns`. The injection guard was always sound. |
 | S3 | **Plaintext password comparison** in `AuthController@login`, ahead of `Hash::check`. Deliberate legacy support — do not remove without a migration plan for the existing rows. |
 | S4 | **Oracle credentials committed** as `config/database.php` defaults (`ACCOUNTS` / `acc`). Real credentials belong in `.env` only; treat this as tech debt, not as a template to copy. |
-| S5 | **`expiration => null` is required, not a hole** — lifetime is enforced by `SessionPolicy` on `EXPIRES_AT`. Setting `expiration` re-opens the "kicks active users out" bug and is the one way to break S5 in the other direction. |
+| S5 | **`expiration => null` is required, not a hole** — lifetime is enforced by `SessionPolicy` on `EXPIRES_AT` (`dbNow()` clock), a rejected token is **deleted** on the spot, and `purgeExpired()` sweeps dead rows on login and on the sessions screen. Setting `expiration` re-opens the "kicks active users out" bug and is the one way to break S5 in the other direction. |
 | S6 | **No validation** in `WorkerController@storeWorker` / `updateWorker` — direct `$request->only([UPPERCASE columns])` inserts. |
 | S7 | **No CORS config published** — the Flutter web build logs preflight warnings. Framework defaults apply. |
 | S8 | **Cache payload ceiling: 3000 bytes** — see the `ORA-01461` bullet in §5. |
@@ -671,6 +706,7 @@ controller, adding a Pest feature test for it is welcome. Read the `testing-best
 | C9 | **Docs drift**: `devloping_history.md` / `db_commends.md` describe statements over `JOURNAL_ENTRY_REC`; the code uses the base tables. `implementation_plan.md` is referenced by `todo.md` but does not exist. `roles.md` is misnamed — it is an integration-standards reference, not a permissions model. |
 | C10 | **`USER_ID` ≠ `USER_NO`** — `USER_NO` was dropped from `APP_USERS`; anything referencing it fails with `ORA-00904`. |
 | C11 | **Oracle returns an empty DATE as `false`** — normalise through `SessionPolicy::toDate()` or the request 500s. |
+| C12 | **Two clocks: PHP is UTC, `SYSDATE` is `+03:00`.** `config/app.php` sets `timezone => UTC` while the Oracle instance reports Yemen time, so anything comparing a PHP-written timestamp against a `SYSDATE` comparison (or the reverse) is off by three hours. That is exactly how the sessions screen came to label every session expired while `expireTokens()`'s `SYSDATE - 1` read as a *future* deadline and never rejected the terminated token. All session time goes through `SessionPolicy::dbNow()`; do not "fix" it by changing `app.timezone`, which would re-date every other module, and do not write `EXPIRES_AT` from `Carbon::now()` anywhere else either. |
 
 ---
 
@@ -710,9 +746,11 @@ git submodule update --init --recursive   # from the parent, after pulling
 
 - **Commit and push inside the submodule first**, then commit the pointer bump in the parent —
   otherwise the parent references a commit nobody else can fetch.
-- The whole IBAC build (4 new controllers, `app/Http/Middleware/`, the `Support/` classes, the new
-  tests, `routes/api.php`, `bootstrap/app.php`, `config/sanctum.php`, this file) is still **uncommitted
-  work** in this working tree. Commit only when the user asks.
+- The IBAC core (controllers, `app/Http/Middleware/EnsurePermission.php`, the `Support/` classes,
+  `routes/api.php`, `config/sanctum.php`) is **committed**. What is still **uncommitted** in this
+  working tree is the session-lifetime work — `SessionPolicy` (`dbNow()` / `discard()` /
+  `purgeExpired()`), `AppendSessionExpiry`, `bootstrap/app.php`, `SessionAdminController`, their tests,
+  and these docs — alongside unrelated changes from other tasks. Commit only when the user asks.
 - Never force-push. Never commit `.env`.
 
 ---

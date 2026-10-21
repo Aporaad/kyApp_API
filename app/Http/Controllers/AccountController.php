@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Support\ArabicEncoding;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -433,8 +434,19 @@ class AccountController extends Controller
 
     /**
      * GET /accounts/chart/{accNo}/statement
-     * كشف حساب مالي واحد
-     * Query params: from_date (DD/MM/YYYY), to_date, page, limit
+     * كشف حساب مالي واحد (دفتر حركات حساب CHART_ACC مفرد)
+     * مطابق لقالب تقرير أوراكل السابق acc_report.RDF/acc_report.pdf
+     *
+     * مصدر البيانات الحقيقي: ENTRY_MAIN + ENTRY_SUB + ENTRY_TYPE
+     * ملاحظة: جدول ACC_TRXN غير موجود فعلياً في مخطط ACCOUNTS -
+     * كان الاستخدام السابق له يُنتج كشف حساب فارغ بصمت دون خطأ.
+     * This is the same proven data source used by CustomerController::statement,
+     * joined directly on ENTRY_SUB.ACC_NO (a CHART_ACC's own ledger line needs no
+     * GIVING/party join, unlike the customer case).
+     *
+     * Query params: from_date (DD/MM/YYYY or YYYY-MM-DD), to_date, page, limit
+     * Default period when both dates are absent: the 30 days preceding the account's
+     * last transaction date (confirmed requirement).
      */
     public function getAccountStatement(Request $request, $accNo)
     {
@@ -448,68 +460,153 @@ class AccountController extends Controller
             }
             $accArr = (array) $accRow;
 
-            $fromDate = $request->query('from_date');
-            $toDate = $request->query('to_date');
             $page = max(1, (int) $request->query('page', 1));
             $limit = min(200, max(10, (int) $request->query('limit', 50)));
             $offset = ($page - 1) * $limit;
             $maxRow = $offset + $limit;
 
-            $dateWhere = '';
-            $params = ['acc_no' => $accNo];
+            // ── جلب كامل دفتر حركات الحساب مرتباً زمنياً (يُصفّى بالفترة في PHP
+            //    لتسهيل حساب الرصيد الافتتاحي، بنفس نمط CustomerController::statement) ──
+            $allSql = '
+                SELECT es.ENTRY_NO,
+                       SUBSTR(TO_CHAR(es.ENTRY_NO), 1, 1) || SUBSTR(TO_CHAR(es.ENTRY_NO), 7, 4) AS SUB_ENTRY_NO,
+                       TO_CHAR(em.ENTRY_DATE, \'DD/MM/YYYY\') AS ENTRY_DATE,
+                       TO_CHAR(em.ENTRY_DATE, \'YYYY-MM-DD\') AS RAW_DATE,
+                       et.ENTRY_TYPE_NAME,
+                       NVL(es.SUB_DETAILS, em.DETAILS) AS DETAILS,
+                       es.BALANCE_S,
+                       es.ENTRY_MNT,
+                       es.SEQ_PRICE
+                FROM ENTRY_MAIN em, ENTRY_SUB es, ENTRY_TYPE et
+                WHERE es.ACC_NO = :acc_no
+                  AND es.ENTRY_NO = em.ENTRY_NO
+                  AND em.ENTRY_TYPE_NO = et.ENTRY_TYPE_NO
+                ORDER BY em.ENTRY_DATE, es.ENTRY_NO, es.SEQ
+            ';
+            $rows = DB::connection('oracle')->select($allSql, ['acc_no' => $accNo]);
 
-            if ($fromDate) {
-                $dateWhere .= " AND TRXN_DATE >= TO_DATE(:from_date, 'DD/MM/YYYY')";
-                $params['from_date'] = $fromDate;
+            // ── الفترة الافتراضية: آخر 30 يوم قبل تاريخ آخر حركة ──
+            $defaulted = false;
+            $fromDateParam = $request->query('from_date');
+            $toDateParam = $request->query('to_date');
+
+            if (! $fromDateParam && ! $toDateParam && ! empty($rows)) {
+                $lastRawDate = null;
+                foreach ($rows as $lastRow) {
+                    $lr = (array) $lastRow;
+                    $lastRawDate = $lr['RAW_DATE'] ?? $lr['raw_date'] ?? $lastRawDate;
+                }
+                if ($lastRawDate) {
+                    try {
+                        $lastDate = Carbon::parse($lastRawDate);
+                        // 'Y-m-d' وليس 'YYYY-MM-DD': في PHP كل Y تُكرّر السنة، وM اسم
+                        // الشهر وD اسم اليوم — فتنتج سلسلة مشوهة تكسر منتقي التاريخ
+                        // على العميل (سنة 93422). صيغة ISO الصحيحة هي Y-m-d فقط.
+                        // Use 'Y-m-d', never 'YYYY-MM-DD': repeated format
+                        // letters produce garbage strings that crash the client.
+                        $fromDateParam = $lastDate->copy()->subDays(30)->format('Y-m-d');
+                        $toDateParam = $lastDate->format('Y-m-d');
+                        $defaulted = true;
+                    } catch (\Throwable) {
+                        $fromDateParam = null;
+                        $toDateParam = null;
+                    }
+                }
             }
-            if ($toDate) {
-                $dateWhere .= " AND TRXN_DATE <= TO_DATE(:to_date, 'DD/MM/YYYY')";
-                $params['to_date'] = $toDate;
+
+            $fromDateFilter = $fromDateParam ? $this->parseStatementDateToIso($fromDateParam) : null;
+            $toDateFilter = $toDateParam ? $this->parseStatementDateToIso($toDateParam) : null;
+
+            $openingBalance = 0.0;
+            $runningBalance = 0.0;
+            $totalDebit = 0.0;
+            $totalCredit = 0.0;
+            $firstDate = null;
+            $lastDate = null;
+            $allEntries = []; // كل الحركات المفلترة بالمدة (قبل الترقيم)
+
+            foreach ($rows as $row) {
+                $r = (array) $row;
+                $rawDate = $r['RAW_DATE'] ?? $r['raw_date'] ?? null;
+                $entryDate = $r['ENTRY_DATE'] ?? $r['entry_date'] ?? null;
+                $mnt = (float) ($r['ENTRY_MNT'] ?? $r['entry_mnt'] ?? 0);
+                $bal = (float) ($r['BALANCE_S'] ?? $r['balance_s'] ?? 0);
+
+                // الحركات الأقدم من بداية الفترة تُحسب ضمن الرصيد الافتتاحي فقط
+                if ($fromDateFilter && $rawDate && $rawDate < $fromDateFilter) {
+                    $openingBalance = $bal;
+                    $runningBalance = $bal;
+
+                    continue;
+                }
+
+                if ($toDateFilter && $rawDate && $rawDate > $toDateFilter) {
+                    continue;
+                }
+
+                if ($firstDate === null) {
+                    $firstDate = $entryDate;
+                }
+                $lastDate = $entryDate;
+
+                $debit = $mnt > 0 ? $mnt : 0.0;
+                $credit = $mnt < 0 ? abs($mnt) : 0.0;
+
+                $totalDebit += $debit;
+                $totalCredit += $credit;
+                $runningBalance = $bal;
+
+                $allEntries[] = [
+                    'entry_no' => (int) ($r['ENTRY_NO'] ?? $r['entry_no'] ?? 0),
+                    'sub_entry_no' => (string) ($r['SUB_ENTRY_NO'] ?? $r['sub_entry_no'] ?? ''),
+                    'date' => $entryDate,
+                    'entry_type_name' => ArabicEncoding::fixMojibake($r['ENTRY_TYPE_NAME'] ?? $r['entry_type_name'] ?? ''),
+                    'description' => ArabicEncoding::fixMojibake(trim((string) ($r['DETAILS'] ?? $r['details'] ?? ''))),
+                    'debit' => $debit,
+                    'credit' => $credit,
+                    'balance' => $bal,
+                ];
             }
 
-            $transactions = [];
-            $total = 0;
+            // ── الترقيم اليدوي (pagination) بعد الانتهاء من حساب الرصيد الافتتاحي ──
+            $total = count($allEntries);
+            $transactions = array_slice($allEntries, $offset, $limit);
 
+            $finalBalance = $total > 0 ? $runningBalance : $openingBalance;
+
+            // ── رمز/اسم العملة من آخر حركة (SEQ_PRICE -> CUR_PRICE -> CUR_CODE) ──
+            $currency = 'يمني YR';
             try {
-                $countSql = "SELECT COUNT(*) as TOTAL FROM ACC_TRXN WHERE ACC_NO = :acc_no $dateWhere";
-                $countRow = DB::connection('oracle')->selectOne($countSql, $params);
-                $cArr = (array) $countRow;
-                $total = (int) ($cArr['TOTAL'] ?? $cArr['total'] ?? 0);
-
-                $trxnSql = "
-                    SELECT * FROM (
-                        SELECT a.*, ROWNUM rnum FROM (
-                            SELECT TRXN_DATE, DESCRIPTION, DEBIT, CREDIT, BALANCE
-                            FROM ACC_TRXN
-                            WHERE ACC_NO = :acc_no $dateWhere
-                            ORDER BY TRXN_DATE, SEQ
-                        ) a
-                        WHERE ROWNUM <= :max_row
-                    )
-                    WHERE rnum > :offset
-                ";
-                $tParams = $params;
-                $tParams['max_row'] = $maxRow;
-                $tParams['offset'] = $offset;
-
-                $trxnRows = DB::connection('oracle')->select($trxnSql, $tParams);
-                $transactions = array_map(function ($row) {
+                $lastPriceSeq = null;
+                foreach ($rows as $row) {
                     $r = (array) $row;
-
-                    return [
-                        'date' => $r['TRXN_DATE'] ?? $r['trxn_date'] ?? null,
-                        'description' => ArabicEncoding::fixMojibake($r['DESCRIPTION'] ?? $r['description'] ?? ''),
-                        'debit' => (float) ($r['DEBIT'] ?? $r['debit'] ?? 0),
-                        'credit' => (float) ($r['CREDIT'] ?? $r['credit'] ?? 0),
-                        'balance' => (float) ($r['BALANCE'] ?? $r['balance'] ?? 0),
-                    ];
-                }, $trxnRows);
+                    $sp = $r['SEQ_PRICE'] ?? $r['seq_price'] ?? null;
+                    if ($sp) {
+                        $lastPriceSeq = $sp;
+                    }
+                }
+                if ($lastPriceSeq) {
+                    $curRow = DB::connection('oracle')->selectOne(
+                        'SELECT cc.CODE, c.CUR_NAME FROM CUR_PRICE cp
+                         JOIN CURRENCY c ON c.CUR_NO = cp.CUR_NO
+                         JOIN CUR_CODE cc ON cc.CUR_NO = cp.CUR_NO
+                         WHERE cp.SEQ = :seq',
+                        ['seq' => $lastPriceSeq]
+                    );
+                    if ($curRow) {
+                        $cr = (array) $curRow;
+                        $curName = ArabicEncoding::fixMojibake($cr['CUR_NAME'] ?? $cr['cur_name'] ?? '');
+                        $curCode = $cr['CODE'] ?? $cr['code'] ?? '';
+                        if ($curName !== '' || $curCode !== '') {
+                            $currency = trim($curName.' '.$curCode);
+                        }
+                    }
+                }
             } catch (\Exception) {
-                // جدول الحركات غير موجود
+                // جدول/ربط العملة غير متاح - نبقى على القيمة الافتراضية
             }
 
             $accName = ArabicEncoding::fixMojibake($accArr['ACC_NAME'] ?? $accArr['acc_name'] ?? '');
-            $balance = (float) ($accArr['BALANCE'] ?? $accArr['balance'] ?? 0);
 
             return response()->json([
                 'success' => true,
@@ -517,17 +614,25 @@ class AccountController extends Controller
                     'account' => [
                         'acc_no' => (int) ($accArr['ACC_NO'] ?? $accArr['acc_no'] ?? $accNo),
                         'acc_name' => $accName,
-                        'balance' => $balance,
+                        'balance' => (float) ($accArr['BALANCE'] ?? $accArr['balance'] ?? 0),
                         'group_id' => isset($accArr['GROUP_ID']) || isset($accArr['group_id']) ? (int) ($accArr['GROUP_ID'] ?? $accArr['group_id']) : null,
                     ],
                     'transactions' => $transactions,
                     'summary' => [
-                        'current_balance' => $balance,
-                        'total_records' => (int) $total,
+                        'opening_balance' => $openingBalance,
+                        'final_balance' => $finalBalance,
+                        'total_debit' => $totalDebit,
+                        'total_credit' => $totalCredit,
+                        'current_balance' => $finalBalance,
+                        'total_records' => $total,
+                        'currency' => $currency,
+                        'from_date' => $fromDateParam ?: ($firstDate ?? ''),
+                        'to_date' => $toDateParam ?: ($lastDate ?? ''),
+                        'defaulted' => $defaulted,
                     ],
                 ],
                 'meta' => [
-                    'total' => (int) $total,
+                    'total' => $total,
                     'page' => $page,
                     'limit' => $limit,
                     'total_pages' => $total > 0 ? (int) ceil($total / $limit) : 0,
@@ -536,6 +641,51 @@ class AccountController extends Controller
             ]);
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * تحويل نص تاريخ (DD/MM/YYYY أو YYYY-MM-DD أو YYYY/MM/DD) إلى YYYY-MM-DD
+     * Date-string normalizer used by both statement endpoints.
+     */
+    private function parseStatementDateToIso(string $dateStr): ?string
+    {
+        $d = trim($dateStr);
+        if ($d === '') {
+            return null;
+        }
+
+        try {
+            $normalized = str_replace('/', '-', $d);
+            $parts = explode('-', $normalized);
+            if (count($parts) === 3) {
+                $year = null;
+                if (strlen($parts[0]) === 4) {
+                    // YYYY-MM-DD or YYYY/MM/DD
+                    $year = (int) $parts[0];
+                    $month = (int) $parts[1];
+                    $day = (int) $parts[2];
+                } else {
+                    // DD-MM-YYYY
+                    $year = (int) $parts[2];
+                    $month = (int) $parts[1];
+                    $day = (int) $parts[0];
+                }
+
+                // حماية من التواريخ المشوهة (سنة 93422 من عميل قديم، أو 0025 من
+                // صفوف Oracle فاسدة): نرفض أي سنة/شهر/يوم خارج النطاق المنطقي.
+                // Reject absurd dates (year 93422, corrupt year 0025 rows) so
+                // garbage never reaches a filter comparison or the client UI.
+                if ($year < 1900 || $year > 2100 || $month < 1 || $month > 12 || $day < 1 || $day > 31) {
+                    return null;
+                }
+
+                return sprintf('%04d-%02d-%02d', $year, $month, $day);
+            }
+
+            return Carbon::parse($d)->format('Y-m-d');
+        } catch (\Throwable) {
+            return null;
         }
     }
 
@@ -632,6 +782,211 @@ class AccountController extends Controller
                         'from_date' => $fromDate,
                         'to_date' => $toDate,
                     ],
+                ],
+            ]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    // =========================================================
+    // ===     كشف حساب مجموعة حسابات جزئية (ميزان مراجعة)  ===
+    // =========================================================
+
+    /**
+     * GET /accounts/group-statement
+     * كشف حساب مجموعة حسابات جزئية - بأسلوب ميزان المراجعة
+     * مطابق لتقرير اوراكل السابق TRIAL_BALANCE_REPORT.RDF/TRIAL_BALANCE_REPORT.pdf
+     *
+     * يحدد النطاق عبر اختيار متسلسل رباعي المستويات:
+     * حساب رئيسي (ACCOUNT.ACC_NO) -> حساب فرعي (ACC_MAIN.ACC_SUB) ->
+     * حساب جزئي (ACC_SUB.ACC_PART) -> مجموعات الحساب الجزئي (ACC_SUB_GROUP.GROUP_ID)
+     * وكلها اختيارية حسب قاعدة الحل أدناه.
+     *
+     * يعرض لكل حساب مالي (CHART_ACC) داخل النطاق:
+     * مدين/دائن مفصولين إلى عملة محلية (CUR_NO = 1 = يمني) وعملة أجنبية،
+     * مع الرصيد. إن حُددت فترة زمنية تُحسب الإحصائيات من حركات الفترة فقط،
+     * وإلا تُحسب من كامل السجل التاريخي للحساب.
+     *
+     * Query params: acc_no, acc_sub, acc_part, group_id, from_date, to_date
+     */
+    public function getGroupStatement(Request $request)
+    {
+        try {
+            $accNo = $request->query('acc_no');
+            $accSub = $request->query('acc_sub');
+            $accPart = $request->query('acc_part');
+            $groupId = $request->query('group_id');
+            $fromDateParam = $request->query('from_date');
+            $toDateParam = $request->query('to_date');
+
+            // ── حلّ النطاق (Scope Resolution): أعمق مستوى مختار يفوز ──
+            $scopeWhere = '';
+            $scopeParams = [];
+            $scopeLevel = '';
+            $scopeName = '';
+
+            if ($groupId) {
+                $scopeWhere = 'c.GROUP_ID = :group_id';
+                $scopeParams['group_id'] = $groupId;
+                $scopeLevel = 'group';
+                $gRow = DB::connection('oracle')->selectOne(
+                    'SELECT ACC_GROUP_NAME FROM ACC_SUB_GROUP WHERE GROUP_ID = :id',
+                    ['id' => $groupId]
+                );
+                $scopeName = $gRow ? ArabicEncoding::fixMojibake(((array) $gRow)['ACC_GROUP_NAME'] ?? ((array) $gRow)['acc_group_name'] ?? '') : '';
+            } elseif ($accPart) {
+                $scopeWhere = 'TRUNC(c.ACC_NO / 10000) = :acc_part';
+                $scopeParams['acc_part'] = $accPart;
+                $scopeLevel = 'sub';
+                $pRow = DB::connection('oracle')->selectOne(
+                    'SELECT PART_NAME FROM ACC_SUB WHERE ACC_PART = :id',
+                    ['id' => $accPart]
+                );
+                $scopeName = $pRow ? ArabicEncoding::fixMojibake(((array) $pRow)['PART_NAME'] ?? ((array) $pRow)['part_name'] ?? '') : '';
+            } elseif ($accSub) {
+                $scopeWhere = 'TRUNC(c.ACC_NO / 10000) IN (SELECT ACC_PART FROM ACC_SUB WHERE ACC_SUB = :acc_sub)';
+                $scopeParams['acc_sub'] = $accSub;
+                $scopeLevel = 'main';
+                $mRow = DB::connection('oracle')->selectOne(
+                    'SELECT SUB_NAME FROM ACC_MAIN WHERE ACC_SUB = :id',
+                    ['id' => $accSub]
+                );
+                $scopeName = $mRow ? ArabicEncoding::fixMojibake(((array) $mRow)['SUB_NAME'] ?? ((array) $mRow)['sub_name'] ?? '') : '';
+            } elseif ($accNo) {
+                $scopeWhere = 'TRUNC(c.ACC_NO / 10000) IN (
+                    SELECT s.ACC_PART FROM ACC_SUB s
+                    INNER JOIN ACC_MAIN m ON s.ACC_SUB = m.ACC_SUB
+                    WHERE m.ACC_NO = :acc_no
+                )';
+                $scopeParams['acc_no'] = $accNo;
+                $scopeLevel = 'account';
+                $aRow = DB::connection('oracle')->selectOne(
+                    'SELECT ACC_NAME FROM ACCOUNT WHERE ACC_NO = :id',
+                    ['id' => $accNo]
+                );
+                $scopeName = $aRow ? ArabicEncoding::fixMojibake(((array) $aRow)['ACC_NAME'] ?? ((array) $aRow)['acc_name'] ?? '') : '';
+            } else {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'يجب اختيار حساب رئيسي على الأقل لتحديد نطاق التقرير / Please select at least a main account to define the report scope.',
+                ], 400);
+            }
+
+            // ── فترة اختيارية، تُبنى ديناميكياً داخل شرط الربط (وليس في WHERE)
+            //    حتى تبقى الحسابات بدون حركات في الفترة ظاهرة بأصفار ──
+            $fromIso = $fromDateParam ? $this->parseStatementDateToIso($fromDateParam) : null;
+            $toIso = $toDateParam ? $this->parseStatementDateToIso($toDateParam) : null;
+
+            $emDateCondition = '';
+            if ($fromIso) {
+                $emDateCondition .= " AND em.ENTRY_DATE >= TO_DATE(:from_date, 'YYYY-MM-DD')";
+                $scopeParams['from_date'] = $fromIso;
+            }
+            if ($toIso) {
+                $emDateCondition .= " AND em.ENTRY_DATE <= TO_DATE(:to_date, 'YYYY-MM-DD')";
+                $scopeParams['to_date'] = $toIso;
+            }
+
+            // ملاحظة جوهرية تم التحقق منها من قاعدة البيانات: حركات العملة المحلية (يمني)
+            // لا تحتوي على SEQ_PRICE على الإطلاق (يبقي NULL)، بينما حركات العملات الأجنبية
+            // فقط هي من تحمل SEQ_PRICE مرتبط بصف في CUR_PRICE (CUR_NO = 2 أو 3).
+            // Critical finding verified against live data: a movement's SEQ_PRICE is only
+            // populated for FOREIGN currency entries (CUR_NO 2/3); local YR entries always
+            // leave it NULL (no FX price row needed). So "no linked CUR_PRICE row" means
+            // local currency, NOT unknown/foreign — the opposite of the initial assumption.
+            //
+            // يُربط ENTRY_SUB مع ENTRY_MAIN داخل مجموعة اقواس (joined table) لضمان ان
+            // فلتر التاريخ يؤثر على es نفسه وليس على em فقط (كان الخطأ السابق ان
+            // فلتر التاريخ داخل ON الخاص ب em وحده كان يُبقي صفوف es خارج الفترة
+            // داخلة في المجاميع رغم استبعاد حقول em).
+            $esJoin = "ENTRY_SUB es INNER JOIN ENTRY_MAIN em ON es.ENTRY_NO = em.ENTRY_NO{$emDateCondition}";
+
+            $sql = "
+                SELECT c.ACC_NO, c.ACC_NAME, c.BALANCE,
+                       NVL(SUM(CASE WHEN (cp.CUR_NO IS NULL OR cp.CUR_NO = 1) AND es.ENTRY_MNT > 0 THEN es.ENTRY_MNT      ELSE 0 END), 0) AS LOCAL_DEBIT,
+                       NVL(SUM(CASE WHEN (cp.CUR_NO IS NULL OR cp.CUR_NO = 1) AND es.ENTRY_MNT < 0 THEN ABS(es.ENTRY_MNT) ELSE 0 END), 0) AS LOCAL_CREDIT,
+                       NVL(SUM(CASE WHEN cp.CUR_NO IS NOT NULL AND cp.CUR_NO <> 1 AND es.ENTRY_MNT > 0 THEN es.ENTRY_MNT      ELSE 0 END), 0) AS FOREIGN_DEBIT,
+                       NVL(SUM(CASE WHEN cp.CUR_NO IS NOT NULL AND cp.CUR_NO <> 1 AND es.ENTRY_MNT < 0 THEN ABS(es.ENTRY_MNT) ELSE 0 END), 0) AS FOREIGN_CREDIT,
+                       NVL(SUM(CASE WHEN cp.CUR_NO IS NULL OR cp.CUR_NO = 1 THEN es.ENTRY_MNT ELSE 0 END), 0) AS LOCAL_NET,
+                       NVL(SUM(CASE WHEN cp.CUR_NO IS NOT NULL AND cp.CUR_NO <> 1 THEN es.ENTRY_MNT ELSE 0 END), 0) AS FOREIGN_NET,
+                       MAX(CASE WHEN cp.CUR_NO IS NOT NULL AND cp.CUR_NO <> 1 THEN cc.CODE END) AS FOREIGN_CUR_CODE
+                FROM CHART_ACC c
+                LEFT JOIN ({$esJoin}) ON es.ACC_NO = c.ACC_NO
+                LEFT JOIN CUR_PRICE cp ON cp.SEQ = es.SEQ_PRICE
+                LEFT JOIN CUR_CODE cc ON cc.CUR_NO = cp.CUR_NO
+                WHERE {$scopeWhere}
+                GROUP BY c.ACC_NO, c.ACC_NAME, c.BALANCE
+                ORDER BY c.ACC_NO
+            ";
+
+            $rows = DB::connection('oracle')->select($sql, $scopeParams);
+
+            $result = [];
+            $totals = [
+                'local_debit' => 0.0,
+                'local_credit' => 0.0,
+                'foreign_debit' => 0.0,
+                'foreign_credit' => 0.0,
+                'balance' => 0.0,
+            ];
+
+            foreach ($rows as $row) {
+                $r = (array) $row;
+                $localDebit = (float) ($r['LOCAL_DEBIT'] ?? $r['local_debit'] ?? 0);
+                $localCredit = (float) ($r['LOCAL_CREDIT'] ?? $r['local_credit'] ?? 0);
+                $foreignDebit = (float) ($r['FOREIGN_DEBIT'] ?? $r['foreign_debit'] ?? 0);
+                $foreignCredit = (float) ($r['FOREIGN_CREDIT'] ?? $r['foreign_credit'] ?? 0);
+                $localNet = (float) ($r['LOCAL_NET'] ?? $r['local_net'] ?? 0);
+                $foreignNet = (float) ($r['FOREIGN_NET'] ?? $r['foreign_net'] ?? 0);
+                $balance = $localNet + $foreignNet;
+
+                // رمز العملة المعروض للسطر: أجنبي إن وُجدت حركة أجنبية وحدها،
+                // وإلا يمني (العملة المحلية الافتراضية للمؤسسة)
+                $hasForeign = $foreignDebit != 0 || $foreignCredit != 0 || $foreignNet != 0;
+                $hasLocal = $localDebit != 0 || $localCredit != 0 || $localNet != 0;
+                $curCode = ($hasForeign && ! $hasLocal)
+                    ? ($r['FOREIGN_CUR_CODE'] ?? $r['foreign_cur_code'] ?? '')
+                    : 'YR';
+
+                $totals['local_debit'] += $localDebit;
+                $totals['local_credit'] += $localCredit;
+                $totals['foreign_debit'] += $foreignDebit;
+                $totals['foreign_credit'] += $foreignCredit;
+                $totals['balance'] += $balance;
+
+                $result[] = [
+                    'acc_no' => (int) ($r['ACC_NO'] ?? $r['acc_no'] ?? 0),
+                    'acc_name' => ArabicEncoding::fixMojibake($r['ACC_NAME'] ?? $r['acc_name'] ?? ''),
+                    'cur_code' => $curCode ?: 'YR',
+                    'local_debit' => $localDebit,
+                    'local_credit' => $localCredit,
+                    'foreign_debit' => $foreignDebit,
+                    'foreign_credit' => $foreignCredit,
+                    'balance' => $balance,
+                    'current_balance' => (float) ($r['BALANCE'] ?? $r['balance'] ?? 0),
+                ];
+            }
+
+            $total = count($result);
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'scope_level' => $scopeLevel,
+                    'scope_label' => $scopeName,
+                    'as_of_date' => date('d/m/Y'),
+                    'from_date' => $fromDateParam ?: null,
+                    'to_date' => $toDateParam ?: null,
+                    'rows' => $result,
+                    'totals' => $totals,
+                ],
+                'meta' => [
+                    'total' => $total,
+                    'page' => 1,
+                    'limit' => $total,
+                    'total_pages' => 1,
+                    'has_more' => false,
                 ],
             ]);
         } catch (\Exception $e) {

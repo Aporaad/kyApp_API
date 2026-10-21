@@ -340,7 +340,9 @@ class AppConfigController extends Controller
     {
         return match ($key) {
             AppConfig::COMPANY_PHONE => 50,
-            AppConfig::COMPANY_ADDRESS => 300,
+            // العنوان بنفس السعة في اللغتين (صف واحد طويل أحياناً)
+            // The address keeps the same ceiling in either language (it can be one long line).
+            AppConfig::COMPANY_ADDRESS, AppConfig::COMPANY_ADDRESS_EN => 300,
             default => 200,
         };
     }
