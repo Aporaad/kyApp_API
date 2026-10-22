@@ -97,7 +97,7 @@ final class PermissionCatalog
             ],
         ],
         'employees' => [
-            'name_ar' => 'الموظفون',
+            'name_ar' => 'الموظفين',
             'core' => [
                 'view' => 'عرض قائمة الموظفين',
                 'create' => 'إضافة موظف جديد',
@@ -110,7 +110,7 @@ final class PermissionCatalog
             ],
         ],
         'cutters' => [
-            'name_ar' => 'القصاصون',
+            'name_ar' => 'القصاصين',
             'core' => [
                 'view' => 'عرض قائمة القصاصين',
                 'create' => 'إضافة قَصّاب',
@@ -123,7 +123,7 @@ final class PermissionCatalog
             ],
         ],
         'tailors' => [
-            'name_ar' => 'الخياطون',
+            'name_ar' => 'الخياطين',
             'core' => [
                 'view' => 'عرض قائمة الخياطين',
                 'create' => 'إضافة خيّاط',

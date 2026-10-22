@@ -212,6 +212,24 @@ class WorkerController extends Controller
     }
 
     // ===================================================
+    // كشف عمل المجموعة (Group Work Report) - جميع القصاصين أو الخياطين
+    // Group work report - all cutters or all tailors in a date range
+    // Mirrors Oracle FOR_CUTTER_CALC: اسم | تاريخ | موديل | عدد | سعر | إجمالي
+    // ===================================================
+
+    /** كشف عمل مجموعة القصاصين */
+    public function groupWorkReportCutter(Request $request): JsonResponse
+    {
+        return $this->fetchGroupWorkReport('cutters', $request);
+    }
+
+    /** كشف عمل مجموعة الخياطين */
+    public function groupWorkReportTailor(Request $request): JsonResponse
+    {
+        return $this->fetchGroupWorkReport('tailors', $request);
+    }
+
+    // ===================================================
     // المنطق الداخلي المشترك
     // ===================================================
 
@@ -603,7 +621,7 @@ class WorkerController extends Controller
     {
         $cfg = self::TABLES[$type];
 
-        // كشف العمل متاح فقط للسجلات التي لها جدول CALC معرّف (القصاصون والخياطين)
+        // كشف العمل متاح فقط للسجلات التي لها جدول CALC معرّف (القصاصين والخياطين)
         // Work report exists only for registries that define a CALC table (cutters/tailors).
         if (empty($cfg['work_table'])) {
             return response()->json([
@@ -766,6 +784,121 @@ class WorkerController extends Controller
             ]);
         } catch (\Throwable $e) {
             return $this->errorResponse("خطأ في جلب كشف عمل $type", $e);
+        }
+    }
+
+    /**
+     * كشف عمل المجموعة — يجلب عمليات ALL العمال في مجموعة محددة بفترة زمنية
+     * Group work report — fetches work rows for ALL workers of a group in a date range.
+     * Mirrors Oracle FOR_CUTTER_CALC (multi-worker, includes worker name as first column).
+     */
+    private function fetchGroupWorkReport(string $type, Request $request): JsonResponse
+    {
+        $cfg = self::TABLES[$type];
+
+        // كشف العمل متاح فقط للسجلات التي لها جدول CALC معرّف
+        if (empty($cfg['work_table'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'كشف العمل غير متاح لهذا النوع',
+            ], 422);
+        }
+
+        // التواريخ: من الطلب أو الافتراضي (آخر 7 أيام)
+        $fromDateParam = trim((string) ($request->input('from_date') ?? ''));
+        $toDateParam = trim((string) ($request->input('to_date') ?? ''));
+
+        $fromIso = $fromDateParam !== '' ? $this->parseDateToIso($fromDateParam) : null;
+        $toIso = $toDateParam !== '' ? $this->parseDateToIso($toDateParam) : null;
+
+        // الافتراضي: آخر 7 أيام من اليوم الحالي
+        if ($fromIso === null && $toIso === null) {
+            $toIso = Carbon::today()->format('Y-m-d');
+            $fromIso = Carbon::today()->subDays(6)->format('Y-m-d');
+        } else {
+            $fromIso ??= $toIso;
+            $toIso ??= $fromIso;
+        }
+
+        // ضمان صحة المدى
+        if ($fromIso > $toIso) {
+            $fromIso = $toIso;
+        }
+
+        // أعمدة وجدول كشف العمل
+        $dateCol = $cfg['work_date_col'];
+        $totalCol = $cfg['work_total_col'];
+        $styleCol = $cfg['work_style_col'];
+        $qtyCol = $cfg['work_qty_col'];
+        $calcTable = $cfg['work_table'];
+        $regTable = $cfg['table'];
+        $joinCol = $cfg['work_join_col'];
+        $nameCol = $cfg['name_col'];
+
+        try {
+            // التجميع: سطر واحد لكل (عامل + موديل) يجمع العدد والمبلغ عبر كل سجلات الفترة.
+            // Aggregation: one row per (worker + style), summing count and amount across
+            // every work record that falls inside the selected date range. التاريخ يُستعرض
+            // كمدى زمني في ترويسة الكشف وليس كعمود لكل سطر.
+            $sql = "
+                SELECT r.{$nameCol} AS WORKER_NAME,
+                       w.{$styleCol} AS STYLE_NAME,
+                       SUM(NVL(w.{$qtyCol}, 0))   AS QTY,
+                       SUM(NVL(w.{$totalCol}, 0)) AS TOTAL
+                FROM {$calcTable} w, {$regTable} r
+                WHERE w.{$joinCol} = r.{$joinCol}
+                  AND w.{$dateCol} BETWEEN TO_DATE(:from_date,'YYYY-MM-DD') AND TO_DATE(:to_date,'YYYY-MM-DD') + 1 - 1/86400
+                GROUP BY r.{$nameCol}, w.{$styleCol}
+                ORDER BY r.{$nameCol}, w.{$styleCol}
+            ";
+
+            $raw = DB::connection('oracle')->select($sql, [
+                'from_date' => $fromIso,
+                'to_date' => $toIso,
+            ]);
+
+            // بناء الأسطر المجمّعة والإجماليات
+            $rows = [];
+            $totalCount = 0;
+            $totalAmount = 0.0;
+            $workerNames = [];
+
+            foreach ($raw as $r) {
+                $r = (array) $r;
+                $qty = (float) ($r['QTY'] ?? $r['qty'] ?? 0);
+                $total = (float) ($r['TOTAL'] ?? $r['total'] ?? 0);
+                // سعر الوحدة للمجموعة = إجمالي المبلغ ÷ إجمالي العدد (آمن من القسمة على صفر)
+                $unitPrice = $qty > 0 ? $total / $qty : 0.0;
+
+                $totalCount += $qty;
+                $totalAmount += $total;
+
+                $workerName = ArabicEncoding::fixMojibake(trim((string) ($r['WORKER_NAME'] ?? $r['worker_name'] ?? '')));
+                $workerNames[$workerName] = true;
+
+                $rows[] = [
+                    'worker_name' => $workerName,
+                    'style_name' => ArabicEncoding::fixMojibake(trim((string) ($r['STYLE_NAME'] ?? $r['style_name'] ?? ''))),
+                    'count' => $qty,
+                    'unit_price' => $unitPrice,
+                    'total' => $total,
+                ];
+            }
+
+            return response()->json([
+                'success' => true,
+                'group' => $type,
+                'data' => $rows,
+                'summary' => [
+                    'total_count' => $totalCount,
+                    'total_amount' => $totalAmount,
+                    'from_date' => Carbon::parse($fromIso)->format('d/m/Y'),
+                    'to_date' => Carbon::parse($toIso)->format('d/m/Y'),
+                    'worker_count' => count($workerNames),
+                ],
+            ]);
+        } catch (\Throwable $e) {
+            return $this->errorResponse("خطأ في جلب كشف عمل مجموعة $type", $e);
         }
     }
 
