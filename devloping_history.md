@@ -166,3 +166,25 @@ Route::middleware(['auth:sanctum', 'permission:accounts.statement'])
 ### التحقق
 - `php -l` = سليم · `vendor/bin/pint --dirty` = **PASS** · `php artisan test` = **127 ناجحاً (683 تأكيداً)**.
 - مسبار حي للـ payload العام أكّد وصول المفتاحين إلى الاستجابة (حُذف المسبار بعد التشغيل).
+
+---
+
+## [2026-10-22 14:20] إصلاح نطاق كشف حسابات المجموعات الجزئية (حساب جزئي/فرعي/رئيسي)
+
+**المشكلة:** عند اختيار حساب جزئي دون اختيار مجموعة، يرجع التقرير خطأ «لا توجد حسابات في هذا النطاق» رغم
+وجود الحسابات.
+
+**السبب الجذري:** في `AccountController::getGroupStatement` كانت فروع النطاق (sub/main/account) تستخدم
+`TRUNC(c.ACC_NO / 10000)` لاستخراج بادئة الحساب الجزئي. هذا يعطي أربعة أرقام، بينما معرّف الجزء
+`ACC_PART` ثلاثي الأرقام، فلا يتطابقان أبداً؛ كما أن `CHART_ACC.ACC_NO` يتراوح بين 8 و9 أرقام فلا يصلح
+أي مقام ثابت للاستخراج.
+
+**الإصلاح (ثلاثة فروع في `getGroupStatement`):** استبدال الاستخراج بـ
+`SUBSTR(TO_CHAR(c.ACC_NO), 1, 3)` المستقلّ عن الطول:
+- فرع الجزء: `SUBSTR(TO_CHAR(c.ACC_NO), 1, 3) = TO_CHAR(:acc_part)`
+- فرع الفرعي: `SUBSTR(TO_CHAR(c.ACC_NO), 1, 3) IN (SELECT TO_CHAR(ACC_PART) FROM ACC_SUB WHERE ACC_SUB = :acc_sub)`
+- فرع الرئيسي: `SUBSTR(TO_CHAR(c.ACC_NO), 1, 3) IN (SELECT TO_CHAR(s.ACC_PART) FROM ACC_SUB s INNER JOIN ACC_MAIN m ON s.ACC_SUB = m.ACC_SUB WHERE m.ACC_NO = :acc_no)`
+- فرع المجموعة (`c.GROUP_ID = :group_id`) بقي دون تغيير.
+
+**التحقق:** `php -l` = سليم. مسبار `oracledb MCP` للقراءة فقط (بدون أي DDL/DML) أكّد أن الجزء 123 يرجع
+20469 صفاً بعد الإصلاح (كان صفراً قبله)، وأن تطابق `SUBSTR(...,1,3)` يشمل كامل الـ 20954 صفاً في `CHART_ACC`.

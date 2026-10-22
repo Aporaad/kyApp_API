@@ -836,7 +836,11 @@ class AccountController extends Controller
                 );
                 $scopeName = $gRow ? ArabicEncoding::fixMojibake(((array) $gRow)['ACC_GROUP_NAME'] ?? ((array) $gRow)['acc_group_name'] ?? '') : '';
             } elseif ($accPart) {
-                $scopeWhere = 'TRUNC(c.ACC_NO / 10000) = :acc_part';
+                // الحساب الجزئي هو أول 3 أرقام من رقم الحساب الشجري (ACC_NO)، بغض
+                // النظر عن طول الرقم (8 أو 9 أرقام). صيغة TRUNC/10000 السابقة كانت
+                // تُعطي بادئة من 4 أرقام فلا تطابق أبداً معرّف الجزء ثلاثي الأرقام،
+                // ما كان يُرجع نتيجة فارغة عند اختيار حساب جزئي بدون مجموعة.
+                $scopeWhere = 'SUBSTR(TO_CHAR(c.ACC_NO), 1, 3) = TO_CHAR(:acc_part)';
                 $scopeParams['acc_part'] = $accPart;
                 $scopeLevel = 'sub';
                 $pRow = DB::connection('oracle')->selectOne(
@@ -845,7 +849,7 @@ class AccountController extends Controller
                 );
                 $scopeName = $pRow ? ArabicEncoding::fixMojibake(((array) $pRow)['PART_NAME'] ?? ((array) $pRow)['part_name'] ?? '') : '';
             } elseif ($accSub) {
-                $scopeWhere = 'TRUNC(c.ACC_NO / 10000) IN (SELECT ACC_PART FROM ACC_SUB WHERE ACC_SUB = :acc_sub)';
+                $scopeWhere = 'SUBSTR(TO_CHAR(c.ACC_NO), 1, 3) IN (SELECT TO_CHAR(ACC_PART) FROM ACC_SUB WHERE ACC_SUB = :acc_sub)';
                 $scopeParams['acc_sub'] = $accSub;
                 $scopeLevel = 'main';
                 $mRow = DB::connection('oracle')->selectOne(
@@ -854,8 +858,8 @@ class AccountController extends Controller
                 );
                 $scopeName = $mRow ? ArabicEncoding::fixMojibake(((array) $mRow)['SUB_NAME'] ?? ((array) $mRow)['sub_name'] ?? '') : '';
             } elseif ($accNo) {
-                $scopeWhere = 'TRUNC(c.ACC_NO / 10000) IN (
-                    SELECT s.ACC_PART FROM ACC_SUB s
+                $scopeWhere = 'SUBSTR(TO_CHAR(c.ACC_NO), 1, 3) IN (
+                    SELECT TO_CHAR(s.ACC_PART) FROM ACC_SUB s
                     INNER JOIN ACC_MAIN m ON s.ACC_SUB = m.ACC_SUB
                     WHERE m.ACC_NO = :acc_no
                 )';
