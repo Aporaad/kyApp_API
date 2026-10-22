@@ -243,6 +243,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/workers/cutters/{id}/statement', [WorkerController::class, 'statementCutter'])
         ->middleware('permission:cutters.statement')
         ->where('id', '[0-9]+');
+    Route::get('/workers/cutters/{id}/work-report', [WorkerController::class, 'workReportCutter'])
+        ->middleware('permission:cutters.statement')
+        ->where('id', '[0-9]+');
     Route::put('/workers/cutters/{id}', [WorkerController::class, 'updateCutter'])
         ->middleware('permission:cutters.update')
         ->where('id', '[0-9]+');
@@ -259,6 +262,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/workers/tailors', [WorkerController::class, 'storeTailor'])
         ->middleware('permission:tailors.create');
     Route::get('/workers/tailors/{id}/statement', [WorkerController::class, 'statementTailor'])
+        ->middleware('permission:tailors.statement')
+        ->where('id', '[0-9]+');
+    Route::get('/workers/tailors/{id}/work-report', [WorkerController::class, 'workReportTailor'])
         ->middleware('permission:tailors.statement')
         ->where('id', '[0-9]+');
     Route::put('/workers/tailors/{id}', [WorkerController::class, 'updateTailor'])

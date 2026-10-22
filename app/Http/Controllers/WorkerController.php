@@ -7,7 +7,6 @@ use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Validator;
 
 /**
  * متحكم إدارة العمال (الموظفين - القصاصين - الخياطين)
@@ -21,44 +20,61 @@ class WorkerController extends Controller
 
     private const TABLES = [
         'employees' => [
-            'table'       => 'ACCOUNTS.TAILOR_EMPLOYEES',
-            'pk'          => 'EMP_NO',
-            'name_col'    => 'EMP_NAME',
-            'phone1_col'  => 'EMP_PHONE1',
-            'phone2_col'  => 'EMP_PHONE2',
-            'email_col'   => 'EMP_EMAIL',
-            'status_col'  => 'EMP_STATUS',
-            'notes_col'   => 'NOTES1',
-            'acc_col'     => 'ACC_NO',
-            'extra_cols'  => ['JOP_TYPE', 'EMP_CLASS', 'WAGES_TYPE', 'SALARY', 'PIECE_PRICE', 'CUR_NO'],
+            'table' => 'ACCOUNTS.TAILOR_EMPLOYEES',
+            'pk' => 'EMP_NO',
+            'name_col' => 'EMP_NAME',
+            'phone1_col' => 'EMP_PHONE1',
+            'phone2_col' => 'EMP_PHONE2',
+            'email_col' => 'EMP_EMAIL',
+            'status_col' => 'EMP_STATUS',
+            'notes_col' => 'NOTES1',
+            'acc_col' => 'ACC_NO',
+            'extra_cols' => ['JOP_TYPE', 'EMP_CLASS', 'WAGES_TYPE', 'SALARY', 'PIECE_PRICE', 'CUR_NO'],
         ],
         'cutters' => [
-            'table'       => 'ACCOUNTS.CUTTER',
-            'pk'          => 'CUTTER_NO',
-            'name_col'    => 'CUTTER_NAME',
-            'phone1_col'  => 'CUTTER_PHONE1',
-            'phone2_col'  => 'CUTTER_PHONE2',
-            'email_col'   => 'CUTTER_EMAIL',
-            'status_col'  => 'CUTTER_STATUS',
-            'notes_col'   => 'NOTES1',
-            'acc_col'     => 'ACC_NO',
-            'extra_cols'  => ['CUR_NO'],
+            'table' => 'ACCOUNTS.CUTTER',
+            'pk' => 'CUTTER_NO',
+            'name_col' => 'CUTTER_NAME',
+            'phone1_col' => 'CUTTER_PHONE1',
+            'phone2_col' => 'CUTTER_PHONE2',
+            'email_col' => 'CUTTER_EMAIL',
+            'status_col' => 'CUTTER_STATUS',
+            'notes_col' => 'NOTES1',
+            'acc_col' => 'ACC_NO',
+            'extra_cols' => ['CUR_NO'],
+            // إعدادات كشف العمل (نسخة من تقرير أوراكل FOR_CUTTER_TAILOR - جدول CUTTER_FROM_CALC فقط)
+            // Work-report source config (mirror of Oracle FOR_CUTTER_TAILOR's work table only)
+            'work_table' => 'ACCOUNTS.CUTTER_FROM_CALC',
+            'work_join_col' => 'CUTTER_NO',
+            'work_date_col' => 'CUTTING_DATE',
+            'work_style_col' => 'STYLE_NAME',
+            'work_qty_col' => 'POST',
+            'work_total_col' => 'AMT',
         ],
         'tailors' => [
-            'table'       => 'ACCOUNTS.TAILOR',
-            'pk'          => 'TAILOR_NO',
-            'name_col'    => 'TAILOR_NAME',
-            'phone1_col'  => 'TAILOR_PHONE1',
-            'phone2_col'  => 'TAILOR_PHONE2',
-            'email_col'   => 'TAILOR_EMAIL',
-            'status_col'  => 'TAILOR_STATUS',
-            'notes_col'   => 'NOTES1',
-            'acc_col'     => 'ACC_NO',
-            'extra_cols'  => ['CUR_NO'],
+            'table' => 'ACCOUNTS.TAILOR',
+            'pk' => 'TAILOR_NO',
+            'name_col' => 'TAILOR_NAME',
+            'phone1_col' => 'TAILOR_PHONE1',
+            'phone2_col' => 'TAILOR_PHONE2',
+            'email_col' => 'TAILOR_EMAIL',
+            'status_col' => 'TAILOR_STATUS',
+            'notes_col' => 'NOTES1',
+            'acc_col' => 'ACC_NO',
+            'extra_cols' => ['CUR_NO'],
+            // إعدادات كشف العمل (نسخة من تقرير أوراكل FOR_TAILOR - جدول TAILOR_FROM_CALC فقط)
+            // الإجمالي هنا AMT_ALL لأنه يشمل تكاليف إضافية (ADDCOST2/3) بخلاف AMT الأساسي
+            'work_table' => 'ACCOUNTS.TAILOR_FROM_CALC',
+            'work_join_col' => 'TAILOR_NO',
+            'work_date_col' => 'TAILOR_DATE',
+            'work_style_col' => 'STYLE_NAME',
+            'work_qty_col' => 'POST',
+            'work_total_col' => 'AMT_ALL',
         ],
     ];
 
-    private const MAX_LIMIT     = 500;
+    private const MAX_LIMIT = 500;
+
     private const DEFAULT_LIMIT = 100;
 
     // ===================================================
@@ -179,6 +195,23 @@ class WorkerController extends Controller
     }
 
     // ===================================================
+    // كشف العمل (Work Report) - للقصاصين والخياطين فقط
+    // Work report - cutters & tailors only (mirrors Oracle FOR_CUTTER_TAILOR / FOR_TAILOR)
+    // ===================================================
+
+    /** كشف حساب عمل القصاص */
+    public function workReportCutter(Request $request, $id): JsonResponse
+    {
+        return $this->fetchWorkReport('cutters', $request, $id);
+    }
+
+    /** كشف حساب عمل الخياط */
+    public function workReportTailor(Request $request, $id): JsonResponse
+    {
+        return $this->fetchWorkReport('tailors', $request, $id);
+    }
+
+    // ===================================================
     // المنطق الداخلي المشترك
     // ===================================================
 
@@ -187,16 +220,16 @@ class WorkerController extends Controller
      */
     private function listWorkers(string $type, Request $request): JsonResponse
     {
-        $cfg    = self::TABLES[$type];
+        $cfg = self::TABLES[$type];
         $search = trim((string) ($request->input('search') ?? ''));
-        $limit  = min((int) ($request->input('limit') ?? self::DEFAULT_LIMIT), self::MAX_LIMIT);
-        $page   = max((int) ($request->input('page') ?? 1), 1);
+        $limit = min((int) ($request->input('limit') ?? self::DEFAULT_LIMIT), self::MAX_LIMIT);
+        $page = max((int) ($request->input('page') ?? 1), 1);
         $offset = ($page - 1) * $limit;
 
         try {
             $allCols = array_merge(
                 [$cfg['pk'], $cfg['name_col'], $cfg['phone1_col'], $cfg['phone2_col'],
-                 $cfg['email_col'], $cfg['status_col'], $cfg['notes_col'], $cfg['acc_col']],
+                    $cfg['email_col'], $cfg['status_col'], $cfg['notes_col'], $cfg['acc_col']],
                 $cfg['extra_cols']
             );
 
@@ -204,31 +237,31 @@ class WorkerController extends Controller
                 ->table($cfg['table'])
                 ->select($allCols);
 
-            if (!empty($search)) {
+            if (! empty($search)) {
                 $oracleSearch = ArabicEncoding::toOracleSearchChars($search);
                 $query->where(function ($q) use ($cfg, $search, $oracleSearch) {
                     if (is_numeric($search)) {
                         $q->where($cfg['pk'], (int) $search);
                     } else {
-                        $q->where($cfg['name_col'], 'LIKE', '%' . $oracleSearch . '%')
-                          ->orWhere($cfg['name_col'], 'LIKE', '%' . $search . '%')
-                          ->orWhere($cfg['phone1_col'], 'LIKE', '%' . $search . '%');
+                        $q->where($cfg['name_col'], 'LIKE', '%'.$oracleSearch.'%')
+                            ->orWhere($cfg['name_col'], 'LIKE', '%'.$search.'%')
+                            ->orWhere($cfg['phone1_col'], 'LIKE', '%'.$search.'%');
                     }
                 });
             }
 
             $total = $query->count();
-            $data  = $query->orderBy($cfg['pk'])->offset($offset)->limit($limit)->get();
+            $data = $query->orderBy($cfg['pk'])->offset($offset)->limit($limit)->get();
 
             $cleanedData = ArabicEncoding::cleanData($data->toArray());
 
             return response()->json([
                 'success' => true,
-                'type'    => $type,
-                'data'    => $cleanedData,
-                'meta'    => [
+                'type' => $type,
+                'data' => $cleanedData,
+                'meta' => [
                     'total' => $total,
-                    'page'  => $page,
+                    'page' => $page,
                     'limit' => $limit,
                     'pages' => (int) ceil($total / max($limit, 1)),
                 ],
@@ -248,13 +281,13 @@ class WorkerController extends Controller
         try {
             $data = $request->only(array_merge(
                 [$cfg['name_col'], $cfg['phone1_col'], $cfg['phone2_col'],
-                 $cfg['email_col'], $cfg['status_col'], $cfg['notes_col'], $cfg['acc_col']],
+                    $cfg['email_col'], $cfg['status_col'], $cfg['notes_col'], $cfg['acc_col']],
                 $cfg['extra_cols']
             ));
 
             // تحويل النصوص العربية إلى ترميز أوراكل
             foreach ([$cfg['name_col'], $cfg['notes_col']] as $col) {
-                if (!empty($data[$col])) {
+                if (! empty($data[$col])) {
                     $data[$col] = ArabicEncoding::toOracleSearchChars($data[$col]);
                 }
             }
@@ -276,7 +309,7 @@ class WorkerController extends Controller
             return response()->json([
                 'success' => true,
                 'message' => 'تم الإضافة بنجاح',
-                'id'      => $newId,
+                'id' => $newId,
             ]);
         } catch (\Throwable $e) {
             return $this->errorResponse("خطأ في إضافة $type", $e);
@@ -293,13 +326,13 @@ class WorkerController extends Controller
         try {
             $data = $request->only(array_merge(
                 [$cfg['name_col'], $cfg['phone1_col'], $cfg['phone2_col'],
-                 $cfg['email_col'], $cfg['status_col'], $cfg['notes_col'], $cfg['acc_col']],
+                    $cfg['email_col'], $cfg['status_col'], $cfg['notes_col'], $cfg['acc_col']],
                 $cfg['extra_cols']
             ));
 
             // تحويل النصوص العربية
             foreach ([$cfg['name_col'], $cfg['notes_col']] as $col) {
-                if (isset($data[$col]) && !empty($data[$col])) {
+                if (isset($data[$col]) && ! empty($data[$col])) {
                     $data[$col] = ArabicEncoding::toOracleSearchChars($data[$col]);
                 }
             }
@@ -355,13 +388,13 @@ class WorkerController extends Controller
                 ->where($cfg['pk'], $id)
                 ->first();
 
-            if (!$worker) {
+            if (! $worker) {
                 return response()->json(['success' => false, 'message' => 'لم يتم العثور على السجل'], 404);
             }
 
             $wArr = (array) $worker;
             $currentStatus = ArabicEncoding::fixMojibake((string) ($wArr[strtolower($cfg['status_col'])] ?? $wArr[$cfg['status_col']] ?? $worker->{$cfg['status_col']} ?? 'فعال'));
-            $newStatus     = (str_contains($currentStatus, 'معطل') || str_contains($currentStatus, 'موقوف'))
+            $newStatus = (str_contains($currentStatus, 'معطل') || str_contains($currentStatus, 'موقوف'))
                 ? 'فعال'
                 : 'معطل';
 
@@ -371,8 +404,8 @@ class WorkerController extends Controller
                 ->update([$cfg['status_col'] => ArabicEncoding::toOracleSearchChars($newStatus)]);
 
             return response()->json([
-                'success'    => true,
-                'message'    => "تم تغيير الحالة إلى: $newStatus",
+                'success' => true,
+                'message' => "تم تغيير الحالة إلى: $newStatus",
                 'new_status' => $newStatus,
             ]);
         } catch (\Throwable $e) {
@@ -400,7 +433,7 @@ class WorkerController extends Controller
         $cfg = self::TABLES[$type];
 
         $fromDateParam = trim((string) ($request->input('from_date') ?? ''));
-        $toDateParam   = trim((string) ($request->input('to_date') ?? ''));
+        $toDateParam = trim((string) ($request->input('to_date') ?? ''));
 
         try {
             // جلب بيانات العامل
@@ -409,14 +442,14 @@ class WorkerController extends Controller
                 ->where($cfg['pk'], $id)
                 ->first();
 
-            if (!$worker) {
+            if (! $worker) {
                 return response()->json(['success' => false, 'message' => 'لم يتم العثور على العامل'], 404);
             }
 
             $wArr = (array) $worker;
             $accNo = $wArr[strtolower($cfg['acc_col'])] ?? $wArr[$cfg['acc_col']] ?? $worker->{$cfg['acc_col']} ?? null;
 
-            if (!$accNo) {
+            if (! $accNo) {
                 return response()->json([
                     'success' => false,
                     'message' => 'لا يوجد رقم حساب مرتبط بهذا العامل',
@@ -425,15 +458,15 @@ class WorkerController extends Controller
 
             // تحديد نطاق التواريخ
             $fromDateFilter = null;
-            $toDateFilter   = null;
+            $toDateFilter = null;
 
-            if (!empty($fromDateParam)) {
+            if (! empty($fromDateParam)) {
                 $parsed = $this->parseDateToIso($fromDateParam);
                 if ($parsed) {
                     $fromDateFilter = $parsed;
                 }
             }
-            if (!empty($toDateParam)) {
+            if (! empty($toDateParam)) {
                 $parsed = $this->parseDateToIso($toDateParam);
                 if ($parsed) {
                     $toDateFilter = $parsed;
@@ -468,20 +501,20 @@ class WorkerController extends Controller
                 if ($lastDateStr) {
                     $latestDate = Carbon::parse($lastDateStr);
                     $fromDateFilter = $latestDate->copy()->subDays(30)->format('Y-m-d');
-                    $toDateFilter   = $latestDate->format('Y-m-d');
-                    $fromDateParam  = $latestDate->copy()->subDays(30)->format('d/m/Y');
-                    $toDateParam    = $latestDate->format('d/m/Y');
+                    $toDateFilter = $latestDate->format('Y-m-d');
+                    $fromDateParam = $latestDate->copy()->subDays(30)->format('d/m/Y');
+                    $toDateParam = $latestDate->format('d/m/Y');
                 }
             }
 
             // معالجة النتائج وحساب الرصيد الافتتاحي
             $openingBalance = 0.0;
             $runningBalance = 0.0;
-            $totalDebit     = 0.0;
-            $totalCredit    = 0.0;
-            $filteredRows   = [];
-            $firstDate      = null;
-            $lastDate       = null;
+            $totalDebit = 0.0;
+            $totalCredit = 0.0;
+            $filteredRows = [];
+            $firstDate = null;
+            $lastDate = null;
 
             foreach ($rows as $r) {
                 $r = (array) $r;
@@ -494,6 +527,7 @@ class WorkerController extends Controller
                 if ($fromDateFilter && $rawDate && $rawDate < $fromDateFilter) {
                     $openingBalance = $bal;
                     $runningBalance = $bal;
+
                     continue;
                 }
 
@@ -502,11 +536,11 @@ class WorkerController extends Controller
                     continue;
                 }
 
-                $debit  = $mnt > 0 ? $mnt : 0.0;
+                $debit = $mnt > 0 ? $mnt : 0.0;
                 $credit = $mnt < 0 ? abs($mnt) : 0.0;
 
-                $totalDebit    += $debit;
-                $totalCredit   += $credit;
+                $totalDebit += $debit;
+                $totalCredit += $credit;
                 $runningBalance = $bal;
 
                 if ($firstDate === null) {
@@ -515,17 +549,17 @@ class WorkerController extends Controller
                 $lastDate = $entryDate;
 
                 $filteredRows[] = [
-                    'entry_no'        => $r['ENTRY_NO'] ?? $r['entry_no'] ?? null,
-                    'sub_entry_no'    => $r['SUB_ENTRY_NO'] ?? $r['sub_entry_no'] ?? null,
-                    'entry_date'      => $entryDate,
-                    'raw_date'        => $rawDate,
+                    'entry_no' => $r['ENTRY_NO'] ?? $r['entry_no'] ?? null,
+                    'sub_entry_no' => $r['SUB_ENTRY_NO'] ?? $r['sub_entry_no'] ?? null,
+                    'entry_date' => $entryDate,
+                    'raw_date' => $rawDate,
                     'entry_type_name' => ArabicEncoding::fixMojibake($r['ENTRY_TYPE_NAME'] ?? $r['entry_type_name'] ?? ''),
-                    'details'         => ArabicEncoding::fixMojibake(trim((string) ($r['DETAILS'] ?? $r['details'] ?? ''))),
-                    'balance_s'       => $bal,
-                    'entry_mnt'       => $mnt,
-                    'debit'           => $debit,
-                    'credit'          => $credit,
-                    'acc_no'          => $accNo,
+                    'details' => ArabicEncoding::fixMojibake(trim((string) ($r['DETAILS'] ?? $r['details'] ?? ''))),
+                    'balance_s' => $bal,
+                    'entry_mnt' => $mnt,
+                    'debit' => $debit,
+                    'credit' => $credit,
+                    'acc_no' => $accNo,
                 ];
             }
 
@@ -533,27 +567,205 @@ class WorkerController extends Controller
 
             return response()->json([
                 'success' => true,
-                'worker'  => [
-                    'id'     => $id,
-                    'name'   => $workerName,
+                'worker' => [
+                    'id' => $id,
+                    'name' => $workerName,
                     'acc_no' => $accNo,
-                    'type'   => $type,
+                    'type' => $type,
                 ],
-                'data'    => $filteredRows,
+                'data' => $filteredRows,
                 'summary' => [
-                    'total_rows'      => count($filteredRows),
-                    'total_debit'     => $totalDebit,
-                    'total_credit'    => $totalCredit,
+                    'total_rows' => count($filteredRows),
+                    'total_debit' => $totalDebit,
+                    'total_credit' => $totalCredit,
                     'opening_balance' => $openingBalance,
-                    'final_balance'   => count($filteredRows) > 0 ? $runningBalance : $openingBalance,
-                    'from_date'       => $fromDateParam ?: ($firstDate ?: date('d/m/Y')),
-                    'to_date'         => $toDateParam ?: ($lastDate ?: date('d/m/Y')),
-                    'currency'        => 'يمني YR',
-                    'account_title'   => "$accNo - $workerName",
+                    'final_balance' => count($filteredRows) > 0 ? $runningBalance : $openingBalance,
+                    'from_date' => $fromDateParam ?: ($firstDate ?: date('d/m/Y')),
+                    'to_date' => $toDateParam ?: ($lastDate ?: date('d/m/Y')),
+                    'currency' => 'يمني YR',
+                    'account_title' => "$accNo - $workerName",
                 ],
             ]);
         } catch (\Throwable $e) {
             return $this->errorResponse("خطأ في جلب كشف حساب $type", $e);
+        }
+    }
+
+    /**
+     * كشف العمل - يطابق جدول "كشف العمل" في تقرير أوراكل (التاريخ | الموديل | العدد | السعر | الإجمالي)
+     * لا يمس جدول الكشف المالي (ENTRY_MAIN/ENTRY_SUB) إطلاقاً - فقط جدول CALC الخاص بالعامل.
+     *
+     * Work report - mirrors ONLY the "work" table of the legacy Oracle report
+     * (date | style | count | unit price | total). It never touches the financial
+     * statement tables; it reads the worker's *_FROM_CALC registry directly.
+     */
+    private function fetchWorkReport(string $type, Request $request, $id): JsonResponse
+    {
+        $cfg = self::TABLES[$type];
+
+        // كشف العمل متاح فقط للسجلات التي لها جدول CALC معرّف (القصاصون والخياطين)
+        // Work report exists only for registries that define a CALC table (cutters/tailors).
+        if (empty($cfg['work_table'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'كشف العمل غير متاح لهذا النوع',
+            ], 422);
+        }
+
+        $fromDateParam = trim((string) ($request->input('from_date') ?? ''));
+        $toDateParam = trim((string) ($request->input('to_date') ?? ''));
+
+        try {
+            // جلب صف العامل والتحقق من الحساب المرتبط
+            $worker = DB::connection('oracle')
+                ->table($cfg['table'])
+                ->where($cfg['pk'], $id)
+                ->first();
+
+            if (! $worker) {
+                return response()->json(['success' => false, 'message' => 'لم يتم العثور على العامل'], 404);
+            }
+
+            $wArr = (array) $worker;
+            $accNo = $wArr[strtolower($cfg['acc_col'])] ?? $wArr[$cfg['acc_col']] ?? $worker->{$cfg['acc_col']} ?? null;
+            $workerNo = $wArr[strtolower($cfg['pk'])] ?? $wArr[$cfg['pk']] ?? $id;
+
+            if (! $accNo) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'لا يوجد رقم حساب مرتبط بهذا العامل',
+                ], 422);
+            }
+
+            // أعمدة وجدول كشف العمل (تختلف بين القصاص والخياط)
+            // Work-report columns/tables differ between cutters (AMT) and tailors (AMT_ALL).
+            $dateCol = $cfg['work_date_col'];
+            $totalCol = $cfg['work_total_col'];
+            $styleCol = $cfg['work_style_col'];
+            $qtyCol = $cfg['work_qty_col'];
+            $calcTable = $cfg['work_table'];
+            $regTable = $cfg['table'];
+            $joinCol = $cfg['work_join_col'];
+
+            // تحديد نطاق التواريخ:
+            // - عند إرسال تاريخ(ين) صريح(ين) نستخدم المتاح منهما (الأحادي يُطابَق للطرفين).
+            // - بلا أي تاريخ: الافتراضي = تاريخ آخر سجل عمل موجود لهذا القصاص/الخياط
+            //   (من = إلى = ذلك اليوم)؛ وعند انعدام السجلات كلياً نعود لتاريخ اليوم كقيمة آمنة.
+            $fromIso = $fromDateParam !== '' ? $this->parseDateToIso($fromDateParam) : null;
+            $toIso = $toDateParam !== '' ? $this->parseDateToIso($toDateParam) : null;
+
+            if ($fromIso === null && $toIso === null) {
+                // جلب تاريخ آخر سجل عمل (MAX) للعامل عبر نفس الربط و ACC_NO المعتمدين في التقرير
+                $lastRows = DB::connection('oracle')->select(
+                    "SELECT TO_CHAR(MAX(w.$dateCol), 'YYYY-MM-DD') AS LAST_DATE
+                       FROM $calcTable w, $regTable r
+                      WHERE w.$joinCol = r.$joinCol
+                        AND r.ACC_NO = :acc_no",
+                    ['acc_no' => $accNo]
+                );
+                $lastDateStr = '';
+                if ($lastRows) {
+                    $lr = (array) $lastRows[0];
+                    $lastDateStr = trim((string) ($lr['LAST_DATE'] ?? $lr['last_date'] ?? ''));
+                }
+                $defaultIso = $lastDateStr !== '' ? $lastDateStr : Carbon::today()->format('Y-m-d');
+                $fromIso = $defaultIso;
+                $toIso = $defaultIso;
+            } else {
+                // تاريخ واحد مرسَل: نجعل الطرف الآخر مطابقاً له حتى يكون النطاق صالحاً
+                $fromIso ??= $toIso;
+                $toIso ??= $fromIso;
+            }
+
+            // ضمان صحة المدى (إن كان من > إلى نجعلهما متطابقين مع قيمة واحدة)
+            if ($fromIso && $toIso && $fromIso > $toIso) {
+                $fromIso = $toIso;
+            }
+
+            $sql = "
+                SELECT TO_CHAR(w.$dateCol, 'DD/MM/YYYY') AS WORK_DATE,
+                       TO_CHAR(w.$dateCol, 'YYYY-MM-DD') AS RAW_DATE,
+                       w.$styleCol AS STYLE_NAME,
+                       NVL(w.$qtyCol, 0)   AS QTY,
+                       NVL(w.$totalCol, 0) AS TOTAL
+                FROM $calcTable w, $regTable r
+                WHERE w.$joinCol = r.$joinCol
+                  AND r.ACC_NO = :acc_no
+                  AND w.$dateCol BETWEEN TO_DATE(:from_date,'YYYY-MM-DD') AND TO_DATE(:to_date,'YYYY-MM-DD') + 1 - 1/86400
+                ORDER BY w.$dateCol, w.$styleCol
+            ";
+
+            $raw = DB::connection('oracle')->select($sql, [
+                'acc_no' => $accNo,
+                'from_date' => $fromIso,
+                'to_date' => $toIso,
+            ]);
+
+            // بناء الأسطر + الإجماليات (العدد الإجمالي والمبلغ الإجمالي)
+            $rows = [];
+            $totalCount = 0;
+            $totalAmount = 0.0;
+            foreach ($raw as $r) {
+                $r = (array) $r;
+                $qty = (float) ($r['QTY'] ?? $r['qty'] ?? 0);
+                $total = (float) ($r['TOTAL'] ?? $r['total'] ?? 0);
+                // السعر = الإجمالي / العدد (يضمن العدد × السعر = الإجمالي دائماً، ويتعامل مع القسمة على صفر)
+                $unitPrice = $qty > 0 ? $total / $qty : 0.0;
+
+                $totalCount += $qty;
+                $totalAmount += $total;
+
+                $rows[] = [
+                    'date' => $r['WORK_DATE'] ?? $r['work_date'] ?? '',
+                    'style_name' => ArabicEncoding::fixMojibake(trim((string) ($r['STYLE_NAME'] ?? $r['style_name'] ?? ''))),
+                    'count' => $qty,
+                    'unit_price' => $unitPrice,
+                    'total' => $total,
+                ];
+            }
+
+            // currency label: join CUR_CODE via worker CUR_NO (mirrors Oracle "select CODE from CUR_CODE")
+            $curNo = $wArr['cur_no'] ?? $wArr['CUR_NO'] ?? ($worker->CUR_NO ?? 1);
+            $currency = 'يمني YR';
+            if ($curNo) {
+                $cur = DB::connection('oracle')
+                    ->table('ACCOUNTS.CUR_CODE')
+                    ->selectRaw('CODE, MAIN_CUR_NAME')
+                    ->where('CUR_NO', $curNo)
+                    ->first();
+                if ($cur) {
+                    $c = (array) $cur;
+                    $code = ArabicEncoding::fixMojibake((string) ($c['CODE'] ?? $c['code'] ?? ''));
+                    $name = ArabicEncoding::fixMojibake(trim((string) ($c['MAIN_CUR_NAME'] ?? $c['main_cur_name'] ?? '')));
+                    if ($code !== '') {
+                        $currency = ($name !== '' ? $name.' ' : '').$code;
+                    }
+                }
+            }
+
+            $workerName = ArabicEncoding::fixMojibake((string) ($wArr[strtolower($cfg['name_col'])] ?? $wArr[$cfg['name_col']] ?? $worker->{$cfg['name_col']} ?? ''));
+
+            return response()->json([
+                'success' => true,
+                'worker' => [
+                    'id' => $workerNo,
+                    'name' => $workerName,
+                    'acc_no' => $accNo,
+                    'type' => $type,
+                ],
+                'data' => $rows,
+                'summary' => [
+                    'total_rows' => count($rows),
+                    'total_count' => $totalCount,
+                    'total_amount' => $totalAmount,
+                    'from_date' => $fromIso ? Carbon::parse($fromIso)->format('d/m/Y') : '',
+                    'to_date' => $toIso ? Carbon::parse($toIso)->format('d/m/Y') : '',
+                    'currency' => $currency,
+                    'account_title' => "$accNo - $workerName",
+                ],
+            ]);
+        } catch (\Throwable $e) {
+            return $this->errorResponse("خطأ في جلب كشف عمل $type", $e);
         }
     }
 
@@ -574,9 +786,11 @@ class WorkerController extends Controller
                     if (strlen($parts[0]) === 4) {
                         return sprintf('%04d-%02d-%02d', $parts[0], $parts[1], $parts[2]);
                     }
+
                     return sprintf('%04d-%02d-%02d', $parts[2], $parts[1], $parts[0]);
                 }
             }
+
             return Carbon::parse($d)->format('Y-m-d');
         } catch (\Throwable $e) {
             return null;
@@ -590,8 +804,8 @@ class WorkerController extends Controller
     {
         return response()->json([
             'success' => false,
-            'message' => $msg . ' / Database error.',
-            'error'   => config('app.debug') ? $e->getMessage() : null,
+            'message' => $msg.' / Database error.',
+            'error' => config('app.debug') ? $e->getMessage() : null,
         ], 500);
     }
 }
