@@ -43,6 +43,20 @@ class AppendSessionExpiry
      */
     public const HEADER = 'X-Session-Expires-At';
 
+    /**
+     * ترويسة «الآن بساعة الخادم» — تُرفق مع الموعد ليقيس العميل إزاحة الساعتين
+     * The "server clock now" header — rides alongside the deadline so the client can measure skew
+     *
+     * الموعد نصّ على ساعة القاعدة، والجهاز يقارنه بساعته هو. بدون مرجع مشترك يتحول أي اختلاف
+     * بين الساعتين إلى قرار طرد: جهاز متأخر بساعة يُخرج مستخدمه فوراً. بإرسال «الآن» في نفس الرد
+     * يستطيع العميل حساب `serverNow - deviceNow` وطرحها من الموعد، فيبقى القياس على ساعة الجهاز.
+     * The deadline is written on the database clock while the device compares it to its own. Without a
+     * shared reference, any skew becomes an eviction: a device an hour behind is kicked at once.
+     * Sending "now" on the same response lets the client subtract `serverNow - deviceNow`, so the whole
+     * measurement stays on the device clock.
+     */
+    public const SERVER_NOW_HEADER = 'X-Server-Now';
+
     public function handle(
         Request $request,
         Closure $next,
@@ -54,14 +68,43 @@ class AppendSessionExpiry
         if ($deadline !== null) {
             $response->headers->set(self::HEADER, $deadline);
 
+            // ساعة الخادم تُرسل مع الموعد فقط: بلا موعد لا شيء يُصحَّح في العميل، وقيمة
+            // null تُسقط الرد بدل أن تُثريه فلا تُرسل أصلاً
+            // The server clock travels only with a deadline, and a null value is simply skipped:
+            // a cosmetic header must never break a good response.
+            $serverNow = $this->serverNow();
+
+            if ($serverNow !== null) {
+                $response->headers->set(self::SERVER_NOW_HEADER, $serverNow);
+            }
+
             // بناء الويب (flutter run -d chrome) لا يقرأ ترويسة مخصصة إلا لو أُذنت صراحة؛ بقية
             // المنصات لا تفرّق، فالتصريح هنا يوفّر مساراً مختلفاً للعميل الواحد
             // Only the web build refuses to read a custom response header unless it is exposed
             // explicitly; other platforms do not care, so this keeps one client code path.
-            $response->headers->set('Access-Control-Expose-Headers', self::HEADER);
+            $response->headers->set(
+                'Access-Control-Expose-Headers',
+                self::HEADER . ', ' . self::SERVER_NOW_HEADER
+            );
         }
 
         return $response;
+    }
+
+    /**
+     * «الآن» بمرجع زمن القاعدة كنص يطابق صيغة الموعد
+     * "Now" on the database clock, in the same text shape as the deadline
+     *
+     * تمر عبر `dbNow()` لا `now()` حتى لا يقيس العميل إزاحةً عن ساعة UTC ثم يقارن بـ `SYSDATE`.
+     * Any failure is swallowed: a cosmetic header must never turn a good response into a failure.
+     */
+    private function serverNow(): ?string
+    {
+        try {
+            return SessionPolicy::dbNow()->format('Y-m-d H:i:s');
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     /**

@@ -2,10 +2,11 @@
 
 use Illuminate\Support\Facades\Route;
 
-Route::get('/', function () {
-    return view('welcome');
-});
+// هذا خادم API فقط — لا صفحة رئيسية عامة
+// This is an API-only server — no public landing page
+Route::get('/', fn () => response('', 204));
 
-Route::get('/hello', function () {
-    return 'Hello from Laravel API';
-});
+// نقطة فحص الاتصال للتطبيق — يجب بقاؤها عامة
+// Connectivity probe for the Flutter client — must remain public
+Route::get('/hello', fn () => 'ok');
+
