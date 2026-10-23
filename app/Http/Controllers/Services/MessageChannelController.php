@@ -95,8 +95,14 @@ abstract class MessageChannelController extends ServiceBaseController
 
             // دمج المصادر (all = queue + archive) ثم إعادة الترقيم على الدمج
             // For the merged `all` case, re-paginate across both sources.
+            // mلاحظة: أوراكل/yajra يُرجع الأعمدة بحروف صغيرة (`id`)، فالقراءة بـ `['ID']` كانت تُفشل
+            // الاستعلام عند status=all («Undefined array key "ID"»). نقرأ الصغير ثم الكبير احتياطاً.
             if (count($sources) > 1) {
-                $sorted = $rows->sortByDesc(fn ($r) => (int) ((array) $r)['ID'])->values();
+                $sorted = $rows->sortByDesc(function ($r): int {
+                    $arr = (array) $r;
+
+                    return (int) ($arr['id'] ?? $arr['ID'] ?? 0);
+                })->values();
                 $rows = $sorted->slice($offset, $limit);
             } else {
                 $rows = $rows->slice(0, $limit);

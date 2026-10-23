@@ -261,7 +261,10 @@ class ProviderController extends ServiceBaseController
                 return $this->notFound($providerId);
             }
 
-            $current = (int) ((array) $row)['STATUS'];
+            // أوراكل/yajra يُرجع الأعمدة بحروف صغيرة (`status`)؛ القراءة بـ `['STATUS']` كانت تُفشل التبديل.
+            // Oracle/yajra returns lowercase column names; read `status` first, `STATUS` as a fallback.
+            $rowArr = (array) $row;
+            $current = (int) ($rowArr['status'] ?? $rowArr['STATUS'] ?? 0);
             $new = $current === 1 ? 0 : 1;
 
             DB::connection('oracle')->table(self::TABLE)->where('PROVIDER_ID', $providerId)->update([
