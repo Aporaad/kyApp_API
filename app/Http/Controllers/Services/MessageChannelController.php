@@ -90,7 +90,9 @@ abstract class MessageChannelController extends ServiceBaseController
                 }
 
                 $total += $query->count();
-                $rows = $rows->merge($query->orderByDesc('ID')->get());
+                // الأحدث أولاً: نرتّب بتأريخ الإنشاء ثم بالمعرّف (يشمل الطابور والأرشفة معًا)
+                // Newest-first: order by created_at then id (covers queue and archive uniformly).
+                $rows = $rows->merge($query->orderByDesc('CREATED_AT')->orderByDesc('ID')->get());
             }
 
             // دمج المصادر (all = queue + archive) ثم إعادة الترقيم على الدمج
@@ -98,10 +100,14 @@ abstract class MessageChannelController extends ServiceBaseController
             // mلاحظة: أوراكل/yajra يُرجع الأعمدة بحروف صغيرة (`id`)، فالقراءة بـ `['ID']` كانت تُفشل
             // الاستعلام عند status=all («Undefined array key "ID"»). نقرأ الصغير ثم الكبير احتياطاً.
             if (count($sources) > 1) {
-                $sorted = $rows->sortByDesc(function ($r): int {
+                // مفتاح ترتيب مركّب: CREATED_AT (نص زمني مرتّب لغويًا) ثم ID ممدّد بأصفار لضمان الأحدث أولاً
+                // Composite sort key: created_at (chronologically lexically sortable) then zero-padded id.
+                $sorted = $rows->sortByDesc(function ($r): string {
                     $arr = (array) $r;
+                    $createdAt = (string) ($arr['created_at'] ?? $arr['CREATED_AT'] ?? '');
+                    $id = str_pad((string) (int) ($arr['id'] ?? $arr['ID'] ?? 0), 14, '0', STR_PAD_LEFT);
 
-                    return (int) ($arr['id'] ?? $arr['ID'] ?? 0);
+                    return $createdAt.'|'.$id;
                 })->values();
                 $rows = $sorted->slice($offset, $limit);
             } else {
