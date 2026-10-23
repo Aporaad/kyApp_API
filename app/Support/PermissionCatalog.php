@@ -229,6 +229,68 @@ final class PermissionCatalog
             ],
             'extra' => ['api_manage' => 'إدارة إعدادات اتصال API'],
         ],
+        // الخدمات والمزودون: بوابة تقديم الرسائل والواتساب وإدارة المزودين والمهام الزمنية
+        // Services & providers: message/whatsapp delivery, provider registries and scheduler jobs.
+        'services' => [
+            'name_ar' => 'الخدمات والمزودين',
+            'core' => [
+                'view' => 'عرض قسم الخدمات والمزودين',
+                'update' => 'تعديل بيانات الخدمات (SERVICES)',
+            ],
+            'extra' => [
+                'settings_manage' => 'إدارة إعدادات الخدمات (جدول CORP)',
+            ],
+        ],
+        'providers' => [
+            'name_ar' => 'إدارة المزودين',
+            'core' => [
+                'view' => 'عرض قائمة المزودين',
+                'create' => 'إضافة مزود جديد',
+                'update' => 'تعديل بيانات المزود',
+                'delete' => 'حذف المزود',
+            ],
+            'extra' => [
+                'toggle' => 'تفعيل أو تعطيل المزود',
+                'subscriptions_manage' => 'إدارة اشتراكات المزودين (PROVIDERS_DTL)',
+                'reveal_credentials' => 'إظهار بيانات اعتماد المزود الحساسة',
+            ],
+        ],
+        'sms' => [
+            'name_ar' => 'خدمة الرسائل النصية',
+            'core' => [
+                'view' => 'عرض سجل الرسائل النصية',
+                'create' => 'إضافة/إرسال رسالة نصية',
+                'update' => 'تعديل رسالة نصية',
+                'delete' => 'حذف رسالة نصية',
+            ],
+            'extra' => [
+                'toggle' => 'تفعيل أو تعطيل الرسالة النصية',
+            ],
+        ],
+        'whatsapp' => [
+            'name_ar' => 'خدمة رسائل واتساب',
+            'core' => [
+                'view' => 'عرض سجل رسائل واتساب',
+                'create' => 'إضافة/إرسال رسالة واتساب',
+                'update' => 'تعديل رسالة واتساب',
+                'delete' => 'حذف رسالة واتساب',
+            ],
+            'extra' => [
+                'toggle' => 'تفعيل أو تعطيل رسالة واتساب',
+            ],
+        ],
+        'jobs' => [
+            'name_ar' => 'إدارة المهام الزمنية',
+            'core' => [
+                'view' => 'عرض المهام وسجل التشغيل',
+                'create' => 'إضافة مهمة زمنية',
+                'update' => 'تعديل المهلة أو الأمر',
+                'delete' => 'حذف المهمة',
+            ],
+            'extra' => [
+                'toggle' => 'تفعيل أو تعطيل المهمة',
+            ],
+        ],
         'system' => [
             'name_ar' => 'النظام',
             'core' => [],
@@ -369,6 +431,9 @@ final class PermissionCatalog
             'terminate' => 'Terminate session',
             'security_manage' => 'Manage security settings',
             'api_manage' => 'Manage API connection settings',
+            'settings_manage' => 'Manage service settings',
+            'subscriptions_manage' => 'Manage subscriptions',
+            'reveal_credentials' => 'Reveal credentials',
         ];
 
         return ($labels[$actionCode] ?? ucfirst($actionCode)).' — '.ucfirst($moduleCode);

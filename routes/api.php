@@ -7,6 +7,11 @@ use App\Http\Controllers\CurrencyController;
 use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\PermissionController;
+use App\Http\Controllers\Services\JobController;
+use App\Http\Controllers\Services\ProviderController;
+use App\Http\Controllers\Services\ServiceConfigController;
+use App\Http\Controllers\Services\SmsController;
+use App\Http\Controllers\Services\WhatsappController;
 use App\Http\Controllers\SessionAdminController;
 use App\Http\Controllers\SettingController;
 use App\Http\Controllers\TableQueryController;
@@ -365,4 +370,112 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/currencies/{curNo}/prices/{seq}', [CurrencyController::class, 'deletePrice'])
         ->middleware('permission:currencies.prices_manage')
         ->where('curNo', '[0-9]+')->where('seq', '[0-9]+');
+});
+
+// ============================================================
+// مسارات قسم «الخدمات والمزودين» — مزودون/رسائل/واتساب/إعدادات/مهام
+// Services & Providers section routes — providers / sms / whatsapp / config / jobs
+//
+// كل مسار خلف `auth:sanctum` + `permission:<code>`. الفصل بدقة «لكل قسم ولكل عملية»: التحكم
+// بالمهام وإظهار بيانات اعتماد المزودين أخطر من مجرد عرض القسم، لهما أكواد مستقلة.
+// Every route sits behind auth:sanctum + permission:<code>, split per section and per operation:
+// controlling scheduler jobs or revealing provider credentials is far more dangerous than merely
+// viewing the section, so each carries its own code.
+// ============================================================
+Route::middleware('auth:sanctum')->group(function () {
+    // المزودون / Providers (PROVIDERS + PROVIDERS_DTL)
+    Route::get('/providers', [ProviderController::class, 'index'])
+        ->middleware('permission:providers.view');
+    Route::post('/providers', [ProviderController::class, 'store'])
+        ->middleware('permission:providers.create');
+    Route::get('/providers/{id}', [ProviderController::class, 'show'])
+        ->middleware('permission:providers.view')
+        ->where('id', '[0-9]+');
+    Route::put('/providers/{id}', [ProviderController::class, 'update'])
+        ->middleware('permission:providers.update')
+        ->where('id', '[0-9]+');
+    Route::patch('/providers/{id}/toggle', [ProviderController::class, 'toggle'])
+        ->middleware('permission:providers.toggle')
+        ->where('id', '[0-9]+');
+    Route::delete('/providers/{id}', [ProviderController::class, 'destroy'])
+        ->middleware('permission:providers.delete')
+        ->where('id', '[0-9]+');
+
+    // اشتراكات المزود / provider subscriptions (PROVIDERS_DTL)
+    Route::get('/providers/{id}/subscriptions', [ProviderController::class, 'subscriptions'])
+        ->middleware('permission:providers.view')
+        ->where('id', '[0-9]+');
+    Route::post('/providers/{id}/subscriptions', [ProviderController::class, 'storeSubscription'])
+        ->middleware('permission:providers.subscriptions_manage')
+        ->where('id', '[0-9]+');
+    Route::put('/provider-subscriptions/{dtlId}', [ProviderController::class, 'updateSubscription'])
+        ->middleware('permission:providers.subscriptions_manage')
+        ->where('dtlId', '[0-9]+');
+    Route::delete('/provider-subscriptions/{dtlId}', [ProviderController::class, 'deleteSubscription'])
+        ->middleware('permission:providers.subscriptions_manage')
+        ->where('dtlId', '[0-9]+');
+
+    // الرسائل النصية / SMS (MSG_QUEUE + MSG_ARCHIVE)
+    Route::get('/sms/messages', [SmsController::class, 'index'])
+        ->middleware('permission:sms.view');
+    Route::post('/sms/messages', [SmsController::class, 'store'])
+        ->middleware('permission:sms.create');
+    Route::get('/sms/messages/{id}', [SmsController::class, 'show'])
+        ->middleware('permission:sms.view')
+        ->where('id', '[0-9]+');
+    Route::put('/sms/messages/{id}', [SmsController::class, 'update'])
+        ->middleware('permission:sms.update')
+        ->where('id', '[0-9]+');
+    Route::patch('/sms/messages/{id}/toggle', [SmsController::class, 'toggle'])
+        ->middleware('permission:sms.toggle')
+        ->where('id', '[0-9]+');
+    Route::delete('/sms/messages/{id}', [SmsController::class, 'destroy'])
+        ->middleware('permission:sms.delete')
+        ->where('id', '[0-9]+');
+
+    // رسائل واتساب / WhatsApp (W_MSG_QUEUE + W_MSG_ARCHIVE)
+    Route::get('/whatsapp/messages', [WhatsappController::class, 'index'])
+        ->middleware('permission:whatsapp.view');
+    Route::post('/whatsapp/messages', [WhatsappController::class, 'store'])
+        ->middleware('permission:whatsapp.create');
+    Route::get('/whatsapp/messages/{id}', [WhatsappController::class, 'show'])
+        ->middleware('permission:whatsapp.view')
+        ->where('id', '[0-9]+');
+    Route::put('/whatsapp/messages/{id}', [WhatsappController::class, 'update'])
+        ->middleware('permission:whatsapp.update')
+        ->where('id', '[0-9]+');
+    Route::patch('/whatsapp/messages/{id}/toggle', [WhatsappController::class, 'toggle'])
+        ->middleware('permission:whatsapp.toggle')
+        ->where('id', '[0-9]+');
+    Route::delete('/whatsapp/messages/{id}', [WhatsappController::class, 'destroy'])
+        ->middleware('permission:whatsapp.delete')
+        ->where('id', '[0-9]+');
+
+    // إعدادات الخدمات / service config (CORP + SERVICES)
+    Route::get('/service-config', [ServiceConfigController::class, 'show'])
+        ->middleware('permission:services.view');
+    Route::put('/service-config/corp', [ServiceConfigController::class, 'updateCorp'])
+        ->middleware('permission:services.settings_manage');
+    Route::post('/services', [ServiceConfigController::class, 'storeService'])
+        ->middleware('permission:services.update');
+    Route::put('/services/{id}', [ServiceConfigController::class, 'updateService'])
+        ->middleware('permission:services.update')
+        ->where('id', '[0-9]+');
+    Route::delete('/services/{id}', [ServiceConfigController::class, 'destroyService'])
+        ->middleware('permission:services.update')
+        ->where('id', '[0-9]+');
+
+    // المهام الزمنية / scheduler jobs (DBMS_SCHEDULER)
+    Route::get('/jobs', [JobController::class, 'index'])
+        ->middleware('permission:jobs.view');
+    Route::get('/jobs/{name}/history', [JobController::class, 'history'])
+        ->middleware('permission:jobs.view');
+    Route::post('/jobs', [JobController::class, 'store'])
+        ->middleware('permission:jobs.create');
+    Route::put('/jobs/{name}', [JobController::class, 'update'])
+        ->middleware('permission:jobs.update');
+    Route::patch('/jobs/{name}/toggle', [JobController::class, 'toggle'])
+        ->middleware('permission:jobs.toggle');
+    Route::delete('/jobs/{name}', [JobController::class, 'destroy'])
+        ->middleware('permission:jobs.delete');
 });

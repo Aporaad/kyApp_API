@@ -49,9 +49,9 @@ function ibacAdminUser(): User
 }
 
 test('catalog gives every module its core actions in fixed order', function () {
-    // 97 = 93 سابقة + 4 لوحدة `app_config` (منح عام + view + update + api_manage)
-    // 97 = the prior 93 plus 4 for the app_config module (wildcard + view + update + api_manage).
-    expect(PermissionCatalog::count())->toBe(97);
+    // 127 = 97 السابقة + 30 لخمسة وحدات جديدة (services/providers/sms/whatsapp/jobs)
+    // 127 = the prior 97 plus 30 across the five new modules (services/providers/sms/whatsapp/jobs).
+    expect(PermissionCatalog::count())->toBe(127);
 
     foreach (PermissionCatalog::grouped() as $module) {
         $coreCodes = array_map(
