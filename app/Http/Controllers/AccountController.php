@@ -1186,42 +1186,14 @@ class AccountController extends Controller
             $groupOfChart = $this->chartGroupMap();
             $counts = $this->chartCountBuckets();
 
-            // تجميع لأسفل-أعلى: جزء ← فرعي ← قسم
-            $partBal = [];
-            $groupBal = [];
-            foreach ($chartBal as $accNo => $b) {
-                $part = (int) substr((string) $accNo, 0, 3);
-                $partBal[$part] = $this->addBucket($partBal[$part] ?? null, $b);
-
-                $gid = $groupOfChart[$accNo] ?? null;
-                if ($gid !== null) {
-                    $groupBal[(int) $gid] = $this->addBucket($groupBal[(int) $gid] ?? null, $b);
-                }
-            }
-
-            $partToSub = [];
-            foreach ($subs as $s) {
-                $partToSub[(int) $s['acc_part']] = (int) $s['acc_sub'];
-            }
-            $subToAccount = [];
-            foreach ($mains as $m) {
-                $subToAccount[(int) $m['acc_sub']] = (int) $m['acc_no'];
-            }
-
-            $subBal = [];
-            $accBal = [];
-            foreach ($partBal as $part => $b) {
-                $sub = $partToSub[$part] ?? null;
-                if ($sub === null) {
-                    continue; // جزء بلا أب معروف في الهيكل / orphan prefix — يُتجاهل في الترقية
-                }
-                $subBal[$sub] = $this->addBucket($subBal[$sub] ?? null, $b);
-
-                $acc = $subToAccount[$sub] ?? null;
-                if ($acc !== null) {
-                    $accBal[$acc] = $this->addBucket($accBal[$acc] ?? null, $b);
-                }
-            }
+            // تجميع لأسفل-أعلى: جزء ← فرعي ← قسم (نفس ترقية التصدير، لا نسختين)
+            // Bottom-up roll-up: part → sub → section. Shared with the export endpoint
+            // so a printed tree and the on-screen tree can never drift apart.
+            $roll = $this->rollUpBalances($chartBal, $groupOfChart, $subs, $mains);
+            $partBal = $roll['part'];
+            $groupBal = $roll['group'];
+            $subBal = $roll['sub'];
+            $accBal = $roll['account'];
 
             // ── 3) بناء العقد: كل عقدة تظهر دائماً (حتى الفارغة) ──
             $tree = [];
@@ -1375,6 +1347,306 @@ class AccountController extends Controller
                     'to_date' => $toIso,
                     'generated_at' => date('Y-m-d H:i:s'),
                 ],
+            ]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * GET /accounts/export-tree
+     * قائمة مسطّحة بكل الصفوف المطلوبة من مستويات الشجرة — للطباعة والتصدير فقط.
+     *
+     * Why this endpoint exists: the export menu used to serialize whatever the screen
+     * had already rendered. The tree is lazy, so printing a collapsed tree wrote 134
+     * structural rows and not a single account — exactly what the user reported. Export
+     * has to ask the database, never the scroll position, and must say which levels it
+     * wants.
+     *
+     * الأرصدة نفس مصدرها في الشجرة (ENTRY_SUB) ونفس الترقية (rollUpBalances)، فلا تتباعد
+     * أرقام المطبوعة عن الشاشة. حسابات العملاء (123) مخفية عرضاً لكن التصدير يخيّر المستخدم.
+     *
+     * Query params:
+     *   levels           csv of account|main|sub|group|chart — default all five
+     *   section          optional ACC_NO restricting the whole export to one section
+     *   include_customers 0/1 — include the 123 customer accounts (default 0)
+     *   hide_zero        0/1 — drop rows whose net balance is zero
+     *   from_date / to_date
+     */
+    public function exportTree(Request $request)
+    {
+        try {
+            $allowed = ['account', 'main', 'sub', 'group', 'chart'];
+            $requested = array_values(array_filter(
+                array_map('trim', explode(',', (string) $request->query('levels', ''))),
+                fn ($l) => in_array($l, $allowed, true)
+            ));
+            // مستوى واحد على الأقل دائماً، وإلا كانت المطبوعة فارغة بلا خطأ يشرح السبب
+            $levels = $requested !== [] ? $requested : $allowed;
+
+            $section = $request->query('section');
+            $section = ($section === null || $section === '') ? null : (int) $section;
+            $includeCustomers = filter_var($request->query('include_customers', '0'), FILTER_VALIDATE_BOOLEAN);
+            $hideZero = filter_var($request->query('hide_zero', '0'), FILTER_VALIDATE_BOOLEAN);
+
+            $fromIso = $this->normaliseOptionalDate($request->query('from_date'));
+            $toIso = $this->normaliseOptionalDate($request->query('to_date'));
+
+            $accounts = $this->structureRows('ACCOUNT', 'ACC_NO, ACC_NAME, BALANCE, CUR_NO', 'ACC_NO');
+            $mains = $this->structureRows('ACC_MAIN', 'ACC_NO, ACC_SUB, SUB_NAME, BALANCE, CUR_NO', 'ACC_NO, ACC_SUB');
+            $subs = $this->structureRows('ACC_SUB', 'ACC_SUB, ACC_PART, PART_NAME, BALANCE, CUR_NO', 'ACC_SUB, ACC_PART');
+            $groups = $this->structureRows('ACC_SUB_GROUP', 'GROUP_ID, ACC_PART, ACC_GROUP_NAME', 'ACC_PART, GROUP_ID');
+
+            $chartBal = $this->movementBalancesByChart($fromIso, $toIso);
+            $groupOfChart = $this->chartGroupMap();
+            $counts = $this->chartCountBuckets();
+            $roll = $this->rollUpBalances($chartBal, $groupOfChart, $subs, $mains);
+            $partBal = $roll['part'];
+            $groupBal = $roll['group'];
+            $subBal = $roll['sub'];
+            $accBal = $roll['account'];
+
+            // ── نطاق الأجزاء المطلوبة: يُفلتر في SQL لا في PHP (20 ألف صف بلا داعٍ) ──
+            // حسابات العملاء تُستثنى من الصفوف لا من الأجزاء: فالجزء 123 يبقى مطلوباً
+            // لسحب حساب الكبودي 12310000 وحده، والفلتر أدناه يضمن ذلك.
+            $parts = [];
+            foreach ($subs as $s) {
+                $part = (int) $s['acc_part'];
+                if ($section !== null && $this->sectionOfPart($part, $subs, $mains) !== $section) {
+                    continue;
+                }
+                $parts[] = $part;
+            }
+            $parts = array_values(array_unique($parts));
+
+            $binds = [];
+            $inList = [];
+            foreach ($parts as $i => $p) {
+                $key = 'part_'.$i;
+                $inList[] = ':'.$key;
+                $binds[$key] = $p;
+            }
+            $partFilter = $inList === [] ? '1 = 0' : 'SUBSTR(TO_CHAR(ACC_NO), 1, 3) IN ('.implode(',', $inList).')';
+            $koboudiGuard = $includeCustomers ? '' : ' AND (SUBSTR(TO_CHAR(ACC_NO), 1, 3) <> '.self::CUSTOMERS_ACC_PART.' OR ACC_NO = '.self::KOBOUDI_CUSTOMER_ACC_NO.')';
+
+            // CHART_ACC لا يملك عمود عملة (8 أعمدة فقط): العملة تُورَّث من الحساب الجزئي
+            // The financial table carries no currency column at all — a ledger account
+            // inherits CUR_NO from its owning part, so the export reads it from $s.
+            $chartRows = DB::connection('oracle')->select("
+                SELECT ACC_NO, ACC_NAME, GROUP_ID, BALANCE, LIMITED_BALANCE, STOPPING_ACC, SEQ,
+                       TO_CHAR(ACC_DATE, 'YYYY-MM-DD') AS ACC_DATE
+                FROM CHART_ACC
+                WHERE {$partFilter} {$koboudiGuard}
+                ORDER BY ACC_NO
+            ", $binds);
+
+            // فهرسة مرة واحدة: مجموعة ← حسابات، وجزئي ← حسابات مباشرة (بلا مجموعة)
+            $byGroup = [];
+            $byPart = [];
+            $chartList = [];
+            $byAcc = [];
+            foreach ($chartRows as $row) {
+                $r = array_change_key_case((array) $row, CASE_LOWER);
+                $accNo = (int) ($r['acc_no'] ?? 0);
+                $gid = isset($r['group_id']) && $r['group_id'] !== null ? (int) $r['group_id'] : null;
+                $item = [
+                    'acc_no' => $accNo,
+                    'name' => ArabicEncoding::fixMojibake($r['acc_name'] ?? ''),
+                    'group_id' => $gid,
+                    'part' => (int) substr((string) $accNo, 0, 3),
+                    'stored_balance' => (float) ($r['balance'] ?? 0),
+                    'limited_balance' => $r['limited_balance'] ?? null,
+                    'stopping_acc' => isset($r['stopping_acc']) ? (int) $r['stopping_acc'] : null,
+                    'seq' => isset($r['seq']) ? (int) $r['seq'] : null,
+                    'acc_date' => $r['acc_date'] ?? null,
+                ];
+                $chartList[] = $item;
+                $byAcc[$accNo] = $item;
+                if ($gid !== null) {
+                    $byGroup[$gid][] = $item;
+                } else {
+                    $byPart[$item['part']][] = $item;
+                }
+            }
+
+            $rows = [];
+            $levelCounts = [];
+            // لكل صف يُضاف root_acc_no أثناء الدفع: الحقل الوحيد الذي يقول أي قسم يخدم
+            // هذا الصف، لأن acc_no يعني شيئاً مختلفاً في كل مستوى (رقم الحساب المالي نفسه).
+            $currentRoot = null;
+            $push = function (array $row) use (&$rows, &$levelCounts, $hideZero, &$currentRoot): void {
+                if ($hideZero && abs((float) $row['balance']) < 0.005) {
+                    return;
+                }
+                $levelCounts[$row['level']] = ($levelCounts[$row['level']] ?? 0) + 1;
+                $rows[] = $row + ['root_acc_no' => $currentRoot];
+            };
+
+            // فهرسة الهيكل: قسم ← فروعه، وفرع ← أجزاؤه. تُستعمل للعدّ الصادق ولتجنّب
+            // مسح المصفوفات الكاملة عند كل أب (children_count لم يكن ليُحسب بدونه).
+            $mainsByAcc = [];
+            foreach ($mains as $m) {
+                $mainsByAcc[(int) $m['acc_no']][] = $m;
+            }
+            $subsByMain = [];
+            foreach ($subs as $s) {
+                $subsByMain[(int) $s['acc_sub']][] = $s;
+            }
+
+            foreach ($accounts as $a) {
+                $accNo = (int) $a['acc_no'];
+                if ($section !== null && $accNo !== $section) {
+                    continue;
+                }
+                $accMains = $mainsByAcc[$accNo] ?? [];
+                $currentRoot = $accNo;
+                $ab = $accBal[$accNo] ?? $this->emptyBucket();
+                if (in_array('account', $levels, true)) {
+                    // عدد الحسابات أسفل القسم = مجموع ما تحت فروعه من أجزاء، لا صفر مؤقت
+                    $accAccounts = 0;
+                    foreach ($accMains as $m) {
+                        $accAccounts += $this->accountCountForSub((int) $m['acc_sub'], $subs, $counts['part']);
+                    }
+                    $push([
+                        'depth' => 0, 'level' => 'account', 'code' => (string) $accNo, 'acc_no' => $accNo,
+                        'name' => $a['name'], 'parent_path' => '', 'code_path' => (string) $accNo,
+                        'debit' => $ab['debit'], 'credit' => $ab['credit'], 'balance' => $ab['net'],
+                        'movements' => $ab['movements'], 'stored_balance' => (float) $a['balance'],
+                        'cur_no' => $this->curNoOf($a['cur_no'] ?? null),
+                        'children_count' => count($accMains), 'account_count' => $accAccounts,
+                    ]);
+                }
+
+                foreach ($accMains as $m) {
+                    $accSub = (int) $m['acc_sub'];
+                    $mainPath = $accNo.' / '.$accSub;
+                    $mainSubs = $subsByMain[$accSub] ?? [];
+                    $sb = $subBal[$accSub] ?? $this->emptyBucket();
+                    if (in_array('main', $levels, true)) {
+                        $push([
+                            'depth' => 1, 'level' => 'main', 'code' => (string) $accSub, 'acc_no' => $accNo,
+                            'acc_sub' => $accSub, 'name' => $m['name'],
+                            'parent_path' => $a['name'], 'code_path' => $mainPath,
+                            'debit' => $sb['debit'], 'credit' => $sb['credit'], 'balance' => $sb['net'],
+                            'movements' => $sb['movements'], 'stored_balance' => (float) $m['balance'],
+                            'cur_no' => $this->curNoOf($m['cur_no'] ?? null), 'children_count' => count($mainSubs),
+                            'account_count' => $this->accountCountForSub($accSub, $subs, $counts['part']),
+                        ]);
+                    }
+
+                    foreach ($mainSubs as $s) {
+                        $accPart = (int) $s['acc_part'];
+                        $partPath = $mainPath.' / '.$accPart;
+                        $names = [$a['name'], $m['name']];
+                        $pb = $partBal[$accPart] ?? $this->emptyBucket();
+                        $customers = $accPart === self::CUSTOMERS_ACC_PART;
+                        $partGroups = $customers && ! $includeCustomers
+                            ? []
+                            : array_values(array_filter($groups, fn ($g) => (int) $g['acc_part'] === $accPart));
+
+                        if (in_array('sub', $levels, true)) {
+                            $push([
+                                'depth' => 2, 'level' => 'sub', 'code' => (string) $accPart, 'acc_no' => $accNo,
+                                'acc_sub' => $accSub, 'acc_part' => $accPart, 'name' => $s['name'],
+                                'parent_path' => $this->pathName($names), 'code_path' => $partPath,
+                                'debit' => $pb['debit'], 'credit' => $pb['credit'], 'balance' => $pb['net'],
+                                'movements' => $pb['movements'], 'stored_balance' => (float) $s['balance'],
+                                'cur_no' => $this->curNoOf($s['cur_no'] ?? null),
+                                'children_count' => count($partGroups),
+                                'account_count' => (int) ($counts['part'][$accPart] ?? 0),
+                            ]);
+                        }
+
+                        foreach ($partGroups as $g) {
+                            $gid = (int) $g['group_id'];
+                            $gb = $groupBal[$gid] ?? $this->emptyBucket();
+                            if (in_array('group', $levels, true)) {
+                                $push([
+                                    'depth' => 3, 'level' => 'group', 'code' => 'G'.$gid, 'acc_no' => $accNo,
+                                    'acc_sub' => $accSub, 'acc_part' => $accPart, 'group_id' => $gid,
+                                    'name' => $g['name'], 'parent_path' => $this->pathName(array_merge($names, [$s['name']])),
+                                    'code_path' => $partPath.' / G'.$gid,
+                                    'debit' => $gb['debit'], 'credit' => $gb['credit'], 'balance' => $gb['net'],
+                                    'movements' => $gb['movements'], 'stored_balance' => null,
+                                    'cur_no' => $this->curNoOf($s['cur_no'] ?? null),
+                                    'children_count' => (int) ($counts['group'][$gid] ?? 0),
+                                    'account_count' => (int) ($counts['group'][$gid] ?? 0),
+                                ]);
+                            }
+                            if (! in_array('chart', $levels, true)) {
+                                continue;
+                            }
+                            foreach ($byGroup[$gid] ?? [] as $c) {
+                                $push($this->exportChartRow($c, 4, $chartBal, $this->pathName(array_merge($names, [$s['name'], $g['name']])), $partPath.' / G'.$gid.' / '.$c['acc_no'], $this->curNoOf($s['cur_no'] ?? null)));
+                            }
+                        }
+
+                        // حسابات مباشرة بلا مجموعة (GROUP_ID IS NULL) — وهي حسابات العملاء
+                        // حين يطلب المستخدم تضمينها، عدا الكبودي فقد جُعل مجموعة مفردة
+                        if (in_array('chart', $levels, true) && (! $customers || $includeCustomers)) {
+                            foreach ($byPart[$accPart] ?? [] as $c) {
+                                $push($this->exportChartRow($c, 3, $chartBal, $this->pathName(array_merge($names, [$s['name']])), $partPath.' / '.$c['acc_no'], $this->curNoOf($s['cur_no'] ?? null)));
+                            }
+                        } elseif (in_array('chart', $levels, true) && $customers) {
+                            // استثناء العرض: كبودى وحده، مطابق لما تعرضه الشاشة. وهو ليس
+                            // حساباً مباشراً — GROUP_ID = 5 — فيُسحب بالرقم لا من $byPart،
+                            // وإلا اختفى من كل مطبوعة لأن مجموعته أُسقطت من العرض.
+                            $koboudi = $byAcc[self::KOBOUDI_CUSTOMER_ACC_NO] ?? null;
+                            if ($koboudi !== null) {
+                                $push($this->exportChartRow($koboudi, 3, $chartBal, $this->pathName(array_merge($names, [$s['name']])), $partPath.' / '.$koboudi['acc_no'], $this->curNoOf($s['cur_no'] ?? null)));
+                            }
+                        }
+                    }
+                }
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => $rows,
+                'meta' => [
+                    'total' => count($rows),
+                    'levels' => $levels,
+                    'level_counts' => $levelCounts,
+                    'section' => $section,
+                    'include_customers' => $includeCustomers,
+                    'hide_zero' => $hideZero,
+                    'from_date' => $fromIso,
+                    'to_date' => $toIso,
+                    'chart_source_rows' => count($chartList),
+                    'generated_at' => date('Y-m-d H:i:s'),
+                ],
+            ]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * GET /accounts/currencies
+     * دليل العملات لملء حقل العملة في نموذجي الإنشاء والتعديل.
+     *
+     * Why not reuse /currencies: that route is gated by `currencies.view`, which an
+     * accounts-only user does not have — a create form would silently fail to list the
+     * currencies it is asking them to pick. This returns the two columns the form needs
+     * under the accounts grants instead.
+     */
+    public function getCurrencyOptions(Request $request)
+    {
+        try {
+            $rows = DB::connection('oracle')->select('SELECT CUR_NO, CUR_NAME FROM CURRENCY ORDER BY CUR_NO');
+            $data = [];
+            foreach ($rows as $row) {
+                $r = array_change_key_case((array) $row, CASE_LOWER);
+                $data[] = [
+                    'cur_no' => (int) ($r['cur_no'] ?? 0),
+                    'cur_name' => ArabicEncoding::fixMojibake((string) ($r['cur_name'] ?? '')),
+                ];
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => $data,
+                'meta' => ['total' => count($data)],
             ]);
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
@@ -2251,6 +2523,121 @@ class AccountController extends Controller
         $into['movements'] += (int) $add['movements'];
 
         return $into;
+    }
+
+    /**
+     * ترقية الأرصدة من الحسابات المالية إلى كل مستوى فوقها:
+     *  acc_part (أول 3 أرقام) ← acc_sub ← acc_no، و GROUP_ID ← acc_part للمجموعة.
+     * Balance roll-up from the financial accounts upward. Shared by the lazy tree and
+     * the flat export so both report the same numbers for the same node.
+     *
+     * @param  array<int,array{debit:float,credit:float,net:float,movements:int}>  $chartBal  keyed by ACC_NO
+     * @param  array<int,int|null>  $groupOfChart  ACC_NO → GROUP_ID
+     * @return array{part: array, group: array, sub: array, account: array}
+     */
+    private function rollUpBalances(array $chartBal, array $groupOfChart, array $subs, array $mains): array
+    {
+        $partBal = [];
+        $groupBal = [];
+        foreach ($chartBal as $accNo => $b) {
+            $part = (int) substr((string) $accNo, 0, 3);
+            $partBal[$part] = $this->addBucket($partBal[$part] ?? null, $b);
+
+            $gid = $groupOfChart[$accNo] ?? null;
+            if ($gid !== null) {
+                $groupBal[(int) $gid] = $this->addBucket($groupBal[(int) $gid] ?? null, $b);
+            }
+        }
+
+        $partToSub = [];
+        foreach ($subs as $s) {
+            $partToSub[(int) $s['acc_part']] = (int) $s['acc_sub'];
+        }
+        $subToAccount = [];
+        foreach ($mains as $m) {
+            $subToAccount[(int) $m['acc_sub']] = (int) $m['acc_no'];
+        }
+
+        $subBal = [];
+        $accBal = [];
+        foreach ($partBal as $part => $b) {
+            $sub = $partToSub[$part] ?? null;
+            if ($sub === null) {
+                continue; // جزء بلا أب معروف في الهيكل / orphan prefix — يُتجاهل في الترقية
+            }
+            $subBal[$sub] = $this->addBucket($subBal[$sub] ?? null, $b);
+
+            $acc = $subToAccount[$sub] ?? null;
+            if ($acc !== null) {
+                $accBal[$acc] = $this->addBucket($accBal[$acc] ?? null, $b);
+            }
+        }
+
+        return ['part' => $partBal, 'group' => $groupBal, 'sub' => $subBal, 'account' => $accBal];
+    }
+
+    /**
+     * سطر حساب مالي في قائمة التصدير: نفس أرقام الشاشة (محسوب من ENTRY_SUB) مع المخزّن
+     * للمقارنة، لأن العمود المخزّن ميت في الجزء 123 وفي أغلب الجزئيات.
+     * $curNo موروثة من الحساب الجزئي الأعلى — لا عمود عملة في CHART_ACC.
+     */
+    private function exportChartRow(array $c, int $depth, array $chartBal, string $parentPath, string $codePath, ?int $curNo = null): array
+    {
+        $b = $chartBal[$c['acc_no']] ?? $this->emptyBucket();
+
+        return [
+            'depth' => $depth,
+            'level' => 'chart',
+            'code' => (string) $c['acc_no'],
+            'acc_no' => $c['acc_no'],
+            'group_id' => $c['group_id'],
+            'name' => $c['name'],
+            'parent_path' => $parentPath,
+            'code_path' => $codePath,
+            'debit' => $b['debit'],
+            'credit' => $b['credit'],
+            'balance' => $b['net'],
+            'movements' => $b['movements'],
+            'stored_balance' => $c['stored_balance'],
+            'limited_balance' => $c['limited_balance'] !== null ? (float) $c['limited_balance'] : null,
+            'stopping_acc' => $c['stopping_acc'],
+            'seq' => $c['seq'],
+            'cur_no' => $curNo,
+            'acc_date' => $c['acc_date'],
+            'children_count' => 0,
+            'account_count' => 0,
+        ];
+    }
+
+    /**
+     * رقم العملة كنص OCI أو null → عدد صحيح أو null.
+     * OCI8 returns scalars as strings; an empty CUR_NO must stay null (inherit), not 0.
+     */
+    private function curNoOf($raw): ?int
+    {
+        return ($raw === null || $raw === '') ? null : (int) $raw;
+    }
+
+    /** أي قسم يخدم هذا الجزء؟ (جزئي → فرعي → قسم) — للتقييد بفلتر القسم في التصدير. */
+    private function sectionOfPart(int $accPart, array $subs, array $mains): ?int
+    {
+        $accSub = null;
+        foreach ($subs as $s) {
+            if ((int) $s['acc_part'] === $accPart) {
+                $accSub = (int) $s['acc_sub'];
+                break;
+            }
+        }
+        if ($accSub === null) {
+            return null;
+        }
+        foreach ($mains as $m) {
+            if ((int) $m['acc_sub'] === $accSub) {
+                return (int) $m['acc_no'];
+            }
+        }
+
+        return null;
     }
 
     /**

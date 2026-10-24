@@ -322,6 +322,21 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/accounts/search', [AccountController::class, 'searchAccounts'])
         ->middleware('permission:accounts.view,accounts.structure_manage,accounts.statement_group,accounts.statement_detail');
 
+    // تصدير الشجرة مسطّح — يطالب الخادم بكل المستويات المختارة بدل ما عرضه الشاشة
+    // Flat tree export: the server answers for the selected levels. The lazy screen only
+    // holds the branches the user actually opened, so exporting from it printed headers
+    // only. Gated by the export/print grants because those are exactly the buttons that
+    // call it — a read-only user never sees the menu.
+    Route::get('/accounts/export-tree', [AccountController::class, 'exportTree'])
+        ->middleware('permission:accounts.export,accounts.print');
+
+    // دليل العملات لنموذج الحساب — صلاحيات الحسابات لا العملات، فالاستعلام يتبع النموذج
+    // Currency picker for the account form. It cannot reuse /currencies (gated by
+    // currencies.view, which an accounts-only user does not hold), or the form would
+    // show an empty dropdown while asking the user to choose a currency.
+    Route::get('/accounts/currencies', [AccountController::class, 'getCurrencyOptions'])
+        ->middleware('permission:accounts.view,accounts.create,accounts.update,accounts.structure_manage');
+
     // معاينة الرقم المتوقع قبل الإنشاء — نفس قواعد create* لا نسخة في العميل
     // Number preview for the create form: the server owns the legacy numbering rules.
     Route::get('/accounts/next-number', [AccountController::class, 'nextAccountNumber'])
