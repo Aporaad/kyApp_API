@@ -125,6 +125,11 @@ final class PermissionCatalog
                 'toggle' => 'تفعيل أو إيقاف القصاص',
                 'statement_financial' => 'كشف حساب مالي للقصاص',
                 'statement_work' => 'كشف عمل للقصاص',
+                // تقرير العمل الجماعي لكل القصاصين يُعرض وحده في بطاقة مستقلة، فله صلاحية
+                // مستقلة عن كشف الفرد: القدرة على رؤية أرشيف مجموعة لا تعني القدرة على
+                // رؤية سجل فرد. / Group work report is its own grant: seeing the pooled
+                // archive is distinct from seeing one worker's individual work statement.
+                'group_work_report' => 'تقرير عمل مجموعة القصاصين',
             ],
         ],
         'tailors' => [
@@ -139,6 +144,7 @@ final class PermissionCatalog
                 'toggle' => 'تفعيل أو إيقاف الخيّاط',
                 'statement_financial' => 'كشف حساب مالي للخياط',
                 'statement_work' => 'كشف عمل للخياط',
+                'group_work_report' => 'تقرير عمل مجموعة الخياطين',
             ],
         ],
         'accounts' => [
@@ -434,6 +440,7 @@ final class PermissionCatalog
             'statement_group' => 'Group trial-balance statement',
             'statement_detail' => 'Detailed analytical statement',
             'statement_work' => 'Work statement',
+            'group_work_report' => 'Group work report',
             'toggle' => 'Activate / Deactivate',
             'deliver' => 'Deliver',
             'edit_limit' => 'Edit credit limit',

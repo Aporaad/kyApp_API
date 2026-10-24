@@ -85,10 +85,10 @@ test('the catalog endpoint serves every module with its database ids', function 
 
     $response = $this->getJson('/api/permissions')->assertOk()->assertJsonPath('success', true);
 
-    // 97 كوداً عبر 18 وحدة (أُضيفت وحدة app_config بأكوادها الأربعة)
-    // 97 codes across 18 modules (the app_config module added its four codes).
-    expect($response->json('meta.total'))->toBe(97)
-        ->and($response->json('data'))->toHaveCount(18);
+    // عدد الأكواد والوحدات يُقرأ من الكتالوج نفسه — لا أرقام صريحة تتقادم عند كل توسيع
+    // Codes and module counts come from the catalog itself, so the assertions never go stale.
+    expect($response->json('meta.total'))->toBe(PermissionCatalog::count())
+        ->and($response->json('data'))->toHaveCount(count(PermissionCatalog::grouped()));
 
     $usersModule = collect($response->json('data'))->firstWhere('module_code', 'users');
     $codes = array_map(static fn (array $row): string => $row['permission_code'], $usersModule['permissions']);
@@ -116,9 +116,9 @@ test('reading a user permissions reports the administrator state', function () {
         ->assertJsonPath('data.is_admin', true)
         ->json('data');
 
-    // المدير يملك كل الكتالوج عملياً وإن لم تُمنح له صفوف في الجدول (97 بعد إضافة app_config)
-    // The admin effectively holds the whole catalog (97 now that app_config is added).
-    expect($data['effective_permissions'])->toHaveCount(97)
+    // المدير يملك كل الكتالوج عملياً وإن لم تُمنح له صفوف في الجدول — العدد من الكتالوج مباشرة
+    // The admin effectively holds the whole catalog; the count comes from the catalog itself.
+    expect($data['effective_permissions'])->toHaveCount(PermissionCatalog::count())
         ->and($data)->toHaveKeys(['granted_codes', 'granted_ids']);
 });
 

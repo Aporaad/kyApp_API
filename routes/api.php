@@ -252,7 +252,7 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:cutters.statement_work')
         ->where('id', '[0-9]+');
     Route::get('/workers/cutters/group-work-report', [WorkerController::class, 'groupWorkReportCutter'])
-        ->middleware('permission:cutters.statement_work');
+        ->middleware('permission:cutters.group_work_report');
     Route::put('/workers/cutters/{id}', [WorkerController::class, 'updateCutter'])
         ->middleware('permission:cutters.update')
         ->where('id', '[0-9]+');
@@ -275,7 +275,7 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:tailors.statement_work')
         ->where('id', '[0-9]+');
     Route::get('/workers/tailors/group-work-report', [WorkerController::class, 'groupWorkReportTailor'])
-        ->middleware('permission:tailors.statement_work');
+        ->middleware('permission:tailors.group_work_report');
     Route::put('/workers/tailors/{id}', [WorkerController::class, 'updateTailor'])
         ->middleware('permission:tailors.update')
         ->where('id', '[0-9]+');
@@ -314,6 +314,23 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:accounts.view,accounts.structure_manage,accounts.statement_group,accounts.statement_detail');
     Route::get('/accounts/tree', [AccountController::class, 'getAccountTree'])
         ->middleware('permission:accounts.view,accounts.structure_manage,accounts.statement_group,accounts.statement_detail');
+    // أبناء عقدة هيكلية محمّلون عند التوسيع — نفس قراءة الشجرة لأنهم جزء منها
+    // Lazy children of one structural node: same grant as the tree, since they are the tree.
+    Route::get('/accounts/tree/children', [AccountController::class, 'getTreeChildren'])
+        ->middleware('permission:accounts.view,accounts.structure_manage,accounts.statement_group,accounts.statement_detail');
+    // بحث عميق في كل المستويات بلا تحميل الشجرة / deep search without walking the tree
+    Route::get('/accounts/search', [AccountController::class, 'searchAccounts'])
+        ->middleware('permission:accounts.view,accounts.structure_manage,accounts.statement_group,accounts.statement_detail');
+
+    // معاينة الرقم المتوقع قبل الإنشاء — نفس قواعد create* لا نسخة في العميل
+    // Number preview for the create form: the server owns the legacy numbering rules.
+    Route::get('/accounts/next-number', [AccountController::class, 'nextAccountNumber'])
+        ->middleware('permission:accounts.view,accounts.create,accounts.structure_manage');
+
+    // نقطة بيانات مفردة لملء شاشة التعديل / single account payload for the edit screen
+    Route::get('/accounts/chart/{accNo}', [AccountController::class, 'getChartAccountDetail'])
+        ->middleware('permission:accounts.view,accounts.statement_financial,accounts.update')
+        ->where('accNo', '[0-9]+');
 
     // الحسابات المالية (CHART_ACC) / ledger accounts
     // قائمة الحسابات تُستخدم في منتقي «كشف حساب مالي»، فتقبل صلاحية الكشف أيضاً
@@ -333,6 +350,23 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/accounts/sub-group/{groupId}', [AccountController::class, 'updateSubGroup'])
         ->middleware('permission:accounts.structure_manage')
         ->where('groupId', '[0-9]+');
+
+    // فروع وأجزاء الهيكل — إعادة تشكيل للشجرة نفسها لا لمحتواها
+    // Branch (ACC_MAIN) and part (ACC_SUB) nodes: reshaping the hierarchy itself,
+    // hence `accounts.structure_manage` rather than the ordinary create/update rows.
+    Route::post('/accounts/main', [AccountController::class, 'createAccMain'])
+        ->middleware('permission:accounts.structure_manage');
+    Route::put('/accounts/main/{accSub}', [AccountController::class, 'updateAccMain'])
+        ->middleware('permission:accounts.structure_manage')
+        ->where('accSub', '[0-9]+');
+    Route::post('/accounts/sub', [AccountController::class, 'createAccSub'])
+        ->middleware('permission:accounts.structure_manage');
+    Route::put('/accounts/sub/{accPart}', [AccountController::class, 'updateAccSub'])
+        ->middleware('permission:accounts.structure_manage')
+        ->where('accPart', '[0-9]+');
+    Route::put('/accounts/account/{accNo}', [AccountController::class, 'updateAccount'])
+        ->middleware('permission:accounts.structure_manage')
+        ->where('accNo', '[0-9]+');
 
     // كشوفات الحسابات / statements — لكل كشف صلاحيته الدقيقة
     // Each statement carries its own precise grant.

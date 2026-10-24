@@ -174,8 +174,8 @@ test('an ungranted caller is refused per module with the named permission', func
         ['get', '/api/workers/cutters/1/statement', 'cutters.statement_financial'],
         ['get', '/api/workers/cutters/1/work-report', 'cutters.statement_work'],
         ['get', '/api/workers/tailors/1/work-report', 'tailors.statement_work'],
-        ['get', '/api/workers/cutters/group-work-report', 'cutters.statement_work'],
-        ['get', '/api/workers/tailors/group-work-report', 'tailors.statement_work'],
+        ['get', '/api/workers/cutters/group-work-report', 'cutters.group_work_report'],
+        ['get', '/api/workers/tailors/group-work-report', 'tailors.group_work_report'],
         ['patch', '/api/workers/tailors/1/toggle', 'tailors.toggle'],
         ['get', '/api/accounts/tree', [
             'accounts.view',

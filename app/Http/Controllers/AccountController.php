@@ -21,6 +21,15 @@ use Illuminate\Validation\ValidationException;
  */
 class AccountController extends Controller
 {
+    /**
+     * معرّف الحساب الجزئي للعملاء في القاعدة التراثية: كل حسابات العملاء تبدأ بـ 123
+     * (أكثر من 10 آلاف حساب). تُستثنى من عرض الشجرة حصراً، وتبقى داخل التجميع.
+     * The legacy customers part: hidden from the tree display only, never from roll-ups.
+     */
+    private const CUSTOMERS_ACC_PART = 123;
+
+    /** حساب «عملاء الكبودي للخياطة» — المستثنى الوحيد المعروض تحت الجزء 123. */
+    private const KOBOUDI_CUSTOMER_ACC_NO = 12310000;
     // =========================================================
     // ===           جلب هيكل الشجرة المحاسبية             ===
     // =========================================================
@@ -246,56 +255,132 @@ class AccountController extends Controller
     /**
      * POST /accounts/chart
      * إنشاء حساب مالي جديد في CHART_ACC
+     *
+     * التولير الصحيح: رقم الحساب = بادئة الجزء (3 أرقام) × 100000 + لاحقة من 5 أرقام
+     * تبدأ من 10001، أي أن الجزء 110 يعطي 11010001. الصيغة القديمة كانت
+     * TRUNC(ACC_NO/10000) التي تعطي 4 أرقام فلا تصل أبداً لأكبر رقم داخل الجزء.
+     * Numbering rule: ACC_NO = accPart * 100000 + 5-digit suffix (110 → 11010001).
+     * The old TRUNC(ACC_NO/10000) filter produced a 4-digit prefix that never matched a
+     * 3-digit part, so MAX() came back null and every insert collided with the first slot.
+     *
+     * الحقول المدعومة = أعمدة CHART_ACC الموجودة فقط (لا أعمدة جديدة في قاعدة الغير لنا).
+     * Body: acc_name, group_id | acc_part, balance, limited_balance, stopping_acc, seq, acc_date.
      */
     public function createChartAccount(Request $request)
     {
         try {
-            $request->validate([
+            $data = $request->validate([
                 'acc_name' => 'required|string|max:150',
-                'group_id' => 'required|integer',
+                'group_id' => 'nullable|integer',
+                'acc_part' => 'nullable|integer',
+                'balance' => 'nullable|numeric',
+                'limited_balance' => 'nullable|numeric',
+                'stopping_acc' => 'nullable|integer|in:0,1',
+                'seq' => 'nullable|integer|min:0',
+                'acc_date' => 'nullable|string',
             ]);
 
-            $groupId = $request->input('group_id');
+            $groupId = isset($data['group_id']) && $data['group_id'] !== '' ? (int) $data['group_id'] : null;
+            $accPart = null;
 
-            // جلب ACC_PART للمجموعة
-            $groupRow = DB::connection('oracle')->selectOne(
-                'SELECT ACC_PART FROM ACC_SUB_GROUP WHERE GROUP_ID = :gid',
-                ['gid' => $groupId]
-            );
-            if (! $groupRow) {
-                return response()->json(['success' => false, 'message' => 'المجموعة غير موجودة'], 404);
+            if ($groupId !== null) {
+                $groupRow = DB::connection('oracle')->selectOne(
+                    'SELECT ACC_PART FROM ACC_SUB_GROUP WHERE GROUP_ID = :gid',
+                    ['gid' => $groupId]
+                );
+                if (! $groupRow) {
+                    return response()->json(['success' => false, 'message' => 'المجموعة غير موجودة'], 404);
+                }
+                $groupArr = (array) $groupRow;
+                $accPart = (int) ($groupArr['ACC_PART'] ?? $groupArr['acc_part']);
+            } else {
+                if (empty($data['acc_part'])) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'يجب تحديد مجموعة الحساب (group_id) أو الحساب الجزئي (acc_part)',
+                    ], 422);
+                }
+                $accPart = (int) $data['acc_part'];
+                $partRow = DB::connection('oracle')->selectOne(
+                    'SELECT ACC_PART FROM ACC_SUB WHERE ACC_PART = :p',
+                    ['p' => $accPart]
+                );
+                if (! $partRow) {
+                    return response()->json(['success' => false, 'message' => 'الحساب الجزئي غير موجود'], 404);
+                }
+                // المجموعة غير مُعرَّفة أو صفر → حساب مباشر تحت الجزئي بـ GROUP_ID NULL
+                $groupId = null;
             }
-            $groupArr = (array) $groupRow;
-            $accPart = $groupArr['ACC_PART'] ?? $groupArr['acc_part'];
 
-            // أعلى رقم حساب موجود في نفس ACC_PART (أول 5 أرقام = ACC_PART * 10000)
+            // منع تكرار الاسم: CHART_ACC_BRW_U1 يفهرس ACC_NAME — الاستعلام أسبق من الخطأ
+            // Duplicate names are indexed by CHART_ACC_BRW_U1, so check before inserting.
+            $oracleName = ArabicEncoding::toOracleSearchChars($data['acc_name']);
+            $dupe = DB::connection('oracle')->selectOne(
+                'SELECT ACC_NO FROM CHART_ACC WHERE ACC_NAME = :name OR UPPER(ACC_NAME) = UPPER(:name2)',
+                ['name' => $oracleName, 'name2' => $data['acc_name']]
+            );
+            if ($dupe) {
+                $dupeArr = (array) $dupe;
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'يوجد حساب بنفس الاسم: '.(int) ($dupeArr['ACC_NO'] ?? $dupeArr['acc_no'] ?? 0),
+                ], 422);
+            }
+
+            // أعلى رقم داخل نطاق البادئة (فهرس PRIMARY KEY على ACC_NO → نطاق سريع)
+            $basePrefix = $accPart * 100000;
             $maxRow = DB::connection('oracle')->selectOne(
-                'SELECT MAX(ACC_NO) as MAX_NO FROM CHART_ACC WHERE TRUNC(ACC_NO / 10000) = :part',
-                ['part' => $accPart]
+                'SELECT MAX(ACC_NO) AS MAX_NO FROM CHART_ACC WHERE ACC_NO >= :lo AND ACC_NO < :hi',
+                ['lo' => $basePrefix, 'hi' => $basePrefix + 100000]
             );
             $maxArr = (array) $maxRow;
             $maxNo = $maxArr['MAX_NO'] ?? $maxArr['max_no'] ?? null;
-            $basePrefix = $accPart * 10000;
-            $nextNo = $maxNo ? ((int) $maxNo + 1) : ($basePrefix + 1);
+            $nextSuffix = $maxNo !== null ? ((int) $maxNo - $basePrefix) + 1 : 10001;
+            $nextNo = $basePrefix + $nextSuffix;
 
-            $accName = ArabicEncoding::toOracleSearchChars($request->input('acc_name'));
+            $accDate = $this->normaliseOptionalDate($data['acc_date'] ?? null);
+            $balance = (float) ($data['balance'] ?? 0);
+            $limited = isset($data['limited_balance']) && $data['limited_balance'] !== '' ? (float) $data['limited_balance'] : null;
+            $stopping = isset($data['stopping_acc']) && $data['stopping_acc'] !== '' ? (int) $data['stopping_acc'] : null;
+            $seq = isset($data['seq']) && $data['seq'] !== '' ? (int) $data['seq'] : null;
 
-            DB::connection('oracle')->insert(
-                'INSERT INTO CHART_ACC (ACC_NO, ACC_NAME, BALANCE, ACC_DATE, GROUP_ID, LIMITED_BALANCE)
-                 VALUES (:acc_no, :acc_name, :balance, SYSDATE, :group_id, :limited)',
-                [
-                    'acc_no' => $nextNo,
-                    'acc_name' => $accName,
-                    'balance' => $request->input('balance', 0),
-                    'group_id' => $groupId,
-                    'limited' => $request->input('limited_balance', 0),
-                ]
-            );
+            $sql = 'INSERT INTO CHART_ACC (ACC_NO, ACC_NAME, BALANCE, ACC_DATE, SEQ, GROUP_ID, LIMITED_BALANCE, STOPPING_ACC)
+                 VALUES (:acc_no, :acc_name, :balance, '
+                .($accDate !== null ? "TO_DATE(:acc_date, 'YYYY-MM-DD')" : 'SYSDATE')
+                .', :seq, :group_id, :limited, :stopping)';
+
+            $binds = [
+                'acc_no' => $nextNo,
+                'acc_name' => $oracleName,
+                'balance' => $balance,
+                'seq' => $seq,
+                'group_id' => $groupId,
+                'limited' => $limited,
+                'stopping' => $stopping,
+            ];
+            // لا تُمرَّر واسطة غير موجودة في نص SQL وإلا رفضت Oracle الربط
+            // Never bind a placeholder that is absent from the SQL text (ORA-01036).
+            if ($accDate !== null) {
+                $binds['acc_date'] = $accDate;
+            }
+
+            DB::connection('oracle')->insert($sql, $binds);
 
             return response()->json([
                 'success' => true,
                 'message' => 'تم إنشاء الحساب بنجاح',
-                'data' => ['acc_no' => $nextNo],
+                'data' => [
+                    'acc_no' => $nextNo,
+                    'acc_name' => $data['acc_name'],
+                    'balance' => $balance,
+                    'acc_date' => $accDate ?? date('Y-m-d'),
+                    'seq' => $seq,
+                    'group_id' => $groupId,
+                    'acc_part' => $accPart,
+                    'limited_balance' => $limited,
+                    'stopping_acc' => $stopping,
+                ],
             ], 201);
         } catch (ValidationException $e) {
             return response()->json(['success' => false, 'message' => $e->errors()], 422);
@@ -320,12 +405,38 @@ class AccountController extends Controller
             $params = ['acc_no' => $accNo];
 
             if ($request->has('acc_name')) {
+                $oracleName = ArabicEncoding::toOracleSearchChars($request->input('acc_name'));
+                // تكرار الاسم مرفوض ما دام حساباً آخر هو صاحب الاسم
+                // Reject a name owned by a different account (CHART_ACC_BRW_U1).
+                $dupe = DB::connection('oracle')->selectOne(
+                    'SELECT ACC_NO FROM CHART_ACC WHERE ACC_NO <> :self AND (ACC_NAME = :name OR UPPER(ACC_NAME) = UPPER(:name2))',
+                    ['self' => $accNo, 'name' => $oracleName, 'name2' => $request->input('acc_name')]
+                );
+                if ($dupe) {
+                    $dupeArr = (array) $dupe;
+
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'يوجد حساب بنفس الاسم: '.(int) ($dupeArr['ACC_NO'] ?? $dupeArr['acc_no'] ?? 0),
+                    ], 422);
+                }
                 $fields[] = 'ACC_NAME = :acc_name';
-                $params['acc_name'] = ArabicEncoding::toOracleSearchChars($request->input('acc_name'));
+                $params['acc_name'] = $oracleName;
             }
             if ($request->has('balance')) {
                 $fields[] = 'BALANCE = :balance';
                 $params['balance'] = $request->input('balance');
+            }
+            if ($request->has('seq')) {
+                $fields[] = 'SEQ = :seq';
+                $params['seq'] = (int) $request->input('seq');
+            }
+            if ($request->has('acc_date') && $request->input('acc_date') !== null && $request->input('acc_date') !== '') {
+                $accDate = $this->normaliseOptionalDate($request->input('acc_date'));
+                if ($accDate !== null) {
+                    $fields[] = "ACC_DATE = TO_DATE(:acc_date, 'YYYY-MM-DD')";
+                    $params['acc_date'] = $accDate;
+                }
             }
             if ($request->has('group_id')) {
                 $fields[] = 'GROUP_ID = :group_id';
@@ -712,27 +823,38 @@ class AccountController extends Controller
             $totalCredit = 0;
             $balance = 0;
 
+            // قاعدة ترقيم الصفحة نفسها في كل المستويات: أرقام الحسابات ثم الأرصدة
+            // The same rule for every level: resolve account numbers, then balances.
+            $accNos = [];
+            $rawRows = [];
+
             switch ($type) {
                 case 'account':
+                    // الرابطة الصحيحة: أول 3 أرقام من ACC_NO = ACC_PART. صيغة
+                    // TRUNC(ACC_NO/10000) كانت تعطي 4 أرقام فلا تطابق جزئياً أبداً.
+                    // The correct join is the 3-digit prefix; TRUNC/10000 yields 4 digits
+                    // and never matched a 3-digit ACC_PART, so the section came back empty.
                     $rows = $id
-                        ? DB::connection('oracle')->select('SELECT ACC_NO, ACC_NAME, BALANCE FROM CHART_ACC c
-                                     INNER JOIN ACC_SUB s ON TRUNC(c.ACC_NO/10000) = s.ACC_PART
+                        ? DB::connection('oracle')->select('SELECT c.ACC_NO, c.ACC_NAME, c.BALANCE FROM CHART_ACC c
+                                     INNER JOIN ACC_SUB s ON SUBSTR(TO_CHAR(c.ACC_NO), 1, 3) = TO_CHAR(s.ACC_PART)
                                      INNER JOIN ACC_MAIN m ON s.ACC_SUB = m.ACC_SUB
                                      WHERE m.ACC_NO = :id ORDER BY c.ACC_NO', ['id' => $id])
-                        : DB::connection('oracle')->select('
-                            SELECT * FROM (
+                        : DB::connection('oracle')->select(
+                            'SELECT * FROM (
                                 SELECT a.*, ROWNUM rnum FROM (
                                     SELECT ACC_NO, ACC_NAME, BALANCE FROM CHART_ACC ORDER BY ACC_NO
                                 ) a
                                 WHERE ROWNUM <= :max_row
                             )
-                            WHERE rnum > :offset', ['max_row' => $maxRow, 'offset' => $offset]);
+                            WHERE rnum > :offset',
+                            ['max_row' => $maxRow, 'offset' => $offset]
+                        );
                     break;
 
                 case 'main':
                     $rows = DB::connection('oracle')->select(
-                        'SELECT ACC_NO, ACC_NAME, BALANCE FROM CHART_ACC c
-                         INNER JOIN ACC_SUB s ON TRUNC(c.ACC_NO/10000) = s.ACC_PART
+                        'SELECT c.ACC_NO, c.ACC_NAME, c.BALANCE FROM CHART_ACC c
+                         INNER JOIN ACC_SUB s ON SUBSTR(TO_CHAR(c.ACC_NO), 1, 3) = TO_CHAR(s.ACC_PART)
                          WHERE s.ACC_SUB = :id ORDER BY c.ACC_NO',
                         ['id' => $id]
                     );
@@ -741,7 +863,7 @@ class AccountController extends Controller
                 case 'sub':
                     $rows = DB::connection('oracle')->select(
                         'SELECT ACC_NO, ACC_NAME, BALANCE FROM CHART_ACC c
-                         WHERE TRUNC(c.ACC_NO/10000) = :id ORDER BY c.ACC_NO',
+                         WHERE SUBSTR(TO_CHAR(c.ACC_NO), 1, 3) = TO_CHAR(:id) ORDER BY c.ACC_NO',
                         ['id' => $id]
                     );
                     break;
@@ -761,12 +883,36 @@ class AccountController extends Controller
 
             foreach ($rows as $row) {
                 $r = (array) $row;
-                $rowBal = (float) ($r['BALANCE'] ?? $r['balance'] ?? 0);
-                $balance += $rowBal;
-                $accounts[] = [
-                    'acc_no' => (int) ($r['ACC_NO'] ?? $r['acc_no'] ?? 0),
+                $accNo = (int) ($r['ACC_NO'] ?? $r['acc_no'] ?? 0);
+                $accNos[] = $accNo;
+                $rawRows[] = [
+                    'acc_no' => $accNo,
                     'acc_name' => ArabicEncoding::fixMojibake($r['ACC_NAME'] ?? $r['acc_name'] ?? ''),
-                    'balance' => $rowBal,
+                    'stored_balance' => (float) ($r['BALANCE'] ?? $r['balance'] ?? 0),
+                ];
+            }
+
+            // الرصيد المعروض يُحسب من الحركات ولا يعتمد على عمود BALANCE المخزّن،
+            // لأن النظام التراثي يبقيه صفراً في أغلب الحسابات.
+            // Balances come from ENTRY_SUB movements: the stored BALANCE column is
+            // stale in the legacy book, so it is only carried for comparison.
+            $fromIso = $this->normaliseOptionalDate($fromDate);
+            $toIso = $this->normaliseOptionalDate($toDate);
+            $buckets = $this->movementBalancesFor($accNos, $fromIso, $toIso);
+
+            foreach ($rawRows as $i => $row) {
+                $b = $buckets[$row['acc_no']] ?? $this->emptyBucket();
+                $totalDebit += $b['debit'];
+                $totalCredit += $b['credit'];
+                $balance += $b['net'];
+                $accounts[] = [
+                    'acc_no' => $row['acc_no'],
+                    'acc_name' => $row['acc_name'],
+                    'debit' => $b['debit'],
+                    'credit' => $b['credit'],
+                    'balance' => $b['net'],
+                    'movements' => $b['movements'],
+                    'stored_balance' => $row['stored_balance'],
                 ];
             }
 
@@ -779,8 +925,8 @@ class AccountController extends Controller
                         'total_balance' => $balance,
                         'total_debit' => $totalDebit,
                         'total_credit' => $totalCredit,
-                        'from_date' => $fromDate,
-                        'to_date' => $toDate,
+                        'from_date' => $fromIso,
+                        'to_date' => $toIso,
                     ],
                 ],
             ]);
@@ -1004,165 +1150,1354 @@ class AccountController extends Controller
 
     /**
      * GET /accounts/tree
-     * الشجرة المحاسبية الكاملة
+     * هيكل الشجرة المحاسبية فقط (الأقسام → الفروع → الجزئية → المجموعات) مع أرصدة
+     * مجمّعة من حركات ENTRY_SUB. الحسابات المالية (CHART_ACC) تُجلب عند التوسيع عبر
+     * GET /accounts/tree/children بترقيم صفحات.
+     *
+     * Why the rewrite: the previous version walked every CHART_ACC row inside nested
+     * loops (≈140 queries + 20,954 nodes in one payload) and dropped any parent whose
+     * children list came back empty, so whole sections silently disappeared. It also
+     * read the BALANCE columns of ACCOUNT/ACC_MAIN/ACC_SUB, which the legacy ERP keeps
+     * at zero — so no parent ever showed the sum of its children.
+     *
+     * القواعد المعتمدة هنا:
+     *  1) بادئة الحساب المالي = أول 3 أرقام من ACC_NO وتساوي ACC_PART (وليس TRUNC/10000
+     *     الذي يعطي 4 أرقام ولا يطابق أبداً معرف الجزء ثلاثي الأرقام).
+     *  2) تجميع الأرصدة يتم من ENTRY_SUB حصراً، للأبناء المخفيين أيضاً.
+     *  3) حسابات العملاء (الجزء 123) مستثناة من العرض فقط — يُعرض «عملاء الكبودي
+     *     للخياطة» 12310000 — لكنها تدخل في التجميع.
+     *
+     * Query params: from_date, to_date (اختياري، YYYY-MM-DD أو DD/MM/YYYY).
      */
-    public function getAccountTree()
+    public function getAccountTree(Request $request)
     {
         try {
-            $accounts = DB::connection('oracle')->select('SELECT ACC_NO, ACC_NAME FROM ACCOUNT ORDER BY ACC_NO');
+            $fromIso = $this->normaliseOptionalDate($request->query('from_date'));
+            $toIso = $this->normaliseOptionalDate($request->query('to_date'));
 
-            $tree = [];
+            // ── 1) الصفوف الهيكلية: استعلام واحد لكل مستوى، بترتيب حتمي بالرقم ──
+            $accounts = $this->structureRows('ACCOUNT', 'ACC_NO, ACC_NAME, BALANCE, CUR_NO', 'ACC_NO');
+            $mains = $this->structureRows('ACC_MAIN', 'ACC_NO, ACC_SUB, SUB_NAME, BALANCE, CUR_NO', 'ACC_NO, ACC_SUB');
+            $subs = $this->structureRows('ACC_SUB', 'ACC_SUB, ACC_PART, PART_NAME, BALANCE, CUR_NO', 'ACC_SUB, ACC_PART');
+            $groups = $this->structureRows('ACC_SUB_GROUP', 'GROUP_ID, ACC_PART, ACC_GROUP_NAME', 'ACC_PART, GROUP_ID');
 
-            foreach ($accounts as $accRow) {
-                $acc = (array) $accRow;
-                $accNo = (int) ($acc['ACC_NO'] ?? $acc['acc_no']);
-                $accNode = [
-                    'id' => 'acc_'.$accNo,
-                    'acc_no' => $accNo,
-                    'name' => ArabicEncoding::fixMojibake($acc['ACC_NAME'] ?? $acc['acc_name'] ?? ''),
-                    'level' => 'account',
-                    'children' => [],
-                ];
+            // ── 2) الأرصدة من الحركات + خريطة مجموعة كل حساب + عدادات الحسابات ──
+            $chartBal = $this->movementBalancesByChart($fromIso, $toIso);
+            $groupOfChart = $this->chartGroupMap();
+            $counts = $this->chartCountBuckets();
 
-                $mains = DB::connection('oracle')->select(
-                    'SELECT ACC_NO, ACC_SUB, SUB_NAME, BALANCE FROM ACC_MAIN WHERE ACC_NO = :no ORDER BY ACC_SUB',
-                    ['no' => $accNo]
-                );
+            // تجميع لأسفل-أعلى: جزء ← فرعي ← قسم
+            $partBal = [];
+            $groupBal = [];
+            foreach ($chartBal as $accNo => $b) {
+                $part = (int) substr((string) $accNo, 0, 3);
+                $partBal[$part] = $this->addBucket($partBal[$part] ?? null, $b);
 
-                foreach ($mains as $mainRow) {
-                    $main = (array) $mainRow;
-                    $accSub = (int) ($main['ACC_SUB'] ?? $main['acc_sub']);
-                    $mainNode = [
-                        'id' => 'main_'.$accSub,
-                        'acc_sub' => $accSub,
-                        'name' => ArabicEncoding::fixMojibake($main['SUB_NAME'] ?? $main['sub_name'] ?? ''),
-                        'level' => 'main',
-                        'balance' => (float) ($main['BALANCE'] ?? $main['balance'] ?? 0),
-                        'children' => [],
-                    ];
-
-                    $subs = DB::connection('oracle')->select(
-                        'SELECT ACC_SUB, ACC_PART, PART_NAME, BALANCE FROM ACC_SUB WHERE ACC_SUB = :sub ORDER BY ACC_PART',
-                        ['sub' => $accSub]
-                    );
-
-                    foreach ($subs as $subRow) {
-                        $sub = (array) $subRow;
-                        $accPart = (int) ($sub['ACC_PART'] ?? $sub['acc_part']);
-                        $subNode = [
-                            'id' => 'sub_'.$accPart,
-                            'acc_part' => $accPart,
-                            'name' => ArabicEncoding::fixMojibake($sub['PART_NAME'] ?? $sub['part_name'] ?? ''),
-                            'level' => 'sub',
-                            'balance' => (float) ($sub['BALANCE'] ?? $sub['balance'] ?? 0),
-                            'children' => [],
-                        ];
-
-                        $groups = DB::connection('oracle')->select(
-                            'SELECT GROUP_ID, ACC_PART, ACC_GROUP_NAME FROM ACC_SUB_GROUP WHERE ACC_PART = :part ORDER BY GROUP_ID',
-                            ['part' => $accPart]
-                        );
-
-                        foreach ($groups as $groupRow) {
-                            $group = (array) $groupRow;
-                            $groupId = (int) ($group['GROUP_ID'] ?? $group['group_id']);
-
-                            // استثناء مجموعة العملاء (GROUP_ID=5, ACC_PART=123)
-                            if ($accPart == 123 && $groupId == 5) {
-                                $koboudiAcc = DB::connection('oracle')->selectOne(
-                                    'SELECT ACC_NO, ACC_NAME, BALANCE FROM CHART_ACC WHERE ACC_NO = 12310000'
-                                );
-                                if ($koboudiAcc) {
-                                    $kArr = (array) $koboudiAcc;
-                                    $kNo = (int) ($kArr['ACC_NO'] ?? $kArr['acc_no']);
-                                    $subNode['children'][] = [
-                                        'id' => 'chart_'.$kNo,
-                                        'acc_no' => $kNo,
-                                        'name' => ArabicEncoding::fixMojibake($kArr['ACC_NAME'] ?? $kArr['acc_name'] ?? ''),
-                                        'level' => 'chart',
-                                        'balance' => (float) ($kArr['BALANCE'] ?? $kArr['balance'] ?? 0),
-                                        'children' => [],
-                                    ];
-                                }
-
-                                continue;
-                            }
-
-                            $groupNode = [
-                                'id' => 'group_'.$groupId,
-                                'group_id' => $groupId,
-                                'name' => ArabicEncoding::fixMojibake($group['ACC_GROUP_NAME'] ?? $group['acc_group_name'] ?? ''),
-                                'level' => 'group',
-                                'children' => [],
-                            ];
-
-                            $charts = DB::connection('oracle')->select(
-                                'SELECT ACC_NO, ACC_NAME, BALANCE, STOPPING_ACC
-                                 FROM CHART_ACC WHERE GROUP_ID = :gid ORDER BY ACC_NO',
-                                ['gid' => $groupId]
-                            );
-
-                            foreach ($charts as $chartRow) {
-                                $chart = (array) $chartRow;
-                                $chartNo = (int) ($chart['ACC_NO'] ?? $chart['acc_no']);
-                                $groupNode['children'][] = [
-                                    'id' => 'chart_'.$chartNo,
-                                    'acc_no' => $chartNo,
-                                    'name' => ArabicEncoding::fixMojibake($chart['ACC_NAME'] ?? $chart['acc_name'] ?? ''),
-                                    'level' => 'chart',
-                                    'balance' => (float) ($chart['BALANCE'] ?? $chart['balance'] ?? 0),
-                                    'stopping_acc' => isset($chart['STOPPING_ACC']) || isset($chart['stopping_acc']) ? (int) ($chart['STOPPING_ACC'] ?? $chart['stopping_acc']) : null,
-                                    'children' => [],
-                                ];
-                            }
-
-                            if (! empty($groupNode['children'])) {
-                                $subNode['children'][] = $groupNode;
-                            }
-                        }
-
-                        if ($accPart != 123) {
-                            $noGroupCharts = DB::connection('oracle')->select(
-                                'SELECT ACC_NO, ACC_NAME, BALANCE, STOPPING_ACC
-                                 FROM CHART_ACC
-                                 WHERE GROUP_ID IS NULL AND TRUNC(ACC_NO/10000) = :part
-                                 ORDER BY ACC_NO',
-                                ['part' => $accPart]
-                            );
-
-                            foreach ($noGroupCharts as $chartRow) {
-                                $chart = (array) $chartRow;
-                                $chartNo = (int) ($chart['ACC_NO'] ?? $chart['acc_no']);
-                                $subNode['children'][] = [
-                                    'id' => 'chart_ng_'.$chartNo,
-                                    'acc_no' => $chartNo,
-                                    'name' => ArabicEncoding::fixMojibake($chart['ACC_NAME'] ?? $chart['acc_name'] ?? ''),
-                                    'level' => 'chart',
-                                    'balance' => (float) ($chart['BALANCE'] ?? $chart['balance'] ?? 0),
-                                    'stopping_acc' => isset($chart['STOPPING_ACC']) || isset($chart['stopping_acc']) ? (int) ($chart['STOPPING_ACC'] ?? $chart['stopping_acc']) : null,
-                                    'children' => [],
-                                ];
-                            }
-                        }
-
-                        if (! empty($subNode['children'])) {
-                            $mainNode['children'][] = $subNode;
-                        }
-                    }
-
-                    if (! empty($mainNode['children'])) {
-                        $accNode['children'][] = $mainNode;
-                    }
-                }
-
-                if (! empty($accNode['children'])) {
-                    $tree[] = $accNode;
+                $gid = $groupOfChart[$accNo] ?? null;
+                if ($gid !== null) {
+                    $groupBal[(int) $gid] = $this->addBucket($groupBal[(int) $gid] ?? null, $b);
                 }
             }
 
-            return response()->json(['success' => true, 'data' => $tree]);
+            $partToSub = [];
+            foreach ($subs as $s) {
+                $partToSub[(int) $s['acc_part']] = (int) $s['acc_sub'];
+            }
+            $subToAccount = [];
+            foreach ($mains as $m) {
+                $subToAccount[(int) $m['acc_sub']] = (int) $m['acc_no'];
+            }
+
+            $subBal = [];
+            $accBal = [];
+            foreach ($partBal as $part => $b) {
+                $sub = $partToSub[$part] ?? null;
+                if ($sub === null) {
+                    continue; // جزء بلا أب معروف في الهيكل / orphan prefix — يُتجاهل في الترقية
+                }
+                $subBal[$sub] = $this->addBucket($subBal[$sub] ?? null, $b);
+
+                $acc = $subToAccount[$sub] ?? null;
+                if ($acc !== null) {
+                    $accBal[$acc] = $this->addBucket($accBal[$acc] ?? null, $b);
+                }
+            }
+
+            // ── 3) بناء العقد: كل عقدة تظهر دائماً (حتى الفارغة) ──
+            $tree = [];
+            foreach ($accounts as $a) {
+                $accNo = (int) $a['acc_no'];
+                $accPathCode = (string) $accNo;
+
+                $mainNodes = [];
+                foreach ($mains as $m) {
+                    if ((int) $m['acc_no'] !== $accNo) {
+                        continue;
+                    }
+                    $accSub = (int) $m['acc_sub'];
+                    $subPathCode = $accPathCode.' / '.$accSub;
+
+                    $subNodes = [];
+                    foreach ($subs as $s) {
+                        if ((int) $s['acc_sub'] !== $accSub) {
+                            continue;
+                        }
+                        $accPart = (int) $s['acc_part'];
+                        $partPathCode = $subPathCode.' / '.$accPart;
+
+                        $partAccounts = $counts['part'][$accPart] ?? 0;
+                        $partChildren = [];
+                        $directCount = $counts['direct'][$accPart] ?? 0;
+
+                        if ($accPart === self::CUSTOMERS_ACC_PART) {
+                            // استثناء العرض: مجموعة وحسابات العملاء مخفية، ويُضاف حساب
+                            // الكبودي المفرد مباشرة كي يظهر في الهيكل بلا طلب إضافي.
+                            // Display-only exclusion: the customer group and its 10k+
+                            // accounts stay hidden, the single Koboudi account is
+                            // emitted as an inline leaf so it needs no lazy fetch.
+                            $koboudi = $this->chartLeafNode(self::KOBOUDI_CUSTOMER_ACC_NO, $chartBal, $partPathCode, $a, $m, $s, null);
+                            if ($koboudi !== null) {
+                                $partChildren[] = $koboudi;
+                            }
+                            $directCount = 0;
+                        } else {
+                            foreach ($groups as $g) {
+                                if ((int) $g['acc_part'] !== $accPart) {
+                                    continue;
+                                }
+                                $gid = (int) $g['group_id'];
+                                $gb = $groupBal[$gid] ?? $this->emptyBucket();
+                                $gCount = $counts['group'][$gid] ?? 0;
+                                $partChildren[] = [
+                                    'id' => 'group_'.$gid,
+                                    'level' => 'group',
+                                    'group_id' => $gid,
+                                    'acc_no' => $accNo,
+                                    'acc_sub' => $accSub,
+                                    'acc_part' => $accPart,
+                                    'name' => $g['acc_group_name'],
+                                    'parent_path' => $this->pathName([$a['acc_name'], $m['sub_name'], $s['part_name']]),
+                                    'code_path' => $partPathCode.' / G'.$gid,
+                                    'stored_balance' => null,
+                                    'cur_no' => null,
+                                    'debit' => $gb['debit'],
+                                    'credit' => $gb['credit'],
+                                    'balance' => $gb['net'],
+                                    'movements' => $gb['movements'],
+                                    'account_count' => $gCount,
+                                    'direct_count' => $gCount,
+                                    'children_count' => 0,
+                                    'has_children' => $gCount > 0,
+                                    'children' => [],
+                                ];
+                            }
+                        }
+
+                        $pb = $partBal[$accPart] ?? $this->emptyBucket();
+                        $visibleChildren = count($partChildren);
+                        $subNodes[] = [
+                            'id' => 'sub_'.$accPart,
+                            'level' => 'sub',
+                            'acc_part' => $accPart,
+                            'acc_no' => $accNo,
+                            'acc_sub' => $accSub,
+                            'name' => $s['part_name'],
+                            'parent_path' => $this->pathName([$a['acc_name'], $m['sub_name']]),
+                            'code_path' => $partPathCode,
+                            'stored_balance' => $s['balance'],
+                            'cur_no' => $s['cur_no'],
+                            'debit' => $pb['debit'],
+                            'credit' => $pb['credit'],
+                            'balance' => $pb['net'],
+                            'movements' => $pb['movements'],
+                            'account_count' => $partAccounts,
+                            'direct_count' => $directCount,
+                            'hidden_accounts' => max(0, $partAccounts - $this->visibleAccountCount($accPart, $visibleChildren, $directCount, $counts, $groups)),
+                            'children_count' => $visibleChildren,
+                            'has_children' => ($visibleChildren > 0 || $directCount > 0),
+                            'children' => $partChildren,
+                        ];
+                    }
+
+                    $sb = $subBal[$accSub] ?? $this->emptyBucket();
+                    $mainNodes[] = [
+                        'id' => 'main_'.$accSub,
+                        'level' => 'main',
+                        'acc_sub' => $accSub,
+                        'acc_no' => $accNo,
+                        'name' => $m['sub_name'],
+                        'parent_path' => $this->pathName([$a['acc_name']]),
+                        'code_path' => $subPathCode,
+                        'stored_balance' => $m['balance'],
+                        'cur_no' => $m['cur_no'],
+                        'debit' => $sb['debit'],
+                        'credit' => $sb['credit'],
+                        'balance' => $sb['net'],
+                        'movements' => $sb['movements'],
+                        'account_count' => $this->accountCountForSub($accSub, $subs, $counts['part']),
+                        'children_count' => count($subNodes),
+                        'has_children' => true,
+                        'children' => $subNodes,
+                    ];
+                }
+
+                $ab = $accBal[$accNo] ?? $this->emptyBucket();
+                $tree[] = [
+                    'id' => 'acc_'.$accNo,
+                    'level' => 'account',
+                    'acc_no' => $accNo,
+                    'name' => $a['acc_name'],
+                    'parent_path' => '',
+                    'code_path' => $accPathCode,
+                    'stored_balance' => $a['balance'],
+                    'cur_no' => $a['cur_no'],
+                    'debit' => $ab['debit'],
+                    'credit' => $ab['credit'],
+                    'balance' => $ab['net'],
+                    'movements' => $ab['movements'],
+                    'account_count' => array_sum(array_map(
+                        fn ($m) => $this->accountCountForSub((int) $m['acc_sub'], $subs, $counts['part']),
+                        $mainNodes
+                    )),
+                    'children_count' => count($mainNodes),
+                    'has_children' => true,
+                    'children' => $mainNodes,
+                ];
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => $tree,
+                'meta' => [
+                    'total_nodes' => $this->countTree($tree),
+                    'loading' => 'lazy',
+                    'from_date' => $fromIso,
+                    'to_date' => $toIso,
+                    'generated_at' => date('Y-m-d H:i:s'),
+                ],
+            ]);
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
+    }
+
+    /**
+     * GET /accounts/tree/children
+     * أبناء عقدة هيكلية (حسابات CHART_ACC المالية) مع أرصدتهم المحسوبة من الحركات.
+     * Financial leaves of one structural node, with balances computed from ENTRY_SUB.
+     *
+     * level=group → كل حسابات المجموعة (GROUP_ID).
+     * level=sub   → الحسابات المباشرة للجزئي (GROUP_ID IS NULL وبادئتها = ACC_PART).
+     *
+     * Query params: level, group_id, acc_part, search, sort(acc_no|name|balance),
+     *               dir(asc|desc), page, limit, from_date, to_date.
+     */
+    public function getTreeChildren(Request $request)
+    {
+        try {
+            $level = (string) $request->query('level', 'group');
+            $groupId = $request->query('group_id');
+            $accPart = $request->query('acc_part');
+            $search = trim((string) $request->query('search', ''));
+            $page = max(1, (int) $request->query('page', 1));
+            $limit = min(200, max(10, (int) $request->query('limit', 50)));
+            $offset = ($page - 1) * $limit;
+            $maxRow = $offset + $limit;
+
+            $fromIso = $this->normaliseOptionalDate($request->query('from_date'));
+            $toIso = $this->normaliseOptionalDate($request->query('to_date'));
+
+            // ترتيب مسموح به فقط (منع SQL injection عبر معامل الترتيب)
+            $sortCol = ['acc_no' => 'c.ACC_NO', 'name' => 'c.ACC_NAME', 'balance' => 'NVL(SUM(m.NET), 0)'][$request->query('sort', 'acc_no')] ?? 'c.ACC_NO';
+            $dir = strtolower((string) $request->query('dir', 'asc')) === 'desc' ? 'DESC' : 'ASC';
+
+            $where = [];
+            $params = [];
+
+            if ($level === 'group') {
+                if ($groupId === null || $groupId === '') {
+                    return response()->json(['success' => false, 'message' => 'يجب تحديد معرّف المجموعة'], 422);
+                }
+                $where[] = 'c.GROUP_ID = :group_id';
+                $params['group_id'] = (int) $groupId;
+            } else {
+                if ($accPart === null || $accPart === '') {
+                    return response()->json(['success' => false, 'message' => 'يجب تحديد معرّف الحساب الجزئي'], 422);
+                }
+                $part = (int) $accPart;
+                if ($part === self::CUSTOMERS_ACC_PART) {
+                    // حسابات العملاء مخفية من العرض، والمعروض 12310000 مُدرَج في الهيكل
+                    return response()->json([
+                        'success' => true,
+                        'data' => [],
+                        'meta' => ['total' => 0, 'page' => $page, 'limit' => $limit, 'total_pages' => 0, 'has_more' => false],
+                    ]);
+                }
+                $where[] = 'c.GROUP_ID IS NULL';
+                $where[] = 'SUBSTR(TO_CHAR(c.ACC_NO), 1, 3) = TO_CHAR(:acc_part)';
+                $params['acc_part'] = $part;
+            }
+
+            if ($search !== '') {
+                $oracleSearch = ArabicEncoding::toOracleSearchChars($search);
+                $where[] = '(UPPER(c.ACC_NAME) LIKE UPPER(:search) OR c.ACC_NAME LIKE :search_enc OR TO_CHAR(c.ACC_NO) LIKE :search_no)';
+                $params['search'] = '%'.$search.'%';
+                $params['search_enc'] = '%'.$oracleSearch.'%';
+                $params['search_no'] = '%'.$search.'%';
+            }
+
+            $whereClause = 'WHERE '.implode(' AND ', $where);
+            $movementView = $this->movementAggregateSql($fromIso, $toIso);
+
+            $countRows = DB::connection('oracle')->select(
+                "SELECT COUNT(*) AS TOTAL FROM CHART_ACC c {$whereClause}",
+                $params
+            );
+            $countArr = (array) ($countRows[0] ?? []);
+            $total = (int) ($countArr['TOTAL'] ?? $countArr['total'] ?? 0);
+
+            // وسائط تجميع الحركات (agg_from/agg_to) تُدمج مع وسائط الصفحة نفسها
+            $fetchParams = array_merge($params, $this->movementAggregateParams);
+            $fetchParams['max_row'] = $maxRow;
+            $fetchParams['offset'] = $offset;
+
+            $rows = DB::connection('oracle')->select("
+                SELECT * FROM (
+                    SELECT a.*, ROWNUM rnum FROM (
+                        SELECT c.ACC_NO, c.ACC_NAME, c.BALANCE, c.GROUP_ID, c.SEQ, c.LIMITED_BALANCE, c.STOPPING_ACC,
+                               TO_CHAR(c.ACC_DATE, 'YYYY-MM-DD') AS ACC_DATE,
+                               NVL(SUM(m.DR), 0) AS DR, NVL(SUM(m.CR), 0) AS CR,
+                               NVL(SUM(m.NET), 0) AS NET, NVL(SUM(m.CNT), 0) AS MOV_COUNT
+                        FROM CHART_ACC c
+                        LEFT JOIN ({$movementView}) m ON m.ACC_NO = c.ACC_NO
+                        {$whereClause}
+                        GROUP BY c.ACC_NO, c.ACC_NAME, c.BALANCE, c.GROUP_ID, c.SEQ,
+                                 c.LIMITED_BALANCE, c.STOPPING_ACC, c.ACC_DATE
+                        ORDER BY {$sortCol} {$dir}
+                    ) a
+                    WHERE ROWNUM <= :max_row
+                )
+                WHERE rnum > :offset
+            ", $fetchParams);
+
+            $data = [];
+            foreach ($rows as $row) {
+                $r = (array) $row;
+                $accNo = (int) ($r['ACC_NO'] ?? $r['acc_no'] ?? 0);
+                $data[] = [
+                    'id' => 'chart_'.$accNo,
+                    'level' => 'chart',
+                    'acc_no' => $accNo,
+                    'name' => ArabicEncoding::fixMojibake($r['ACC_NAME'] ?? $r['acc_name'] ?? ''),
+                    'group_id' => isset($r['GROUP_ID']) || isset($r['group_id']) ? (int) ($r['GROUP_ID'] ?? $r['group_id']) : null,
+                    'stored_balance' => (float) ($r['BALANCE'] ?? $r['balance'] ?? 0),
+                    'debit' => (float) ($r['DR'] ?? $r['dr'] ?? 0),
+                    'credit' => (float) ($r['CR'] ?? $r['cr'] ?? 0),
+                    'balance' => (float) ($r['NET'] ?? $r['net'] ?? 0),
+                    'movements' => (int) ($r['MOV_COUNT'] ?? $r['mov_count'] ?? 0),
+                    'seq' => isset($r['SEQ']) || isset($r['seq']) ? (int) ($r['SEQ'] ?? $r['seq']) : null,
+                    'limited_balance' => isset($r['LIMITED_BALANCE']) || isset($r['limited_balance']) ? (float) ($r['LIMITED_BALANCE'] ?? $r['limited_balance']) : null,
+                    'stopping_acc' => isset($r['STOPPING_ACC']) || isset($r['stopping_acc']) ? (int) ($r['STOPPING_ACC'] ?? $r['stopping_acc']) : null,
+                    'acc_date' => $r['ACC_DATE'] ?? $r['acc_date'] ?? null,
+                    'children_count' => 0,
+                    'direct_count' => 0,
+                    'has_children' => false,
+                    'children' => [],
+                ];
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => $data,
+                'meta' => [
+                    'total' => $total,
+                    'page' => $page,
+                    'limit' => $limit,
+                    'total_pages' => $total > 0 ? (int) ceil($total / $limit) : 0,
+                    'has_more' => ($page * $limit) < $total,
+                ],
+            ]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * GET /accounts/search
+     * بحث شامل في كل مستويات الشجرة (هيكلية ومالية) مع مسار كل نتيجة.
+     * Lets the tree screen search 20k+ accounts without downloading the tree.
+     *
+     * Query params: q, limit (افتراضي 60، أقصى 200), from_date, to_date.
+     */
+    public function searchAccounts(Request $request)
+    {
+        try {
+            $q = trim((string) $request->query('q', ''));
+            $limit = min(200, max(5, (int) $request->query('limit', 60)));
+            if ($q === '') {
+                return response()->json(['success' => true, 'data' => []]);
+            }
+
+            $fromIso = $this->normaliseOptionalDate($request->query('from_date'));
+            $toIso = $this->normaliseOptionalDate($request->query('to_date'));
+
+            $enc = ArabicEncoding::toOracleSearchChars($q);
+            $like = '%'.$q.'%';
+            $likeEnc = '%'.$enc.'%';
+
+            // خرائط الأسماء لمسار الأب / parent-path lookups
+            $partMeta = [];
+            $subMeta = [];
+            $accMeta = [];
+            $groupMeta = [];
+            foreach ($this->structureRows('ACCOUNT', 'ACC_NO, ACC_NAME', 'ACC_NO') as $a) {
+                $accMeta[(int) $a['acc_no']] = $a['acc_name'];
+            }
+            foreach ($this->structureRows('ACC_MAIN', 'ACC_NO, ACC_SUB, SUB_NAME', 'ACC_SUB') as $m) {
+                $subMeta[(int) $m['acc_sub']] = ['name' => $m['sub_name'], 'acc_no' => (int) $m['acc_no']];
+            }
+            foreach ($this->structureRows('ACC_SUB', 'ACC_SUB, ACC_PART, PART_NAME', 'ACC_PART') as $s) {
+                $partMeta[(int) $s['acc_part']] = ['name' => $s['part_name'], 'acc_sub' => (int) $s['acc_sub']];
+            }
+            foreach ($this->structureRows('ACC_SUB_GROUP', 'GROUP_ID, ACC_PART, ACC_GROUP_NAME', 'GROUP_ID') as $g) {
+                $groupMeta[(int) $g['group_id']] = ['name' => $g['acc_group_name'], 'acc_part' => (int) $g['acc_part']];
+            }
+
+            $out = [];
+
+            // 1) المستويات الهيكلية — صغيرة جداً، تُجلب كلها وتُصفّى في PHP لتفادي
+            //    مشاكل الترميز في LIKE على الأسماء العربية.
+            $structural = [
+                ['table' => 'ACCOUNT', 'cols' => 'ACC_NO, ACC_NAME, BALANCE, CUR_NO', 'idCol' => 'ACC_NO', 'nameCol' => 'ACC_NAME', 'level' => 'account'],
+                ['table' => 'ACC_MAIN', 'cols' => 'ACC_NO, ACC_SUB, SUB_NAME, BALANCE, CUR_NO', 'idCol' => 'ACC_SUB', 'nameCol' => 'SUB_NAME', 'level' => 'main'],
+                ['table' => 'ACC_SUB', 'cols' => 'ACC_SUB, ACC_PART, PART_NAME, BALANCE, CUR_NO', 'idCol' => 'ACC_PART', 'nameCol' => 'PART_NAME', 'level' => 'sub'],
+                ['table' => 'ACC_SUB_GROUP', 'cols' => 'GROUP_ID, ACC_PART, ACC_GROUP_NAME', 'idCol' => 'GROUP_ID', 'nameCol' => 'ACC_GROUP_NAME', 'level' => 'group'],
+            ];
+            foreach ($structural as $spec) {
+                $rows = $this->structureRows($spec['table'], $spec['cols'], $spec['idCol']);
+                $idKey = strtolower($spec['idCol']);
+                foreach ($rows as $r) {
+                    $id = (int) ($r[$idKey] ?? 0);
+                    $name = (string) $r['name'];
+                    $hit = $this->matchesQuery($q, $name, (string) $id);
+                    if (! $hit) {
+                        continue;
+                    }
+                    // الصفوف الهيكلية تعرض الرصيد المخزّن فقط: تجميعها يحتاج مسح
+                    // الحركات بالبادئة وهو أغلى من قيمة النتيجة في قائمة البحث.
+                    $out[] = $this->searchNode($spec['level'], $id, $r, $accMeta, $subMeta, $partMeta, $groupMeta);
+                }
+            }
+
+            // 2) الحسابات المالية — بحث SQL مقيّد بالعدد، مع استثناء العملاء ما عدا الكبودي
+            $chartRows = DB::connection('oracle')->select("
+                SELECT * FROM (
+                    SELECT a.*, ROWNUM rnum FROM (
+                        SELECT ACC_NO, ACC_NAME, BALANCE, GROUP_ID, LIMITED_BALANCE, STOPPING_ACC,
+                               TO_CHAR(ACC_DATE, 'YYYY-MM-DD') AS ACC_DATE, SEQ
+                        FROM CHART_ACC
+                        WHERE (UPPER(ACC_NAME) LIKE UPPER(:search)
+                               OR ACC_NAME LIKE :search_enc
+                               OR TO_CHAR(ACC_NO) LIKE :search_no)
+                          AND (SUBSTR(TO_CHAR(ACC_NO), 1, 3) <> TO_CHAR(:cust_part) OR ACC_NO = :koboudi)
+                        ORDER BY ACC_NO
+                    ) a
+                    WHERE ROWNUM <= :max_rows
+                )
+                WHERE rnum > 0
+            ", [
+                'search' => $like,
+                'search_enc' => $likeEnc,
+                'search_no' => $like,
+                'cust_part' => self::CUSTOMERS_ACC_PART,
+                'koboudi' => self::KOBOUDI_CUSTOMER_ACC_NO,
+                'max_rows' => $limit,
+            ]);
+
+            $chartAccNos = [];
+            foreach ($chartRows as $row) {
+                $r = (array) $row;
+                $chartAccNos[] = (int) ($r['ACC_NO'] ?? $r['acc_no'] ?? 0);
+            }
+            $balances = $this->movementBalancesFor($chartAccNos, $fromIso, $toIso);
+
+            foreach ($chartRows as $row) {
+                $r = (array) $row;
+                $accNo = (int) ($r['ACC_NO'] ?? $r['acc_no'] ?? 0);
+                $b = $balances[$accNo] ?? $this->emptyBucket();
+                $part = (int) substr((string) $accNo, 0, 3);
+                $gid = isset($r['GROUP_ID']) || isset($r['group_id']) ? (int) ($r['GROUP_ID'] ?? $r['group_id']) : null;
+
+                $chain = [];
+                $codes = [(string) $accNo];
+                if (isset($partMeta[$part])) {
+                    $sub = $partMeta[$part]['acc_sub'];
+                    $codes[] = (string) $sub;
+                    if (isset($subMeta[$sub])) {
+                        $acc = $subMeta[$sub]['acc_no'];
+                        $codes[] = (string) $acc;
+                        $chain = [$accMeta[$acc] ?? '', $subMeta[$sub]['name'], $partMeta[$part]['name']];
+                    }
+                }
+                if ($gid !== null && isset($groupMeta[$gid])) {
+                    $chain[] = $groupMeta[$gid]['name'];
+                    $codes[] = 'G'.$gid;
+                }
+
+                $out[] = [
+                    'id' => 'chart_'.$accNo,
+                    'level' => 'chart',
+                    'acc_no' => $accNo,
+                    'group_id' => $gid,
+                    'acc_part' => $part,
+                    'name' => ArabicEncoding::fixMojibake($r['ACC_NAME'] ?? $r['acc_name'] ?? ''),
+                    'parent_path' => $this->pathName($chain),
+                    'code_path' => implode(' / ', array_reverse($codes)),
+                    'stored_balance' => (float) ($r['BALANCE'] ?? $r['balance'] ?? 0),
+                    'limited_balance' => isset($r['LIMITED_BALANCE']) || isset($r['limited_balance']) ? (float) ($r['LIMITED_BALANCE'] ?? $r['limited_balance']) : null,
+                    'stopping_acc' => isset($r['STOPPING_ACC']) || isset($r['stopping_acc']) ? (int) ($r['STOPPING_ACC'] ?? $r['stopping_acc']) : null,
+                    'acc_date' => $r['ACC_DATE'] ?? $r['acc_date'] ?? null,
+                    'seq' => isset($r['SEQ']) || isset($r['seq']) ? (int) ($r['SEQ'] ?? $r['seq']) : null,
+                    'debit' => $b['debit'],
+                    'credit' => $b['credit'],
+                    'balance' => $b['net'],
+                    'movements' => $b['movements'],
+                    'children_count' => 0,
+                    'direct_count' => 0,
+                    'has_children' => false,
+                    'children' => [],
+                ];
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => $out,
+                'meta' => ['total' => count($out), 'query' => $q],
+            ]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * GET /accounts/chart/{accNo}
+     * تفاصيل حساب مالي واحد: كل أعمدة CHART_ACC + رصيده المحسوب من الحركات + سلسلة آبائه.
+     * Full detail for the tree "information" sheet and the edit form pre-fill.
+     */
+    public function getChartAccountDetail(Request $request, $accNo)
+    {
+        try {
+            $row = DB::connection('oracle')->selectOne("
+                SELECT ACC_NO, ACC_NAME, BALANCE, GROUP_ID, SEQ, LIMITED_BALANCE, STOPPING_ACC,
+                       TO_CHAR(ACC_DATE, 'YYYY-MM-DD') AS ACC_DATE
+                FROM CHART_ACC WHERE ACC_NO = :no
+            ", ['no' => (int) $accNo]);
+
+            if (! $row) {
+                return response()->json(['success' => false, 'message' => 'الحساب غير موجود'], 404);
+            }
+            $r = (array) $row;
+            $accNoInt = (int) ($r['ACC_NO'] ?? $r['acc_no']);
+            $groupId = isset($r['GROUP_ID']) || isset($r['group_id']) ? (int) ($r['GROUP_ID'] ?? $r['group_id']) : null;
+            $part = (int) substr((string) $accNoInt, 0, 3);
+
+            $fromIso = $this->normaliseOptionalDate($request->query('from_date'));
+            $toIso = $this->normaliseOptionalDate($request->query('to_date'));
+            $b = $this->movementBalancesFor([$accNoInt], $fromIso, $toIso)[$accNoInt] ?? $this->emptyBucket();
+
+            // سلسلة الآباء: جزئي ← فرعي ← قسم (+ اسم المجموعة إن وُجدت)
+            $chain = [];
+            $subRow = DB::connection('oracle')->selectOne(
+                'SELECT ACC_SUB, PART_NAME FROM ACC_SUB WHERE ACC_PART = :p', ['p' => $part]
+            );
+            if ($subRow) {
+                $sr = (array) $subRow;
+                $accSub = (int) ($sr['ACC_SUB'] ?? $sr['acc_sub']);
+                $chain[] = ArabicEncoding::fixMojibake($sr['PART_NAME'] ?? $sr['part_name'] ?? '');
+                $mainRow = DB::connection('oracle')->selectOne(
+                    'SELECT ACC_NO, SUB_NAME FROM ACC_MAIN WHERE ACC_SUB = :s', ['s' => $accSub]
+                );
+                if ($mainRow) {
+                    $mr = (array) $mainRow;
+                    $chain[] = ArabicEncoding::fixMojibake($mr['SUB_NAME'] ?? $mr['sub_name'] ?? '');
+                    $secRow = DB::connection('oracle')->selectOne(
+                        'SELECT ACC_NAME FROM ACCOUNT WHERE ACC_NO = :a', ['a' => (int) ($mr['ACC_NO'] ?? $mr['acc_no'])]
+                    );
+                    if ($secRow) {
+                        $chain[] = ArabicEncoding::fixMojibake(((array) $secRow)['ACC_NAME'] ?? ((array) $secRow)['acc_name'] ?? '');
+                    }
+                }
+            }
+            if ($groupId !== null) {
+                $gRow = DB::connection('oracle')->selectOne(
+                    'SELECT ACC_GROUP_NAME FROM ACC_SUB_GROUP WHERE GROUP_ID = :g', ['g' => $groupId]
+                );
+                if ($gRow) {
+                    $chain[] = ArabicEncoding::fixMojibake(((array) $gRow)['ACC_GROUP_NAME'] ?? ((array) $gRow)['acc_group_name'] ?? '');
+                }
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'acc_no' => $accNoInt,
+                    'acc_name' => ArabicEncoding::fixMojibake($r['ACC_NAME'] ?? $r['acc_name'] ?? ''),
+                    'balance' => (float) ($r['BALANCE'] ?? $r['balance'] ?? 0),
+                    'group_id' => $groupId,
+                    'acc_part' => $part,
+                    'seq' => isset($r['SEQ']) || isset($r['seq']) ? (int) ($r['SEQ'] ?? $r['seq']) : null,
+                    'limited_balance' => isset($r['LIMITED_BALANCE']) || isset($r['limited_balance']) ? (float) ($r['LIMITED_BALANCE'] ?? $r['limited_balance']) : null,
+                    'stopping_acc' => isset($r['STOPPING_ACC']) || isset($r['stopping_acc']) ? (int) ($r['STOPPING_ACC'] ?? $r['stopping_acc']) : null,
+                    'acc_date' => $r['ACC_DATE'] ?? $r['acc_date'] ?? null,
+                    'parent_path' => $this->pathName(array_reverse($chain)),
+                    'debit' => $b['debit'],
+                    'credit' => $b['credit'],
+                    'computed_balance' => $b['net'],
+                    'movements' => $b['movements'],
+                ],
+            ]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    // =========================================================
+    // ===        هيكل الشجرة: إنشاء/تعديل المستويات         ===
+    // =========================================================
+
+    /**
+     * GET /accounts/next-number?level=chart|group|sub|main&…
+     * معاينة الرقم الذي سيُمنح للعقدة الجديدة، بنفس قاعدة التوليد المستخدمة في
+     * create* أدناه تماماً — لا نسخة ثانية منها، وإلا خرجت المعاينة عن الواقع
+     * وانشأ المستخدم رقماً يصادف محجوزاً.
+     *
+     * Previews the number the create endpoints would assign. It reuses the very same
+     * expressions rather than duplicating them in Dart: a second copy of a legacy
+     * numbering rule drifts and the preview becomes a lie.
+     */
+    public function nextAccountNumber(Request $request)
+    {
+        $request->validate([
+            'level' => 'required|in:chart,group,sub,main',
+            'group_id' => 'nullable|integer',
+            'acc_part' => 'nullable|integer',
+            'acc_sub' => 'nullable|integer',
+            'acc_no' => 'nullable|integer',
+        ]);
+
+        $level = $request->query('level');
+
+        try {
+            if ($level === 'main') {
+                $accNo = (int) $request->query('acc_no');
+                if (! $accNo) {
+                    return response()->json(['success' => false, 'message' => 'acc_no مطلوب'], 422);
+                }
+                $row = (array) DB::connection('oracle')->selectOne(
+                    'SELECT MAX(ACC_SUB) AS MAX_SUB FROM ACC_MAIN WHERE ACC_NO = :a', ['a' => $accNo]
+                );
+                $max = $row['MAX_SUB'] ?? $row['max_sub'] ?? null;
+                $next = $max !== null ? ((int) $max + 1) : ($accNo * 10 + 1);
+
+                return response()->json(['success' => true, 'data' => ['level' => $level, 'number' => $next]]);
+            }
+
+            if ($level === 'sub') {
+                $accSub = (int) $request->query('acc_sub');
+                if (! $accSub) {
+                    return response()->json(['success' => false, 'message' => 'acc_sub مطلوب'], 422);
+                }
+                $next = null;
+                for ($k = 0; $k <= 9; $k++) {
+                    $candidate = $accSub * 10 + $k;
+                    $taken = DB::connection('oracle')->selectOne(
+                        'SELECT ACC_PART FROM ACC_SUB WHERE ACC_PART = :p', ['p' => $candidate]
+                    );
+                    if (! $taken) {
+                        $next = $candidate;
+                        break;
+                    }
+                }
+
+                return response()->json([
+                    'success' => $next !== null,
+                    'message' => $next === null
+                        ? 'لا توجد أرقام متاحة تحت الحساب الفرعي '.$accSub.' (عشرة أجزاء كحد أقصى)'
+                        : '',
+                    'data' => ['level' => $level, 'number' => $next],
+                ]);
+            }
+
+            if ($level === 'group') {
+                $row = (array) DB::connection('oracle')->selectOne(
+                    'SELECT MAX(GROUP_ID) AS MAX_ID FROM ACC_SUB_GROUP'
+                );
+                $max = $row['MAX_ID'] ?? $row['max_id'] ?? null;
+
+                return response()->json([
+                    'success' => true,
+                    'data' => ['level' => $level, 'number' => $max !== null ? (int) $max + 1 : 1],
+                ]);
+            }
+
+            // chart: المجموعة تحكم البادئة، وإلا يُستخدم الجزئي مباشرة
+            $accPart = null;
+            $groupId = $request->query('group_id');
+            if ($groupId) {
+                $g = (array) DB::connection('oracle')->selectOne(
+                    'SELECT ACC_PART FROM ACC_SUB_GROUP WHERE GROUP_ID = :gid', ['gid' => (int) $groupId]
+                );
+                $accPart = $g ? (int) ($g['ACC_PART'] ?? $g['acc_part']) : null;
+            } elseif ($request->query('acc_part')) {
+                $accPart = (int) $request->query('acc_part');
+            }
+            if ($accPart === null) {
+                return response()->json(['success' => false, 'message' => 'group_id أو acc_part مطلوب'], 422);
+            }
+
+            $basePrefix = $accPart * 100000;
+            $maxRow = (array) DB::connection('oracle')->selectOne(
+                'SELECT MAX(ACC_NO) AS MAX_NO FROM CHART_ACC WHERE ACC_NO >= :lo AND ACC_NO < :hi',
+                ['lo' => $basePrefix, 'hi' => $basePrefix + 100000]
+            );
+            $maxNo = $maxRow['MAX_NO'] ?? $maxRow['max_no'] ?? null;
+            $next = $maxNo !== null ? ((int) $maxNo - $basePrefix) + 1 : 10001;
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'level' => $level,
+                    'number' => $basePrefix + $next,
+                    'acc_part' => $accPart,
+                ],
+            ]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * POST /accounts/main — إنشاء حساب فرعي (ACC_MAIN) داخل قسم رئيسي.
+     * Numbering: ACC_SUB is the legacy 2-digit branch code, so the next free value
+     * inside the same section is used (MAX + 1), guarded against a PK collision.
+     */
+    public function createAccMain(Request $request)
+    {
+        try {
+            $request->validate([
+                'acc_no' => 'required|integer',
+                'sub_name' => 'required|string|max:30',
+            ]);
+
+            $accNo = (int) $request->input('acc_no');
+            $section = DB::connection('oracle')->selectOne('SELECT ACC_NO FROM ACCOUNT WHERE ACC_NO = :a', ['a' => $accNo]);
+            if (! $section) {
+                return response()->json(['success' => false, 'message' => 'القسم الرئيسي غير موجود'], 404);
+            }
+
+            $maxRow = DB::connection('oracle')->selectOne(
+                'SELECT MAX(ACC_SUB) AS MAX_SUB FROM ACC_MAIN WHERE ACC_NO = :a', ['a' => $accNo]
+            );
+            $maxArr = (array) $maxRow;
+            $next = (int) (($maxArr['MAX_SUB'] ?? $maxArr['max_sub'] ?? ($accNo * 10)) + 1);
+
+            if ($this->accMainExists($next)) {
+                return response()->json(['success' => false, 'message' => 'الرقم المحاسبي متكرر في الهيكل: '.$next], 422);
+            }
+
+            DB::connection('oracle')->insert(
+                'INSERT INTO ACC_MAIN (ACC_NO, ACC_SUB, SUB_NAME, BALANCE, CUR_NO)
+                 VALUES (:acc_no, :acc_sub, :sub_name, :balance, :cur_no)',
+                [
+                    'acc_no' => $accNo,
+                    'acc_sub' => $next,
+                    'sub_name' => ArabicEncoding::toOracleSearchChars($request->input('sub_name')),
+                    'balance' => (float) $request->input('balance', 0),
+                    'cur_no' => $request->input('cur_no') !== null ? (int) $request->input('cur_no') : null,
+                ]
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => 'تم إنشاء الحساب الفرعي بنجاح',
+                'data' => ['acc_no' => $accNo, 'acc_sub' => $next],
+            ], 201);
+        } catch (ValidationException $e) {
+            return response()->json(['success' => false, 'message' => $e->errors()], 422);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * PUT /accounts/main/{accSub} — تعديل بيانات حساب فرعي.
+     */
+    public function updateAccMain(Request $request, $accSub)
+    {
+        return $this->updateStructure('ACC_MAIN', 'ACC_SUB', (int) $accSub, $request, [
+            'sub_name' => ['SET' => 'SUB_NAME', 'arabic' => true],
+            'balance' => ['SET' => 'BALANCE'],
+            'cur_no' => ['SET' => 'CUR_NO'],
+            'acc_no' => ['SET' => 'ACC_NO'],
+        ], 'الحساب الفرعي');
+    }
+
+    /**
+     * POST /accounts/sub — إنشاء حساب جزئي (ACC_SUB) داخل حساب فرعي.
+     * Numbering: ACC_PART = ACC_SUB * 10 + next free digit (the legacy 3-digit rule).
+     */
+    public function createAccSub(Request $request)
+    {
+        try {
+            $request->validate([
+                'acc_sub' => 'required|integer',
+                'part_name' => 'required|string|max:30',
+            ]);
+
+            $accSub = (int) $request->input('acc_sub');
+            $main = DB::connection('oracle')->selectOne('SELECT ACC_SUB FROM ACC_MAIN WHERE ACC_SUB = :s', ['s' => $accSub]);
+            if (! $main) {
+                return response()->json(['success' => false, 'message' => 'الحساب الفرعي غير موجود'], 404);
+            }
+
+            $base = $accSub * 10;
+            $next = null;
+            for ($k = 0; $k <= 9; $k++) {
+                $candidate = $base + $k;
+                $taken = DB::connection('oracle')->selectOne(
+                    'SELECT ACC_PART FROM ACC_SUB WHERE ACC_PART = :p', ['p' => $candidate]
+                );
+                if (! $taken) {
+                    $next = $candidate;
+                    break;
+                }
+            }
+            if ($next === null) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'لا توجد أرقام متاحة تحت الحساب الفرعي '.$accSub.' — القاعدة التراثية تسمح بعشرة أجزاء فقط (مثال 120..129)',
+                ], 422);
+            }
+
+            DB::connection('oracle')->insert(
+                'INSERT INTO ACC_SUB (ACC_SUB, ACC_PART, PART_NAME, BALANCE, CUR_NO)
+                 VALUES (:acc_sub, :acc_part, :part_name, :balance, :cur_no)',
+                [
+                    'acc_sub' => $accSub,
+                    'acc_part' => $next,
+                    'part_name' => ArabicEncoding::toOracleSearchChars($request->input('part_name')),
+                    'balance' => (float) $request->input('balance', 0),
+                    'cur_no' => $request->input('cur_no') !== null ? (int) $request->input('cur_no') : null,
+                ]
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => 'تم إنشاء الحساب الجزئي بنجاح',
+                'data' => ['acc_sub' => $accSub, 'acc_part' => $next],
+            ], 201);
+        } catch (ValidationException $e) {
+            return response()->json(['success' => false, 'message' => $e->errors()], 422);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * PUT /accounts/sub/{accPart} — تعديل بيانات حساب جزئي.
+     */
+    public function updateAccSub(Request $request, $accPart)
+    {
+        return $this->updateStructure('ACC_SUB', 'ACC_PART', (int) $accPart, $request, [
+            'part_name' => ['SET' => 'PART_NAME', 'arabic' => true],
+            'balance' => ['SET' => 'BALANCE'],
+            'cur_no' => ['SET' => 'CUR_NO'],
+            'acc_sub' => ['SET' => 'ACC_SUB'],
+        ], 'الحساب الجزئي');
+    }
+
+    /**
+     * PUT /accounts/account/{accNo} — تعديل قسم رئيسي (الاسم/الرصيد الافتتاحي/العملة).
+     */
+    public function updateAccount(Request $request, $accNo)
+    {
+        return $this->updateStructure('ACCOUNT', 'ACC_NO', (int) $accNo, $request, [
+            'acc_name' => ['SET' => 'ACC_NAME', 'arabic' => true],
+            'balance' => ['SET' => 'BALANCE'],
+            'cur_no' => ['SET' => 'CUR_NO'],
+        ], 'القسم الرئيسي');
+    }
+
+    // =========================================================
+    // ===                   دوال مساعدة                     ===
+    // =========================================================
+
+    /** وسائط الربط الخاصة بـ movementAggregateSql (تُستخدم من الاستعلامات الداعية). */
+    private array $movementAggregateParams = [];
+
+    /**
+     * نص الاستعلام المجمّع لحركات ENTRY_SUB لكل حساب مالي.
+     * Inline view: one row per ledger account number with debit/credit/net/movements.
+     * Without a period there is no reason to join ENTRY_MAIN at all (much faster over
+     * the 422k movement rows, and ENTRY_SUB_BRW_I1 already covers ACC_NO).
+     *
+     * ملاحظة: يملأ $movementAggregateParams بالوسائط التي على المستدمج دمجها في
+     * معاملاته إن احتوى النص عليها.
+     */
+    private function movementAggregateSql(?string $fromIso, ?string $toIso): string
+    {
+        $params = [];
+        $dateCond = '';
+
+        if ($fromIso) {
+            $dateCond .= " AND em.ENTRY_DATE >= TO_DATE(:agg_from, 'YYYY-MM-DD')";
+            $params['agg_from'] = $fromIso;
+        }
+        if ($toIso) {
+            $dateCond .= " AND em.ENTRY_DATE <= TO_DATE(:agg_to, 'YYYY-MM-DD')";
+            $params['agg_to'] = $toIso;
+        }
+
+        // بدون فترة: لا ربط بـ ENTRY_MAIN إطلاقاً / skip the header join when unfiltered
+        $from = 'ENTRY_SUB es';
+        if ($dateCond !== '') {
+            $from = 'ENTRY_SUB es INNER JOIN ENTRY_MAIN em ON em.ENTRY_NO = es.ENTRY_NO';
+        }
+
+        $this->movementAggregateParams = $params;
+
+        return "SELECT es.ACC_NO,
+                       NVL(SUM(CASE WHEN es.ENTRY_MNT > 0 THEN es.ENTRY_MNT ELSE 0 END), 0) AS DR,
+                       NVL(SUM(CASE WHEN es.ENTRY_MNT < 0 THEN ABS(es.ENTRY_MNT) ELSE 0 END), 0) AS CR,
+                       NVL(SUM(es.ENTRY_MNT), 0) AS NET,
+                       COUNT(*) AS CNT
+                FROM {$from}"
+            .($dateCond !== '' ? "
+                WHERE 1 = 1{$dateCond}" : '').'
+                GROUP BY es.ACC_NO';
+    }
+
+    /**
+     * خريطة أرصدة كل حساب مالي من الحركات: [acc_no => bucket].
+     */
+    private function movementBalancesByChart(?string $fromIso, ?string $toIso): array
+    {
+        $sql = $this->movementAggregateSql($fromIso, $toIso);
+        $rows = DB::connection('oracle')->select($sql, $this->movementAggregateParams);
+
+        $map = [];
+        foreach ($rows as $row) {
+            $r = (array) $row;
+            $accNo = (int) ($r['ACC_NO'] ?? $r['acc_no'] ?? 0);
+            $map[$accNo] = [
+                'debit' => (float) ($r['DR'] ?? $r['dr'] ?? 0),
+                'credit' => (float) ($r['CR'] ?? $r['cr'] ?? 0),
+                'net' => (float) ($r['NET'] ?? $r['net'] ?? 0),
+                'movements' => (int) ($r['CNT'] ?? $r['cnt'] ?? 0),
+            ];
+        }
+
+        return $map;
+    }
+
+    /**
+     * أرصدة مجموعة محددة من الأرقام (لصفحة أبناء أو لنتائج بحث) — نفس القاعدة لكن
+     * مقيّدة بـ IN حتى تظل النتيجة صغيرة وسريعة على الفهرس ENTRY_SUB_BRW_I1.
+     */
+    private function movementBalancesFor(array $accNos, ?string $fromIso, ?string $toIso): array
+    {
+        if (empty($accNos)) {
+            return [];
+        }
+
+        $buckets = [];
+        // Oracle يحدّ قائمة IN بألف عنصر — تُقسَّم الصفحة إلى دفعات آمنة
+        foreach (array_chunk($accNos, 900) as $chunk) {
+            $inNames = [];
+            $params = [];
+            foreach ($chunk as $i => $no) {
+                $key = 'acc_no_'.$i;
+                $inNames[] = ':'.$key;
+                $params[$key] = (int) $no;
+            }
+            if ($fromIso) {
+                $params['agg_from'] = $fromIso;
+            }
+            if ($toIso) {
+                $params['agg_to'] = $toIso;
+            }
+
+            $dateCond = '';
+            $from = 'ENTRY_SUB es';
+            if ($fromIso || $toIso) {
+                $from = 'ENTRY_SUB es INNER JOIN ENTRY_MAIN em ON em.ENTRY_NO = es.ENTRY_NO';
+                if ($fromIso) {
+                    $dateCond .= " AND em.ENTRY_DATE >= TO_DATE(:agg_from, 'YYYY-MM-DD')";
+                }
+                if ($toIso) {
+                    $dateCond .= " AND em.ENTRY_DATE <= TO_DATE(:agg_to, 'YYYY-MM-DD')";
+                }
+            }
+
+            $rows = DB::connection('oracle')->select("
+                SELECT es.ACC_NO,
+                       NVL(SUM(CASE WHEN es.ENTRY_MNT > 0 THEN es.ENTRY_MNT ELSE 0 END), 0) AS DR,
+                       NVL(SUM(CASE WHEN es.ENTRY_MNT < 0 THEN ABS(es.ENTRY_MNT) ELSE 0 END), 0) AS CR,
+                       NVL(SUM(es.ENTRY_MNT), 0) AS NET,
+                       COUNT(*) AS CNT
+                FROM {$from}
+                WHERE es.ACC_NO IN (".implode(',', $inNames)."){$dateCond}
+                GROUP BY es.ACC_NO
+            ", $params);
+
+            foreach ($rows as $row) {
+                $r = (array) $row;
+                $buckets[(int) ($r['ACC_NO'] ?? $r['acc_no'] ?? 0)] = [
+                    'debit' => (float) ($r['DR'] ?? $r['dr'] ?? 0),
+                    'credit' => (float) ($r['CR'] ?? $r['cr'] ?? 0),
+                    'net' => (float) ($r['NET'] ?? $r['net'] ?? 0),
+                    'movements' => (int) ($r['CNT'] ?? $r['cnt'] ?? 0),
+                ];
+            }
+        }
+
+        return $buckets;
+    }
+
+    /**
+     * خريطة [acc_no => group_id] لكل الحسابات المالية (تُستخدم لترقية الرصيد مستوى المجموعة).
+     */
+    private function chartGroupMap(): array
+    {
+        $rows = DB::connection('oracle')->select('SELECT ACC_NO, GROUP_ID FROM CHART_ACC');
+        $map = [];
+        foreach ($rows as $row) {
+            $r = (array) $row;
+            $gid = $r['GROUP_ID'] ?? $r['group_id'] ?? null;
+            $map[(int) ($r['ACC_NO'] ?? $r['acc_no'] ?? 0)] = $gid === null ? null : (int) $gid;
+        }
+
+        return $map;
+    }
+
+    /**
+     * عدادات الحسابات المالية لكل (جزئي، مجموعة): تُغذي children_count/direct_count
+     * بدون جلب كل الصفوف. COUNTs per prefix and per group in one small query.
+     */
+    private function chartCountBuckets(): array
+    {
+        $rows = DB::connection('oracle')->select('
+            SELECT SUBSTR(TO_CHAR(ACC_NO), 1, 3) AS PART_CODE, GROUP_ID, COUNT(*) AS CNT
+            FROM CHART_ACC
+            GROUP BY SUBSTR(TO_CHAR(ACC_NO), 1, 3), GROUP_ID
+        ');
+
+        $part = [];
+        $group = [];
+        $direct = [];
+        foreach ($rows as $row) {
+            $r = (array) $row;
+            $partCode = (int) ($r['PART_CODE'] ?? $r['part_code'] ?? 0);
+            $cnt = (int) ($r['CNT'] ?? $r['cnt'] ?? 0);
+            $gid = $r['GROUP_ID'] ?? $r['group_id'] ?? null;
+
+            $part[$partCode] = ($part[$partCode] ?? 0) + $cnt;
+            if ($gid === null) {
+                $direct[$partCode] = ($direct[$partCode] ?? 0) + $cnt;
+            } else {
+                $group[(int) $gid] = ($group[(int) $gid] ?? 0) + $cnt;
+            }
+        }
+
+        return ['part' => $part, 'group' => $group, 'direct' => $direct];
+    }
+
+    /**
+     * جلب صفوف جدول هيكلي وتوحيدها لمفاتيح قياسية صغيرة (بإصلاح الترميز العربي).
+     * Structural rows normalised to lowercase keys with the Arabic repair applied.
+     */
+    private function structureRows(string $table, string $columns, string $orderBy): array
+    {
+        $rows = DB::connection('oracle')->select("SELECT {$columns} FROM {$table} ORDER BY {$orderBy}");
+
+        $out = [];
+        foreach ($rows as $row) {
+            $r = array_change_key_case((array) $row, CASE_LOWER);
+            $item = [];
+            foreach ($r as $k => $v) {
+                $item[$k] = is_string($v) ? ArabicEncoding::fixMojibake($v) : $v;
+            }
+            // مفتاح الاسم الموحّد لتبسيط البناء لاحقاً (الأرقام تبقى بأسماء أعمدتها)
+            $item['name'] = $item['acc_name'] ?? $item['sub_name'] ?? $item['part_name'] ?? $item['acc_group_name'] ?? '';
+            $out[] = $item;
+        }
+
+        return $out;
+    }
+
+    /** دلو فارغ / empty roll-up bucket. */
+    private function emptyBucket(): array
+    {
+        return ['debit' => 0.0, 'credit' => 0.0, 'net' => 0.0, 'movements' => 0];
+    }
+
+    /** إضافة دلو حساب إلى دلو أب / accumulate a child bucket into its parent. */
+    private function addBucket(?array $into, array $add): array
+    {
+        $into = $into ?? $this->emptyBucket();
+        $into['debit'] += (float) $add['debit'];
+        $into['credit'] += (float) $add['credit'];
+        $into['net'] += (float) $add['net'];
+        $into['movements'] += (int) $add['movements'];
+
+        return $into;
+    }
+
+    /**
+     * عدد الحسابات المالية تحت فرع معين (لحقل account_count في مستوى الفرعي/القسم):
+     * يُجمَّع من عدادات الأجزاء عبر خريطة جزئي←فرعي، فلا حاجة لجرد الحسابات.
+     */
+    private function accountCountForSub(int $accSub, array $subs, array $partCounts): int
+    {
+        $total = 0;
+        foreach ($subs as $s) {
+            if ((int) $s['acc_sub'] === $accSub) {
+                $total += (int) ($partCounts[(int) $s['acc_part']] ?? 0);
+            }
+        }
+
+        return $total;
+    }
+
+    /**
+     * كم حساباً مالياً يظهر فعلاً من نطاق الجزء (الباقي مخفي باستثناء العملاء).
+     */
+    private function visibleAccountCount(int $accPart, int $groupChildren, int $directCount, array $counts, array $groups): int
+    {
+        if ($accPart === self::CUSTOMERS_ACC_PART) {
+            return $groupChildren; // حساب الكبودي المفرد فقط
+        }
+
+        $visible = $directCount;
+        foreach ($groups as $g) {
+            if ((int) $g['acc_part'] === $accPart) {
+                $visible += $counts['group'][(int) $g['group_id']] ?? 0;
+            }
+        }
+
+        return $visible;
+    }
+
+    /**
+     * سطر نصي للمسار: أسماء الآباء مفصولة بشَرطة مائلة / printable parent path.
+     */
+    private function pathName(array $parts): string
+    {
+        $parts = array_values(array_filter(array_map('trim', $parts), fn ($p) => $p !== ''));
+
+        return implode(' / ', array_reverse($parts));
+    }
+
+    /**
+     * عقدة ورقة حساب مالي داخل الهيكل (تُستخدم لاستثناء «عملاء الكبودي» فقط).
+     */
+    private function chartLeafNode(int $accNo, array $chartBal, string $codePath, array $section, array $main, array $sub, ?int $groupId): ?array
+    {
+        $row = DB::connection('oracle')->selectOne("
+            SELECT ACC_NO, ACC_NAME, BALANCE, LIMITED_BALANCE, STOPPING_ACC, SEQ,
+                   TO_CHAR(ACC_DATE, 'YYYY-MM-DD') AS ACC_DATE
+            FROM CHART_ACC WHERE ACC_NO = :no
+        ", ['no' => $accNo]);
+        if (! $row) {
+            return null;
+        }
+        $r = (array) $row;
+        $b = $chartBal[$accNo] ?? $this->emptyBucket();
+
+        return [
+            'id' => 'chart_'.$accNo,
+            'level' => 'chart',
+            'acc_no' => $accNo,
+            'acc_part' => (int) ($sub['acc_part'] ?? null),
+            'acc_sub' => (int) ($sub['acc_sub'] ?? null),
+            'acc_no_section' => (int) ($section['acc_no'] ?? null),
+            'group_id' => $groupId,
+            'name' => ArabicEncoding::fixMojibake($r['ACC_NAME'] ?? $r['acc_name'] ?? ''),
+            'parent_path' => $this->pathName([$section['acc_name'] ?? '', $main['sub_name'] ?? '', $sub['part_name'] ?? '']),
+            'code_path' => $codePath.' / '.$accNo,
+            'stored_balance' => (float) ($r['BALANCE'] ?? $r['balance'] ?? 0),
+            'limited_balance' => isset($r['LIMITED_BALANCE']) || isset($r['limited_balance']) ? (float) ($r['LIMITED_BALANCE'] ?? $r['limited_balance']) : null,
+            'stopping_acc' => isset($r['STOPPING_ACC']) || isset($r['stopping_acc']) ? (int) ($r['STOPPING_ACC'] ?? $r['stopping_acc']) : null,
+            'seq' => isset($r['SEQ']) || isset($r['seq']) ? (int) ($r['SEQ'] ?? $r['seq']) : null,
+            'acc_date' => $r['ACC_DATE'] ?? $r['acc_date'] ?? null,
+            'cur_no' => null,
+            'debit' => $b['debit'],
+            'credit' => $b['credit'],
+            'balance' => $b['net'],
+            'movements' => $b['movements'],
+            'account_count' => 1,
+            'direct_count' => 0,
+            'children_count' => 0,
+            'has_children' => false,
+            'children' => [],
+        ];
+    }
+
+    /** مطابقة نصية للبحث في الأسماء/الأرقام داخل PHP (لتجنّب تعقيد LIKE العربي). */
+    private function matchesQuery(string $q, string $name, string $code): bool
+    {
+        $needle = trim($q);
+        if ($needle === '') {
+            return false;
+        }
+
+        return mb_stripos($name, $needle) !== false || str_contains($code, $needle);
+    }
+
+    /**
+     * توحيد نتيجة بحث هيكلية إلى نفس شكل عقد الشجرة.
+     */
+    private function searchNode(string $level, int $id, array $r, array $accMeta, array $subMeta, array $partMeta, array $groupMeta): array
+    {
+        $chain = [];
+        $codes = [];
+
+        if ($level === 'sub') {
+            $part = $id;
+            $sub = $partMeta[$part]['acc_sub'] ?? null;
+            $codes[] = (string) $part;
+            if ($sub !== null) {
+                $codes[] = (string) $sub;
+                $chain[] = $subMeta[$sub]['name'] ?? '';
+                $acc = $subMeta[$sub]['acc_no'] ?? null;
+                if ($acc !== null) {
+                    $codes[] = (string) $acc;
+                    $chain[] = $accMeta[$acc] ?? '';
+                }
+            }
+
+            return [
+                'id' => 'sub_'.$part, 'level' => 'sub', 'acc_part' => $part,
+                'acc_sub' => $sub, 'acc_no' => $subMeta[$sub]['acc_no'] ?? null,
+                'name' => $r['name'], 'parent_path' => $this->pathName($chain),
+                'code_path' => implode(' / ', array_reverse($codes)),
+                'stored_balance' => isset($r['balance']) ? (float) $r['balance'] : null,
+                'cur_no' => isset($r['cur_no']) ? (int) $r['cur_no'] : null,
+                'children_count' => 0, 'direct_count' => 0, 'has_children' => true, 'children' => [],
+            ];
+        }
+
+        if ($level === 'main') {
+            $sub = $id;
+            $acc = $subMeta[$sub]['acc_no'] ?? (int) ($r['acc_no'] ?? 0);
+            $codes = [(string) $sub, (string) $acc];
+            $chain = [$accMeta[$acc] ?? ''];
+
+            return [
+                'id' => 'main_'.$sub, 'level' => 'main', 'acc_sub' => $sub, 'acc_no' => $acc,
+                'name' => $r['name'], 'parent_path' => $this->pathName($chain),
+                'code_path' => implode(' / ', array_reverse($codes)),
+                'stored_balance' => isset($r['balance']) ? (float) $r['balance'] : null,
+                'cur_no' => isset($r['cur_no']) ? (int) $r['cur_no'] : null,
+                'children_count' => 0, 'direct_count' => 0, 'has_children' => true, 'children' => [],
+            ];
+        }
+
+        if ($level === 'group') {
+            $gid = $id;
+            $part = $groupMeta[$gid]['acc_part'] ?? (int) ($r['acc_part'] ?? 0);
+            $sub = $partMeta[$part]['acc_sub'] ?? null;
+            $acc = $sub !== null ? ($subMeta[$sub]['acc_no'] ?? null) : null;
+            $chain = [$accMeta[$acc] ?? '', $subMeta[$sub]['name'] ?? '', $partMeta[$part]['name'] ?? ''];
+
+            return [
+                'id' => 'group_'.$gid, 'level' => 'group', 'group_id' => $gid,
+                'acc_part' => $part, 'acc_sub' => $sub, 'acc_no' => $acc,
+                'name' => $r['name'], 'parent_path' => $this->pathName($chain),
+                'code_path' => ($acc !== null ? $acc.' / ' : '').($sub !== null ? $sub.' / ' : '').($part !== null ? $part.' / ' : '').'G'.$gid,
+                'stored_balance' => null, 'cur_no' => null,
+                'children_count' => 0, 'direct_count' => 0, 'has_children' => true, 'children' => [],
+            ];
+        }
+
+        return [
+            'id' => 'acc_'.$id, 'level' => 'account', 'acc_no' => $id,
+            'name' => $r['name'], 'parent_path' => '', 'code_path' => (string) $id,
+            'stored_balance' => isset($r['balance']) ? (float) $r['balance'] : null,
+            'cur_no' => isset($r['cur_no']) ? (int) $r['cur_no'] : null,
+            'children_count' => 0, 'direct_count' => 0, 'has_children' => true, 'children' => [],
+        ];
+    }
+
+    /** عدد عقد الشجرة (للـ meta). */
+    private function countTree(array $nodes): int
+    {
+        $n = 0;
+        foreach ($nodes as $node) {
+            $n++;
+            $n += $this->countTree($node['children'] ?? []);
+        }
+
+        return $n;
+    }
+
+    /** هل يوجد حساب فرعي بهذا الرقم؟ / ACC_MAIN primary key probe. */
+    private function accMainExists(int $accSub): bool
+    {
+        return (bool) DB::connection('oracle')->selectOne(
+            'SELECT ACC_SUB FROM ACC_MAIN WHERE ACC_SUB = :s', ['s' => $accSub]
+        );
+    }
+
+    /**
+     * تحديث صف هيكلي بأعمدة مختارة سلفاً (قائمة بيضاء) — يمنع أي حقن عبر أسماء الحقول.
+     * Whitelisted structural update: only declared columns can ever reach the SQL.
+     */
+    private function updateStructure(string $table, string $pk, int $pkValue, Request $request, array $map, string $label)
+    {
+        try {
+            $existing = DB::connection('oracle')->selectOne(
+                "SELECT {$pk} FROM {$table} WHERE {$pk} = :pk", ['pk' => $pkValue]
+            );
+            if (! $existing) {
+                return response()->json(['success' => false, 'message' => $label.' غير موجود'], 404);
+            }
+
+            $sets = [];
+            $params = ['pk' => $pkValue];
+            foreach ($map as $field => $spec) {
+                if (! $request->has($field)) {
+                    continue;
+                }
+                $sets[] = "{$spec['SET']} = :{$field}";
+                $value = $request->input($field);
+                if (! empty($spec['arabic'])) {
+                    $value = ArabicEncoding::toOracleSearchChars((string) $value);
+                }
+                $params[$field] = $value;
+            }
+
+            if (empty($sets)) {
+                return response()->json(['success' => false, 'message' => 'لا توجد بيانات للتعديل'], 400);
+            }
+
+            DB::connection('oracle')->update("UPDATE {$table} SET ".implode(', ', $sets)." WHERE {$pk} = :pk", $params);
+
+            return response()->json(['success' => true, 'message' => 'تم تعديل '.$label.' بنجاح']);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * تاريخ اختياري إلى ISO، أو null عند الغياب/الغيور غير المنطقي.
+     */
+    private function normaliseOptionalDate($value): ?string
+    {
+        if (! is_string($value) || trim($value) === '') {
+            return null;
+        }
+
+        return $this->parseStatementDateToIso($value);
     }
 }

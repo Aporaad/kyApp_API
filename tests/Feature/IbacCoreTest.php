@@ -49,10 +49,12 @@ function ibacAdminUser(): User
 }
 
 test('catalog gives every module its core actions in fixed order', function () {
-    // 132 = 127 السابقة + 5 صافية: إزالة 4 أكواد كشف عامة (accounts/employees/cutters/tailors.statement)
-    // وإضافة 9 دقيقة (3 للحسابات + كشفان لكل سجل عامل).
-    // 132 = the prior 127 plus a net 5: four broad statement codes retired, nine precise ones added.
-    expect(PermissionCatalog::count())->toBe(132);
+    // 134 = 127 السابقة + 7 صافية: إزالة 4 أكواد كشف عامة (accounts/employees/cutters/tailors.statement)،
+    // إضافة 9 دقيقة (3 للحسابات + كشفان لكل سجل عامل)، وإضافة صلاحيتين مستقلتين
+    // لتقرير عمل المجموعة (cutters.group_work_report و tailors.group_work_report).
+    // 134 = prior 127 plus net 7: retire 4 broad statement codes, add 9 precise splits, and
+    // add 2 independent group-work-report grants (cutters/tailors).
+    expect(PermissionCatalog::count())->toBe(134);
 
     foreach (PermissionCatalog::grouped() as $module) {
         $coreCodes = array_map(
