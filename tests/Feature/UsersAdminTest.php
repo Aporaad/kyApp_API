@@ -118,6 +118,28 @@ test('list rows never leak the password or the device token', function () {
     }
 });
 
+test('user rows expose the cash treasury and the financial account as separate columns', function () {
+    Sanctum::actingAs(adminForAdminTests(), ['*']);
+
+    $payload = $this->getJson('/api/users')->assertOk()->json();
+
+    // حقلان مستقلان تماماً: cash_acc_no هو الصندوق الافتراضي، وacc_no هو الحساب المالي
+    // Two distinct columns: cash_acc_no is the default treasury, acc_no the ledger account.
+    foreach ($payload['data'] as $row) {
+        expect($row)->toHaveKey('cash_acc_no')->and($row)->toHaveKey('acc_no');
+    }
+});
+
+test('the user detail returns acc_no so the edit form can prefill the financial account', function () {
+    $admin = adminForAdminTests();
+    Sanctum::actingAs($admin, ['*']);
+
+    $this->getJson('/api/users/'.$admin->getAttribute('USER_ID'))
+        ->assertOk()
+        ->assertJsonPath('success', true)
+        ->assertJsonStructure(['data' => ['cash_acc_no', 'acc_no']]);
+});
+
 test('sorting outside the whitelist falls back instead of reaching order by', function () {
     Sanctum::actingAs(adminForAdminTests(), ['*']);
 

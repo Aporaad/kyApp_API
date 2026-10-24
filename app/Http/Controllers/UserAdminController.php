@@ -65,7 +65,7 @@ class UserAdminController extends Controller
                   FROM (
                         SELECT u.USER_ID, u.USER_NAME, u.USER_NAME_EN, u.USER_NAME_AR,
                                u.USER_TYPE, u.BRANCH_NO, u.IS_ACTIVATED, u.IS_ADMIN, u.NOTE,
-                               u.CASH_ACC_NO, u.ALLOW_BANK_ACC, u.BIOMETRIC_ENABLED,
+                               u.CASH_ACC_NO, u.ACC_NO, u.ALLOW_BANK_ACC, u.BIOMETRIC_ENABLED,
                                u.DEVICE_NAME, u.PLATFORM,
                                u.CREATED_ON, u.CREATED_BY, u.LAST_UPDATED_ON, u.LAST_UPDATED_BY,
                                NVL(g.GRANT_COUNT, 0) AS GRANT_COUNT
@@ -765,7 +765,7 @@ class UserAdminController extends Controller
     {
         $row = DB::connection('oracle')->selectOne(
             'SELECT USER_ID, USER_NAME, USER_NAME_EN, USER_NAME_AR, USER_TYPE, BRANCH_NO,
-                    IS_ACTIVATED, IS_ADMIN, NOTE, CASH_ACC_NO, ALLOW_BANK_ACC, BIOMETRIC_ENABLED,
+                    IS_ACTIVATED, IS_ADMIN, NOTE, CASH_ACC_NO, ACC_NO, ALLOW_BANK_ACC, BIOMETRIC_ENABLED,
                     DEVICE_NAME, PLATFORM, CREATED_ON, CREATED_BY, LAST_UPDATED_ON, LAST_UPDATED_BY
                FROM ACCOUNTS.APP_USERS
               WHERE USER_ID = :user_id',
@@ -942,7 +942,12 @@ class UserAdminController extends Controller
             'is_admin' => (int) ($row['is_admin'] ?? 0) === 1,
             'branch_no' => isset($row['branch_no']) ? (int) $row['branch_no'] : null,
             'note' => $this->fix($row['note'] ?? null),
+            // حسابان مختلفان تماماً: cash_acc_no هو صندوق المستخدم الافتراضي (CASH_ACC_NO)،
+            // وacc_no هو حسابه المالي في شجرة الحسابات (ACC_NO) الذي تُقرأ منه كشوفاته الشخصية.
+            // Two distinct columns: cash_acc_no is the user's default treasury (CASH_ACC_NO),
+            // acc_no is their ledger account (ACC_NO) that the personal statements resolve from.
             'cash_acc_no' => isset($row['cash_acc_no']) ? (int) $row['cash_acc_no'] : null,
+            'acc_no' => isset($row['acc_no']) ? (int) $row['acc_no'] : null,
             'allow_bank_acc' => (int) ($row['allow_bank_acc'] ?? 0),
             'biometric_enabled' => (int) ($row['biometric_enabled'] ?? 0),
             'device_name' => $this->fix($row['device_name'] ?? null),
