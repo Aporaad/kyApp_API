@@ -6,6 +6,7 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CurrencyController;
 use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\InvoiceController;
+use App\Http\Controllers\MyStatementController;
 use App\Http\Controllers\PermissionController;
 use App\Http\Controllers\Services\JobController;
 use App\Http\Controllers\Services\ProviderController;
@@ -148,6 +149,20 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:app_config.update');
     Route::put('/app-config/api-password', [AppConfigController::class, 'updateApiPassword'])
         ->middleware('permission:app_config.api_manage');
+});
+
+// ============================================================
+// مسارات الكشوفات الشخصية — مالي وعمل — مقصورة على المستخدم الحالي
+// Personal statements — financial and work — scoped to the authenticated user only.
+//
+// لا تقبل أي بارامتر حساب: تُقرأ ACC_NO من صف المستخدم المصادق عليه حصراً.
+// Accepts no account parameter: it reads ACC_NO from the authenticated user row exclusively.
+// ============================================================
+Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/my-statement/financial', [MyStatementController::class, 'financialStatement'])
+        ->middleware('permission:my_statement.financial');
+    Route::get('/my-statement/work', [MyStatementController::class, 'workStatement'])
+        ->middleware('permission:my_statement.work');
 });
 
 Route::get('/hello', function () {

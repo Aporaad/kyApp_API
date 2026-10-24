@@ -459,6 +459,8 @@ class AuthController extends Controller
             'user_type' => $user->user_type ?? $user->USER_TYPE,
             'branch_no' => $user->branch_no ?? $user->BRANCH_NO,
             'is_admin' => $user->isAdmin(),
+            // الحساب المالي المرتبط بالمستخدم — للكشوفات الشخصية
+            'acc_no' => $user->acc_no ?? $user->ACC_NO,
         ], $this->permissions->payloadFor($user));
     }
 

@@ -260,19 +260,30 @@ test('comprehensive search returns structural and financial hits with a path', f
 test('next-number preview equals the number the create endpoint would assign', function () {
     Sanctum::actingAs(accountTreeAdminUser(), ['*']);
 
-    // الجزئي 110: المعاينة يجب أن تساوي MAX داخل النطاق + 1 بنفس صيغة الإنشاء
-    $preview = $this->getJson('/api/accounts/next-number?level=chart&acc_part=110');
+    // الخانة الرابعة من رقم الحساب المالي هي عملته: المعاينة تُحسب داخل نطاق
+    // (جزء, عملة) واحد، والجزء 110 بعملة رقم 1 → النطاق 11010000..11020000.
+    $curNo = 1;
+    $preview = $this->getJson('/api/accounts/next-number?level=chart&acc_part=110&cur_no='.$curNo);
     $preview->assertStatus(200)->assertJson(['success' => true]);
     $next = (int) $preview->json('data.number');
 
+    $lo = 110 * 100000 + $curNo * 10000;
+    $hi = $lo + 10000;
     $maxRow = (array) DB::connection('oracle')->selectOne(
-        'SELECT MAX(ACC_NO) AS MAX_NO FROM CHART_ACC WHERE ACC_NO >= 11000000 AND ACC_NO < 11100000'
+        'SELECT MAX(ACC_NO) AS MAX_NO FROM CHART_ACC WHERE ACC_NO >= :lo AND ACC_NO < :hi',
+        ['lo' => $lo, 'hi' => $hi]
     );
-    $expected = $maxRow['max_no'] !== null ? ((int) $maxRow['max_no'] + 1) : 11010001;
+    $expected = $maxRow['max_no'] !== null ? ((int) $maxRow['max_no'] + 1) : $lo + 1;
 
     expect($next)->toBe($expected)
         // البادئة ثلاثية الأرقام محفوظة: الرقم الجديد يبقى داخل الجزء 110
-        ->and(intdiv($next, 100000))->toBe(110);
+        ->and(intdiv($next, 100000))->toBe(110)
+        // الخانة الرابعة = العملة المختارة، لا أعلى عملة ترتيباً في الجزء
+        ->and((int) substr((string) $next, 3, 1))->toBe($curNo);
+
+    // بلا عملة لا يمكن اشتقاق الخانة الرابعة، فلا رقم يُعرض → 422
+    $this->getJson('/api/accounts/next-number?level=chart&acc_part=110')
+        ->assertStatus(422);
 
     // المجموعة: MAX(GROUP_ID) + 1
     $groupPreview = (int) $this->getJson('/api/accounts/next-number?level=group')->json('data.number');
@@ -288,6 +299,27 @@ test('next-number preview equals the number the create endpoint would assign', f
             'SELECT ACC_PART FROM ACC_SUB WHERE ACC_PART = :p', ['p' => $candidate]
         );
         expect($taken)->toBeEmpty();
+    }
+});
+
+test('chart numbering stays inside its own currency band, not the part maximum', function () {
+    Sanctum::actingAs(accountTreeAdminUser(), ['*']);
+
+    // الخطأ التراثي: MAX على الجزء كاملاً يأخذ أعلى عملة ترتيباً (في الجزء 251
+    // أقصى رقمه 25130011) فيمنح حساباً بعملة ريال رقماً سعودياً. النطاق الصحيح يعزل
+    // كل عملة: 2511xxxx للريال و2512xxxx للدولار، فلا يتداخلان أبداً.
+    $part = 251;
+    foreach ([1, 2, 3] as $curNo) {
+        $lo = $part * 100000 + $curNo * 10000;
+        $hi = $lo + 10000;
+        $number = (int) $this->getJson(
+            '/api/accounts/next-number?level=chart&acc_part='.$part.'&cur_no='.$curNo
+        )->json('data.number');
+
+        // كل عملة تُبقى رقمها داخل نطاقها الخاص وحده
+        expect($number)->toBeGreaterThanOrEqual($lo)
+            ->and($number)->toBeLessThan($hi)
+            ->and((int) substr((string) $number, 3, 1))->toBe($curNo);
     }
 });
 

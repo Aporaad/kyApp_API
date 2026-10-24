@@ -65,6 +65,8 @@ class User extends Authenticatable
         'USER_TYPE',
         'ALLOW_BANK_ACC',
         'IS_ADMIN',
+        // حقول الكشوفات الشخصية — الحساب المالي المرتبط بالمستخدم
+        'ACC_NO',
         // حقول المقاييس الحيوية
         'DEVICE_TOKEN',
         'DEVICE_NAME',

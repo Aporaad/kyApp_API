@@ -147,6 +147,8 @@ test('sealed business verbs refuse an unauthenticated caller', function () {
         ['get', '/api/currencies/1/prices'],
         ['get', '/api/invoices'],
         ['get', '/api/invoices/1'],
+        ['get', '/api/my-statement/financial'],
+        ['get', '/api/my-statement/work'],
         ['get', '/api/selectFromTable?table_name=CURRENCY&limit=1'],
     ];
 
@@ -189,6 +191,8 @@ test('an ungranted caller is refused per module with the named permission', func
         ['get', '/api/currencies/1/prices', 'currencies.prices_view'],
         ['put', '/api/currencies/1', 'currencies.update'],
         ['get', '/api/invoices', 'invoices.view'],
+        ['get', '/api/my-statement/financial', 'my_statement.financial'],
+        ['get', '/api/my-statement/work', 'my_statement.work'],
         ['get', '/api/selectFromTable?table_name=CURRENCY&limit=1', 'system.*'],
     ];
 

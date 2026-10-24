@@ -201,6 +201,7 @@ class UserAdminController extends Controller
             'note' => ['nullable', 'string', 'max:100'],
             'cash_acc_no' => ['nullable', 'integer', 'min:0'],
             'allow_bank_acc' => ['nullable', 'integer', 'in:0,1'],
+            'acc_no' => ['nullable', 'integer', 'min:0'],
             'permissions' => ['nullable', 'array'],
             'permissions.*' => ['string', 'max:60'],
         ], [
@@ -253,11 +254,11 @@ class UserAdminController extends Controller
                 DB::connection('oracle')->insert(
                     'INSERT INTO ACCOUNTS.APP_USERS
                         (USER_ID, USER_NAME, USER_NAME_EN, USER_NAME_AR, USER_PASSWORD, IS_ACTIVATED,
-                         IS_ADMIN, USER_TYPE, BRANCH_NO, NOTE, CASH_ACC_NO, ALLOW_BANK_ACC,
+                         IS_ADMIN, USER_TYPE, BRANCH_NO, NOTE, CASH_ACC_NO, ALLOW_BANK_ACC, ACC_NO,
                          CREATED_ON, CREATED_BY)
                      VALUES
                         (:user_id, :user_name, :user_name_en, :user_name_ar, :user_password, :is_activated,
-                         :is_admin, :user_type, :branch_no, :note, :cash_acc_no, :allow_bank_acc,
+                         :is_admin, :user_type, :branch_no, :note, :cash_acc_no, :allow_bank_acc, :acc_no,
                          SYSDATE, :created_by)',
                     [
                         'user_id' => $userId,
@@ -276,6 +277,7 @@ class UserAdminController extends Controller
                         'note' => ArabicEncoding::toOracleSearchChars($this->textOf($input, 'note')),
                         'cash_acc_no' => $this->intOrNull($input['cash_acc_no'] ?? null),
                         'allow_bank_acc' => (int) ($input['allow_bank_acc'] ?? 0),
+                        'acc_no' => $this->intOrNull($input['acc_no'] ?? null),
                         'created_by' => $actor ? $this->idOf($actor) : null,
                     ]
                 );
@@ -359,6 +361,7 @@ class UserAdminController extends Controller
             'note' => ['nullable', 'string', 'max:100'],
             'cash_acc_no' => ['nullable', 'integer', 'min:0'],
             'allow_bank_acc' => ['nullable', 'integer', 'in:0,1'],
+            'acc_no' => ['nullable', 'integer', 'min:0'],
             'permissions' => ['nullable', 'array'],
             'permissions.*' => ['string', 'max:60'],
         ], [
@@ -413,6 +416,7 @@ class UserAdminController extends Controller
             'branch_no' => 'BRANCH_NO',
             'cash_acc_no' => 'CASH_ACC_NO',
             'allow_bank_acc' => 'ALLOW_BANK_ACC',
+            'acc_no' => 'ACC_NO',
             'is_activated' => 'IS_ACTIVATED',
             'is_admin' => 'IS_ADMIN',
             'user_type' => 'USER_TYPE',

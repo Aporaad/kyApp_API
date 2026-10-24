@@ -308,6 +308,18 @@ final class PermissionCatalog
                 'toggle' => 'تفعيل أو تعطيل المهمة',
             ],
         ],
+        // الكشوفات الشخصية: كشف مالي وكشف عمل خاصان بالموظف الحالي دون اختيار حساب
+        // Personal statements: financial and work statements scoped to the logged-in employee only.
+        'my_statement' => [
+            'name_ar' => 'الكشوفات الشخصية',
+            'core' => [
+                'view' => 'عرض الكشوفات الشخصية',
+            ],
+            'extra' => [
+                'financial' => 'كشف حسابي المالي الخاص بي',
+                'work' => 'كشف عملي الخاص بي',
+            ],
+        ],
         'system' => [
             'name_ar' => 'النظام',
             'core' => [],
@@ -456,6 +468,8 @@ final class PermissionCatalog
             'settings_manage' => 'Manage service settings',
             'subscriptions_manage' => 'Manage subscriptions',
             'reveal_credentials' => 'Reveal credentials',
+            'financial' => 'Personal financial statement',
+            'work' => 'Personal work statement',
         ];
 
         return ($labels[$actionCode] ?? ucfirst($actionCode)).' — '.ucfirst($moduleCode);

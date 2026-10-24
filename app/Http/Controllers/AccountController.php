@@ -253,24 +253,85 @@ class AccountController extends Controller
     }
 
     /**
+     * عملة الحساب المالي مشفَّرة في رقمه لا في عمود: CHART_ACC لا يملك CUR_NO، والخانة
+     * الرابعة من ACC_NO هي رقم العملة في CURRENCY —
+     *   25120016 = الجزء 251  +  العملة 2 (دولار)  +  التسلسل 0016
+     *   11010001 = الجزء 110  +  العملة 1 (ريال)   +  التسلسل 0001
+     * والقراءة من اليسار لا من اليمين لأن أرقام العملاء تسعة خانات (123110000…) وتتبع
+     * القاعدة نفسها. لا عمود يُضاف ولا جدول: الرقم هو مخزن العملة عند هذا النظام التراثي.
+     *
+     * The chart account's currency is carried by its NUMBER, not a column: the 4th digit
+     * from the left is CURRENCY.CUR_NO. Read positionally so 8- and 9-digit numbers agree.
+     */
+    private function currencyOfChartNumber(int $accNo): ?int
+    {
+        $digits = (string) $accNo;
+        if (strlen($digits) < 4) {
+            return null; // رقم أقصر من أن يحمل خانة عملة — لا يُختلق له عملة
+        }
+        $curNo = (int) $digits[3];
+
+        return $curNo > 0 ? $curNo : null;
+    }
+
+    /**
+     * تالية رقم حساب داخل نطاق (جزء, عملة) واحد: المُنخفض = جزء×100000 + عملة×10000،
+     * والسقف عشرة آلاف رقم (أربعة أرقام تسلسل). النطاق القديم كان الجزء كاملاً، فيأخذ
+     * MAX أعلىِ عملة ترتيباً ثم يمنح رقمها لحساب طلبه المستخدم بعملة أخرى: الجزء 251
+     * أقصى رقمه 25130011 (عملة 3) فوُلد 25130012 حساباً سعودياً لم يُطلب.
+     *
+     * Next ACC_NO inside a single (part, currency) band. The previous range spanned the
+     * whole part, so MAX landed in whichever currency sorts highest and the new account
+     * was silently numbered under a currency its user never chose.
+     *
+     * @return array{number: int|null, error: string|null}
+     */
+    private function nextChartAccountNumber(int $accPart, int $curNo): array
+    {
+        $lo = $accPart * 100000 + $curNo * 10000;
+        $hi = $lo + 10000;
+
+        $row = (array) DB::connection('oracle')->selectOne(
+            'SELECT MAX(ACC_NO) AS MAX_NO FROM CHART_ACC WHERE ACC_NO >= :lo AND ACC_NO < :hi',
+            ['lo' => $lo, 'hi' => $hi]
+        );
+        $max = $row['MAX_NO'] ?? $row['max_no'] ?? null;
+        // أول رقم في النطاق = تسلسل 0001، مطابق لأول حساب في كل جزء قديم (11010001)
+        $next = $max !== null ? (int) $max + 1 : $lo + 1;
+
+        if ($next >= $hi) {
+            return [
+                'number' => null,
+                'error' => 'نفدت أرقام العملة '.$curNo.' داخل الحساب الجزئي '.$accPart
+                    .' (عشرة آلاف حساب لكل عملة) — لن يُمنح رقم يخرق قاعدته',
+            ];
+        }
+
+        return ['number' => $next, 'error' => null];
+    }
+
+    /**
      * POST /accounts/chart
      * إنشاء حساب مالي جديد في CHART_ACC
      *
-     * التولير الصحيح: رقم الحساب = بادئة الجزء (3 أرقام) × 100000 + لاحقة من 5 أرقام
-     * تبدأ من 10001، أي أن الجزء 110 يعطي 11010001. الصيغة القديمة كانت
-     * TRUNC(ACC_NO/10000) التي تعطي 4 أرقام فلا تصل أبداً لأكبر رقم داخل الجزء.
-     * Numbering rule: ACC_NO = accPart * 100000 + 5-digit suffix (110 → 11010001).
-     * The old TRUNC(ACC_NO/10000) filter produced a 4-digit prefix that never matched a
+     * التولير الصحيح: رقم الحساب = بادئة الجزء (3 أرقام) + رقم العملة (خانة واحدة) +
+     * التسلسل، فالجزء 110 بعملة ريال يعطي 11010001 وبعملة دولار يعطي 11020001.
+     * الصيغة القديمة كانت TRUNC(ACC_NO/10000) التي تعطي 4 أرقام فلا تصل أبداً لأكبر
+     * رقم داخل الجزء، وكانت العملة نفسها تُجهل فتقطف أعلى عملة ترتيباً.
+     * Numbering rule: ACC_NO = accPart(3) + CUR_NO(1) + sequence. The old
+     * TRUNC(ACC_NO/10000) filter produced a 4-digit prefix that never matched a
      * 3-digit part, so MAX() came back null and every insert collided with the first slot.
      *
-     * الحقول المدعومة = أعمدة CHART_ACC الموجودة فقط (لا أعمدة جديدة في قاعدة الغير لنا).
-     * Body: acc_name, group_id | acc_part, balance, limited_balance, stopping_acc, seq, acc_date.
+     * الحقول المدعومة = أعمدة CHART_ACC الموجودة فقط (لا أعمدة جديدة في قاعدة الغير لنا):
+     * العملة ليست عموداً هنا بل تُرمَّز داخل الرقم. Body: acc_name, cur_no, group_id |
+     * acc_part, balance, limited_balance, stopping_acc, seq, acc_date.
      */
     public function createChartAccount(Request $request)
     {
         try {
             $data = $request->validate([
                 'acc_name' => 'required|string|max:150',
+                'cur_no' => 'required|integer|min:1|max:9',
                 'group_id' => 'nullable|integer',
                 'acc_part' => 'nullable|integer',
                 'balance' => 'nullable|numeric',
@@ -312,6 +373,21 @@ class AccountController extends Controller
                 $groupId = null;
             }
 
+            // العملة جزء من الرقم: يجب أن تكون خانة واحدة ومعروفة في CURRENCY، وإلا وُلد
+            // حساب برقم لا يطابق أي عملة في الدليل.
+            // The currency becomes a digit of the number, so it must be a real CURRENCY row.
+            $curNo = (int) $data['cur_no'];
+            $curRow = DB::connection('oracle')->selectOne(
+                'SELECT CUR_NO FROM CURRENCY WHERE CUR_NO = :c',
+                ['c' => $curNo]
+            );
+            if (! $curRow) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'العملة '.$curNo.' غير معروفة في دليل العملات',
+                ], 422);
+            }
+
             // منع تكرار الاسم: CHART_ACC_BRW_U1 يفهرس ACC_NAME — الاستعلام أسبق من الخطأ
             // Duplicate names are indexed by CHART_ACC_BRW_U1, so check before inserting.
             $oracleName = ArabicEncoding::toOracleSearchChars($data['acc_name']);
@@ -328,16 +404,13 @@ class AccountController extends Controller
                 ], 422);
             }
 
-            // أعلى رقم داخل نطاق البادئة (فهرس PRIMARY KEY على ACC_NO → نطاق سريع)
-            $basePrefix = $accPart * 100000;
-            $maxRow = DB::connection('oracle')->selectOne(
-                'SELECT MAX(ACC_NO) AS MAX_NO FROM CHART_ACC WHERE ACC_NO >= :lo AND ACC_NO < :hi',
-                ['lo' => $basePrefix, 'hi' => $basePrefix + 100000]
-            );
-            $maxArr = (array) $maxRow;
-            $maxNo = $maxArr['MAX_NO'] ?? $maxArr['max_no'] ?? null;
-            $nextSuffix = $maxNo !== null ? ((int) $maxNo - $basePrefix) + 1 : 10001;
-            $nextNo = $basePrefix + $nextSuffix;
+            // ترقيم داخل نطاق العملة المختارة وحدها (نفس القاعدة في المعاينة أدناه)
+            // Numbering stays inside the chosen currency's band — same helper the preview uses.
+            $band = $this->nextChartAccountNumber($accPart, $curNo);
+            if ($band['number'] === null) {
+                return response()->json(['success' => false, 'message' => $band['error']], 422);
+            }
+            $nextNo = $band['number'];
 
             $accDate = $this->normaliseOptionalDate($data['acc_date'] ?? null);
             $balance = (float) ($data['balance'] ?? 0);
@@ -374,6 +447,8 @@ class AccountController extends Controller
                     'acc_no' => $nextNo,
                     'acc_name' => $data['acc_name'],
                     'balance' => $balance,
+                    // العملة تُقرأ من الرقم نفسه — تُعاد في الرد ليعرضها النموذج فور الإنشاء
+                    'cur_no' => $this->currencyOfChartNumber($nextNo),
                     'acc_date' => $accDate ?? date('Y-m-d'),
                     'seq' => $seq,
                     'group_id' => $groupId,
@@ -1760,6 +1835,8 @@ class AccountController extends Controller
                     'id' => 'chart_'.$accNo,
                     'level' => 'chart',
                     'acc_no' => $accNo,
+                    // العملة تُقرأ من الخانة الرابعة لرقم الحساب — لا عمود لها في CHART_ACC
+                    'cur_no' => $this->currencyOfChartNumber($accNo),
                     'name' => ArabicEncoding::fixMojibake($r['ACC_NAME'] ?? $r['acc_name'] ?? ''),
                     'group_id' => isset($r['GROUP_ID']) || isset($r['group_id']) ? (int) ($r['GROUP_ID'] ?? $r['group_id']) : null,
                     'stored_balance' => (float) ($r['BALANCE'] ?? $r['balance'] ?? 0),
@@ -1920,6 +1997,7 @@ class AccountController extends Controller
                     'id' => 'chart_'.$accNo,
                     'level' => 'chart',
                     'acc_no' => $accNo,
+                    'cur_no' => $this->currencyOfChartNumber($accNo),
                     'group_id' => $gid,
                     'acc_part' => $part,
                     'name' => ArabicEncoding::fixMojibake($r['ACC_NAME'] ?? $r['acc_name'] ?? ''),
@@ -2013,6 +2091,8 @@ class AccountController extends Controller
                 'success' => true,
                 'data' => [
                     'acc_no' => $accNoInt,
+                    // عملة الحساب المالي مشفَّرة في رقمه (الخانة الرابعة) — لا عمود CUR_NO هنا
+                    'cur_no' => $this->currencyOfChartNumber((int) $accNoInt),
                     'acc_name' => ArabicEncoding::fixMojibake($r['ACC_NAME'] ?? $r['acc_name'] ?? ''),
                     'balance' => (float) ($r['BALANCE'] ?? $r['balance'] ?? 0),
                     'group_id' => $groupId,
@@ -2041,7 +2121,8 @@ class AccountController extends Controller
      * GET /accounts/next-number?level=chart|group|sub|main&…
      * معاينة الرقم الذي سيُمنح للعقدة الجديدة، بنفس قاعدة التوليد المستخدمة في
      * create* أدناه تماماً — لا نسخة ثانية منها، وإلا خرجت المعاينة عن الواقع
-     * وانشأ المستخدم رقماً يصادف محجوزاً.
+     * وانشأ المستخدم رقماً يصادف محجوزاً. level=chart يطلب cur_no لأن الخانة الرابعة
+     * من الرقم هي العملة، فبدونها لا يمكن تخمين الرقم أصلاً.
      *
      * Previews the number the create endpoints would assign. It reuses the very same
      * expressions rather than duplicating them in Dart: a second copy of a legacy
@@ -2055,6 +2136,7 @@ class AccountController extends Controller
             'acc_part' => 'nullable|integer',
             'acc_sub' => 'nullable|integer',
             'acc_no' => 'nullable|integer',
+            'cur_no' => 'nullable|integer|min:1|max:9',
         ]);
 
         $level = $request->query('level');
@@ -2112,7 +2194,7 @@ class AccountController extends Controller
                 ]);
             }
 
-            // chart: المجموعة تحكم البادئة، وإلا يُستخدم الجزئي مباشرة
+            // chart: المجموعة تحكم البادئة، والعملة تحكم الخانة الرابعة من الرقم
             $accPart = null;
             $groupId = $request->query('group_id');
             if ($groupId) {
@@ -2127,20 +2209,26 @@ class AccountController extends Controller
                 return response()->json(['success' => false, 'message' => 'group_id أو acc_part مطلوب'], 422);
             }
 
-            $basePrefix = $accPart * 100000;
-            $maxRow = (array) DB::connection('oracle')->selectOne(
-                'SELECT MAX(ACC_NO) AS MAX_NO FROM CHART_ACC WHERE ACC_NO >= :lo AND ACC_NO < :hi',
-                ['lo' => $basePrefix, 'hi' => $basePrefix + 100000]
-            );
-            $maxNo = $maxRow['MAX_NO'] ?? $maxRow['max_no'] ?? null;
-            $next = $maxNo !== null ? ((int) $maxNo - $basePrefix) + 1 : 10001;
+            $curNo = (int) $request->query('cur_no');
+            if ($curNo < 1) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'cur_no مطلوب لعرض رقم الحساب المالي الصحيح',
+                ], 422);
+            }
+
+            $band = $this->nextChartAccountNumber($accPart, $curNo);
+            if ($band['number'] === null) {
+                return response()->json(['success' => false, 'message' => $band['error']], 422);
+            }
 
             return response()->json([
                 'success' => true,
                 'data' => [
                     'level' => $level,
-                    'number' => $basePrefix + $next,
+                    'number' => $band['number'],
                     'acc_part' => $accPart,
+                    'cur_no' => $curNo,
                 ],
             ]);
         } catch (\Exception $e) {
@@ -2579,11 +2667,13 @@ class AccountController extends Controller
     /**
      * سطر حساب مالي في قائمة التصدير: نفس أرقام الشاشة (محسوب من ENTRY_SUB) مع المخزّن
      * للمقارنة، لأن العمود المخزّن ميت في الجزء 123 وفي أغلب الجزئيات.
-     * $curNo موروثة من الحساب الجزئي الأعلى — لا عمود عملة في CHART_ACC.
+     * $curNoHere عملة الحساب من الخانة الرابعة من رقمه؛ $curNo الموروثة من الجزئي تبقى
+     * احتياطاً للأرقام المخالفة للقاعدة (أقل من أربعة خانات)، لا بديلاً عنها.
      */
     private function exportChartRow(array $c, int $depth, array $chartBal, string $parentPath, string $codePath, ?int $curNo = null): array
     {
         $b = $chartBal[$c['acc_no']] ?? $this->emptyBucket();
+        $curNoHere = $this->currencyOfChartNumber((int) $c['acc_no']) ?? $curNo;
 
         return [
             'depth' => $depth,
@@ -2602,7 +2692,7 @@ class AccountController extends Controller
             'limited_balance' => $c['limited_balance'] !== null ? (float) $c['limited_balance'] : null,
             'stopping_acc' => $c['stopping_acc'],
             'seq' => $c['seq'],
-            'cur_no' => $curNo,
+            'cur_no' => $curNoHere,
             'acc_date' => $c['acc_date'],
             'children_count' => 0,
             'account_count' => 0,
@@ -2717,7 +2807,7 @@ class AccountController extends Controller
             'stopping_acc' => isset($r['STOPPING_ACC']) || isset($r['stopping_acc']) ? (int) ($r['STOPPING_ACC'] ?? $r['stopping_acc']) : null,
             'seq' => isset($r['SEQ']) || isset($r['seq']) ? (int) ($r['SEQ'] ?? $r['seq']) : null,
             'acc_date' => $r['ACC_DATE'] ?? $r['acc_date'] ?? null,
-            'cur_no' => null,
+            'cur_no' => $this->currencyOfChartNumber($accNo),
             'debit' => $b['debit'],
             'credit' => $b['credit'],
             'balance' => $b['net'],
