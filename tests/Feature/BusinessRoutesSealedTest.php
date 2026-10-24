@@ -161,22 +161,31 @@ test('an ungranted caller is refused per module with the named permission', func
     // الصلاحية المطلوبة تُذكر بالاسم في الاستجابة: من يقرأ الرفض يعرف ما ينقصه بلا تصوير الشاشة
     // The required code is named in the response, so whoever reads the refusal knows what is
     // missing without a screenshot of the client.
+    // البند الثالث نصّ (صلاحية واحدة) أو قائمة (مسار «أيٍّ من» متعدد الأكواد)؛ والرفض يعيد كل
+    // الأكواد المطلوبة كما هي، فالاختبار يطابق القائمة كاملة لا عنصراً واحداً.
+    // The third element is a single code or a list (any-of routes); the refusal echoes every
+    // required code, so the test matches the whole list, not one element.
     $cases = [
         ['get', '/api/customers', 'customers.view'],
         ['post', '/api/customers', 'customers.create'],
         ['delete', '/api/customers/1', 'customers.delete'],
         ['get', '/api/customers/1/statement', 'customers.statement'],
         ['get', '/api/workers/employees', 'employees.view'],
-        ['get', '/api/workers/cutters/1/statement', 'cutters.statement'],
-        ['get', '/api/workers/cutters/1/work-report', 'cutters.statement'],
-        ['get', '/api/workers/tailors/1/work-report', 'tailors.statement'],
-        ['get', '/api/workers/cutters/group-work-report', 'cutters.statement'],
-        ['get', '/api/workers/tailors/group-work-report', 'tailors.statement'],
+        ['get', '/api/workers/cutters/1/statement', 'cutters.statement_financial'],
+        ['get', '/api/workers/cutters/1/work-report', 'cutters.statement_work'],
+        ['get', '/api/workers/tailors/1/work-report', 'tailors.statement_work'],
+        ['get', '/api/workers/cutters/group-work-report', 'cutters.statement_work'],
+        ['get', '/api/workers/tailors/group-work-report', 'tailors.statement_work'],
         ['patch', '/api/workers/tailors/1/toggle', 'tailors.toggle'],
-        ['get', '/api/accounts/tree', 'accounts.view'],
+        ['get', '/api/accounts/tree', [
+            'accounts.view',
+            'accounts.structure_manage',
+            'accounts.statement_group',
+            'accounts.statement_detail',
+        ]],
         ['post', '/api/accounts/sub-group', 'accounts.structure_manage'],
-        ['get', '/api/accounts/chart/1/statement', 'accounts.statement'],
-        ['get', '/api/accounts/group-statement', 'accounts.statement'],
+        ['get', '/api/accounts/chart/1/statement', 'accounts.statement_financial'],
+        ['get', '/api/accounts/group-statement', 'accounts.statement_group'],
         ['get', '/api/currencies/1/prices', 'currencies.prices_view'],
         ['put', '/api/currencies/1', 'currencies.update'],
         ['get', '/api/invoices', 'invoices.view'],
@@ -184,10 +193,11 @@ test('an ungranted caller is refused per module with the named permission', func
     ];
 
     foreach ($cases as [$verb, $path, $code]) {
+        $expected = is_array($code) ? $code : [$code];
         $response = $this->json($verb, $path);
 
         $response->assertForbidden()
-            ->assertJsonPath('errors.permission', [$code]);
+            ->assertJsonPath('errors.permission', $expected);
     }
 });
 

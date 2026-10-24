@@ -228,7 +228,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/workers/employees', [WorkerController::class, 'storeEmployee'])
         ->middleware('permission:employees.create');
     Route::get('/workers/employees/{id}/statement', [WorkerController::class, 'statementEmployee'])
-        ->middleware('permission:employees.statement')
+        ->middleware('permission:employees.statement_financial')
         ->where('id', '[0-9]+');
     Route::put('/workers/employees/{id}', [WorkerController::class, 'updateEmployee'])
         ->middleware('permission:employees.update')
@@ -246,13 +246,13 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/workers/cutters', [WorkerController::class, 'storeCutter'])
         ->middleware('permission:cutters.create');
     Route::get('/workers/cutters/{id}/statement', [WorkerController::class, 'statementCutter'])
-        ->middleware('permission:cutters.statement')
+        ->middleware('permission:cutters.statement_financial')
         ->where('id', '[0-9]+');
     Route::get('/workers/cutters/{id}/work-report', [WorkerController::class, 'workReportCutter'])
-        ->middleware('permission:cutters.statement')
+        ->middleware('permission:cutters.statement_work')
         ->where('id', '[0-9]+');
     Route::get('/workers/cutters/group-work-report', [WorkerController::class, 'groupWorkReportCutter'])
-        ->middleware('permission:cutters.statement');
+        ->middleware('permission:cutters.statement_work');
     Route::put('/workers/cutters/{id}', [WorkerController::class, 'updateCutter'])
         ->middleware('permission:cutters.update')
         ->where('id', '[0-9]+');
@@ -269,13 +269,13 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/workers/tailors', [WorkerController::class, 'storeTailor'])
         ->middleware('permission:tailors.create');
     Route::get('/workers/tailors/{id}/statement', [WorkerController::class, 'statementTailor'])
-        ->middleware('permission:tailors.statement')
+        ->middleware('permission:tailors.statement_financial')
         ->where('id', '[0-9]+');
     Route::get('/workers/tailors/{id}/work-report', [WorkerController::class, 'workReportTailor'])
-        ->middleware('permission:tailors.statement')
+        ->middleware('permission:tailors.statement_work')
         ->where('id', '[0-9]+');
     Route::get('/workers/tailors/group-work-report', [WorkerController::class, 'groupWorkReportTailor'])
-        ->middleware('permission:tailors.statement');
+        ->middleware('permission:tailors.statement_work');
     Route::put('/workers/tailors/{id}', [WorkerController::class, 'updateTailor'])
         ->middleware('permission:tailors.update')
         ->where('id', '[0-9]+');
@@ -292,27 +292,34 @@ Route::middleware('auth:sanctum')->group(function () {
 //
 // تقسيم الصلاحية هنا على وزن الخطر: قراءة الهيكل `accounts.view`، وبنوده كتابةً
 // `accounts.create/update`، وتعديل الشجرة نفسها (مجموعات جزئية) `accounts.structure_manage`،
-// والكشوف `accounts.statement` لأنها تُخرج أرصدة كل المحفظة.
+// ولكل كشف مالي صلاحية مستقلة: `statement_financial` / `statement_group` / `statement_detail`.
 // The split follows risk: reading the tree is `accounts.view`, its rows are `create/update`,
-// reshaping the hierarchy itself is `accounts.structure_manage`, and statements are
-// `accounts.statement` because they expose every balance in the book.
+// reshaping the hierarchy itself is `accounts.structure_manage`, and each financial statement has
+// its own grant: `statement_financial` / `statement_group` / `statement_detail`.
+//
+// القوائم المساعدة (اختر الحساب/التسلسل الهرمي) تُفتح بـ «أيٍّ من» العرض أو صلاحية الكشف التي
+// تحتاجها، حتى لا تظهر شاشة الكشف لحامل صلاحية كشف وحده بقوائم اختيار فارغة (403 صامت).
+// Helper/picker reads accept ANY-of (view OR the statement that needs them), so a statement-only
+// user never opens a statement screen with silently-empty pickers.
 // ============================================================
 Route::middleware('auth:sanctum')->group(function () {
     // هيكل الشجرة المحاسبية / chart-of-accounts structure reads
     Route::get('/accounts/account', [AccountController::class, 'getAccounts'])
-        ->middleware('permission:accounts.view');
+        ->middleware('permission:accounts.view,accounts.structure_manage,accounts.statement_group,accounts.statement_detail');
     Route::get('/accounts/main', [AccountController::class, 'getAccMain'])
-        ->middleware('permission:accounts.view');
+        ->middleware('permission:accounts.view,accounts.structure_manage,accounts.statement_group,accounts.statement_detail');
     Route::get('/accounts/sub', [AccountController::class, 'getAccSub'])
-        ->middleware('permission:accounts.view');
+        ->middleware('permission:accounts.view,accounts.structure_manage,accounts.statement_group,accounts.statement_detail');
     Route::get('/accounts/sub-group', [AccountController::class, 'getAccSubGroup'])
-        ->middleware('permission:accounts.view');
+        ->middleware('permission:accounts.view,accounts.structure_manage,accounts.statement_group,accounts.statement_detail');
     Route::get('/accounts/tree', [AccountController::class, 'getAccountTree'])
-        ->middleware('permission:accounts.view');
+        ->middleware('permission:accounts.view,accounts.structure_manage,accounts.statement_group,accounts.statement_detail');
 
     // الحسابات المالية (CHART_ACC) / ledger accounts
+    // قائمة الحسابات تُستخدم في منتقي «كشف حساب مالي»، فتقبل صلاحية الكشف أيضاً
+    // The chart list powers the financial-statement picker, so it also accepts that grant.
     Route::get('/accounts/chart', [AccountController::class, 'getChartAccounts'])
-        ->middleware('permission:accounts.view');
+        ->middleware('permission:accounts.view,accounts.statement_financial');
     Route::post('/accounts/chart', [AccountController::class, 'createChartAccount'])
         ->middleware('permission:accounts.create');
     Route::put('/accounts/chart/{accNo}', [AccountController::class, 'updateChartAccount'])
@@ -327,14 +334,15 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:accounts.structure_manage')
         ->where('groupId', '[0-9]+');
 
-    // كشوفات الحسابات / statements
+    // كشوفات الحسابات / statements — لكل كشف صلاحيته الدقيقة
+    // Each statement carries its own precise grant.
     Route::get('/accounts/chart/{accNo}/statement', [AccountController::class, 'getAccountStatement'])
-        ->middleware('permission:accounts.statement')
+        ->middleware('permission:accounts.statement_financial')
         ->where('accNo', '[0-9]+');
     Route::get('/accounts/statement-detail', [AccountController::class, 'getDetailedStatement'])
-        ->middleware('permission:accounts.statement');
+        ->middleware('permission:accounts.statement_detail');
     Route::get('/accounts/group-statement', [AccountController::class, 'getGroupStatement'])
-        ->middleware('permission:accounts.statement');
+        ->middleware('permission:accounts.statement_group');
 });
 
 // ============================================================

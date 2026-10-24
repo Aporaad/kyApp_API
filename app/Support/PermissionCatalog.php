@@ -106,20 +106,25 @@ final class PermissionCatalog
             ],
             'extra' => [
                 'toggle' => 'تفعيل أو إيقاف الموظف',
-                'statement' => 'عرض كشف حساب الموظف',
+                // كشف حساب مالي وكشف عمل صار لكل سجل عامل صلاحيتان مستقلّتان: القدرة على
+                // إظهار أرصدة الموظف ليست هي القدرة على إظهار سجل عمله/حضوره.
+                // Financial balance and work/attendance are separate grants per worker registry.
+                'statement_financial' => 'كشف حساب مالي للموظف',
+                'statement_work' => 'كشف عمل للموظف',
             ],
         ],
         'cutters' => [
             'name_ar' => 'القصاصين',
             'core' => [
                 'view' => 'عرض قائمة القصاصين',
-                'create' => 'إضافة قَصّاب',
-                'update' => 'تعديل بيانات القَصّاب',
-                'delete' => 'حذف القَصّاب',
+                'create' => 'إضافة قصاص',
+                'update' => 'تعديل بيانات القصاص',
+                'delete' => 'حذف القصاص',
             ],
             'extra' => [
-                'toggle' => 'تفعيل أو إيقاف القَصّاب',
-                'statement' => 'عرض كشف حساب القَصّاب',
+                'toggle' => 'تفعيل أو إيقاف القصاص',
+                'statement_financial' => 'كشف حساب مالي للقصاص',
+                'statement_work' => 'كشف عمل للقصاص',
             ],
         ],
         'tailors' => [
@@ -132,7 +137,8 @@ final class PermissionCatalog
             ],
             'extra' => [
                 'toggle' => 'تفعيل أو إيقاف الخيّاط',
-                'statement' => 'عرض كشف حساب الخيّاط',
+                'statement_financial' => 'كشف حساب مالي للخياط',
+                'statement_work' => 'كشف عمل للخياط',
             ],
         ],
         'accounts' => [
@@ -145,7 +151,12 @@ final class PermissionCatalog
             ],
             'extra' => [
                 'structure_manage' => 'إدارة هيكل الشجرة المحاسبية',
-                'statement' => 'عرض كشف حساب مالي',
+                // كل كشف مالي له صلاحية مستقلة بدل `accounts.statement` العام: كشف الحساب
+                // المالي، وميزان مجموعة الحسابات الجزئية، والكشف التحليلي المفصّل.
+                // Each financial statement now carries its own code instead of one broad grant.
+                'statement_financial' => 'كشف حساب مالي',
+                'statement_group' => 'كشف حساب مجموعة حسابات جزئية',
+                'statement_detail' => 'كشف حساب تحليلي مفصل',
                 'print' => 'طباعة الكشوف المالية',
                 'export' => 'تصدير الكشوف المالية',
             ],
@@ -419,6 +430,10 @@ final class PermissionCatalog
             'print' => 'Print',
             'export' => 'Export',
             'statement' => 'Statement',
+            'statement_financial' => 'Financial statement',
+            'statement_group' => 'Group trial-balance statement',
+            'statement_detail' => 'Detailed analytical statement',
+            'statement_work' => 'Work statement',
             'toggle' => 'Activate / Deactivate',
             'deliver' => 'Deliver',
             'edit_limit' => 'Edit credit limit',

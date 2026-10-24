@@ -49,9 +49,10 @@ function ibacAdminUser(): User
 }
 
 test('catalog gives every module its core actions in fixed order', function () {
-    // 127 = 97 السابقة + 30 لخمسة وحدات جديدة (services/providers/sms/whatsapp/jobs)
-    // 127 = the prior 97 plus 30 across the five new modules (services/providers/sms/whatsapp/jobs).
-    expect(PermissionCatalog::count())->toBe(127);
+    // 132 = 127 السابقة + 5 صافية: إزالة 4 أكواد كشف عامة (accounts/employees/cutters/tailors.statement)
+    // وإضافة 9 دقيقة (3 للحسابات + كشفان لكل سجل عامل).
+    // 132 = the prior 127 plus a net 5: four broad statement codes retired, nine precise ones added.
+    expect(PermissionCatalog::count())->toBe(132);
 
     foreach (PermissionCatalog::grouped() as $module) {
         $coreCodes = array_map(
