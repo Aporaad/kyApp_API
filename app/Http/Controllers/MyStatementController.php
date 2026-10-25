@@ -46,9 +46,10 @@ class MyStatementController extends Controller
         }
 
         try {
-            // جلب بيانات الحساب من CHART_ACC
+            // جلب بيانات الحساب من CHART_ACC (بلا عمود BALANCE المخزّن — رصيد الحساب
+            // يُحسب من الحركات أدناه)
             $accRow = DB::connection('oracle')->selectOne(
-                'SELECT ACC_NO, ACC_NAME, BALANCE, GROUP_ID FROM ACCOUNTS.CHART_ACC WHERE ACC_NO = :no',
+                'SELECT ACC_NO, ACC_NAME, GROUP_ID FROM ACCOUNTS.CHART_ACC WHERE ACC_NO = :no',
                 ['no' => $accNo]
             );
             if (! $accRow) {
@@ -121,6 +122,9 @@ class MyStatementController extends Controller
             $totalCredit = 0.0;
             $firstDate = null;
             $lastDate = null;
+            // رصيد الحساب النهائي: صافي كل حركاته بلا فلتر تاريخ (يُعرض بجانب الحساب)
+            // Final account balance: net of every movement, date filters ignored.
+            $ledgerBalance = 0.0;
             $allEntries = [];
 
             foreach ($rows as $row) {
@@ -128,6 +132,8 @@ class MyStatementController extends Controller
                 $rawDate = $r['RAW_DATE'] ?? $r['raw_date'] ?? null;
                 $entryDate = $r['ENTRY_DATE'] ?? $r['entry_date'] ?? null;
                 $mnt = (float) ($r['ENTRY_MNT'] ?? $r['entry_mnt'] ?? 0);
+
+                $ledgerBalance += $mnt;
 
                 // الحركات الأقدم من بداية الفترة تُحسب ضمن الرصيد الافتتاحي فقط
                 if ($fromDateFilter && $rawDate && $rawDate < $fromDateFilter) {
@@ -216,7 +222,9 @@ class MyStatementController extends Controller
                     'account' => [
                         'acc_no' => (int) ($accArr['ACC_NO'] ?? $accArr['acc_no'] ?? $accNo),
                         'acc_name' => $accName,
-                        'balance' => (float) ($accArr['BALANCE'] ?? $accArr['balance'] ?? 0),
+                        // الرصيد النهائي المحسوب من الحركات (لا CHART_ACC.BALANCE)
+                        // Computed final balance, never the stored column.
+                        'balance' => $ledgerBalance,
                         'group_id' => isset($accArr['GROUP_ID']) || isset($accArr['group_id'])
                             ? (int) ($accArr['GROUP_ID'] ?? $accArr['group_id'])
                             : null,

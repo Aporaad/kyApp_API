@@ -205,7 +205,7 @@ class AccountController extends Controller
             $sql = "
                 SELECT * FROM (
                     SELECT a.*, ROWNUM rnum FROM (
-                        SELECT ACC_NO, ACC_NAME, BALANCE, TO_CHAR(ACC_DATE,'YYYY-MM-DD') as ACC_DATE,
+                        SELECT ACC_NO, ACC_NAME, TO_CHAR(ACC_DATE,'YYYY-MM-DD') as ACC_DATE,
                                SEQ, GROUP_ID, LIMITED_BALANCE, STOPPING_ACC
                         FROM CHART_ACC $whereClause
                         ORDER BY ACC_NO
@@ -227,7 +227,6 @@ class AccountController extends Controller
                 return [
                     'acc_no' => (int) ($r['ACC_NO'] ?? $r['acc_no'] ?? 0),
                     'acc_name' => ArabicEncoding::fixMojibake($r['ACC_NAME'] ?? $r['acc_name'] ?? ''),
-                    'balance' => (float) ($r['BALANCE'] ?? $r['balance'] ?? 0),
                     'acc_date' => $r['ACC_DATE'] ?? $r['acc_date'] ?? null,
                     'seq' => (int) ($r['SEQ'] ?? $r['seq'] ?? 0),
                     'group_id' => isset($r['GROUP_ID']) || isset($r['group_id']) ? (int) ($r['GROUP_ID'] ?? $r['group_id']) : null,
@@ -235,6 +234,20 @@ class AccountController extends Controller
                     'stopping_acc' => isset($r['STOPPING_ACC']) || isset($r['stopping_acc']) ? (int) ($r['STOPPING_ACC'] ?? $r['stopping_acc']) : null,
                 ];
             }, $rows);
+
+            // الرصيد المعروض بجانب الحساب المالي = صافي كل حركاته (مدين − دائن) من
+            // ENTRY_SUB، ولا يُقرأ من CHART_ACC.BALANCE: العمود المخزّن لقطة قديمة
+            // متقادمة (تحقق فعلي: 19,126 حساباً من 20,954 يخالف فيها المخزّن الحركات،
+            // و1,162 حساباً له حركات ومخزّنه صفر) — وهو نفس الرقم الذي تعرضه قوائم
+            // اختيار الحساب المالي ونموذجا إنشاء/تعديل المستخدم.
+            // The balance shown beside a chart account is its ledger net (DR − CR) over
+            // the whole history, computed from ENTRY_SUB. The stored CHART_ACC.BALANCE
+            // column is a stale snapshot (verified: 19,126 of 20,954 accounts disagree
+            // with their movements) and is never displayed.
+            $balances = $this->movementBalancesFor(array_column($data, 'acc_no'), null, null);
+            foreach ($data as $i => $row) {
+                $data[$i]['balance'] = $balances[$row['acc_no']]['net'] ?? 0.0;
+            }
 
             return response()->json([
                 'success' => true,
@@ -637,8 +650,10 @@ class AccountController extends Controller
     public function getAccountStatement(Request $request, $accNo)
     {
         try {
+            // بلا عمود BALANCE المخزّن: رصيد الحساب النهائي يُحسب من حركاته أدناه
+            // No stored BALANCE column: the final balance is derived from the ledger.
             $accRow = DB::connection('oracle')->selectOne(
-                'SELECT ACC_NO, ACC_NAME, BALANCE, GROUP_ID FROM CHART_ACC WHERE ACC_NO = :no',
+                'SELECT ACC_NO, ACC_NAME, GROUP_ID FROM CHART_ACC WHERE ACC_NO = :no',
                 ['no' => $accNo]
             );
             if (! $accRow) {
@@ -718,6 +733,10 @@ class AccountController extends Controller
             $totalCredit = 0.0;
             $firstDate = null;
             $lastDate = null;
+            // رصيد الحساب النهائي: صافي كل حركاته بلا أي فلتر تاريخ — هو ما يُعرض
+            // بجانب الحساب المالي، ولا يأتي من CHART_ACC.BALANCE المخزّن.
+            // The account's final balance: net of every movement, date filters ignored.
+            $ledgerBalance = 0.0;
             $allEntries = []; // كل الحركات المفلترة بالمدة (قبل الترقيم)
 
             foreach ($rows as $row) {
@@ -725,6 +744,8 @@ class AccountController extends Controller
                 $rawDate = $r['RAW_DATE'] ?? $r['raw_date'] ?? null;
                 $entryDate = $r['ENTRY_DATE'] ?? $r['entry_date'] ?? null;
                 $mnt = (float) ($r['ENTRY_MNT'] ?? $r['entry_mnt'] ?? 0);
+
+                $ledgerBalance += $mnt;
 
                 // الحركات الأقدم من بداية الفترة تُجمع في الرصيد الافتتاحي فقط
                 // Rows older than the requested start date only feed the opening balance.
@@ -815,7 +836,9 @@ class AccountController extends Controller
                     'account' => [
                         'acc_no' => (int) ($accArr['ACC_NO'] ?? $accArr['acc_no'] ?? $accNo),
                         'acc_name' => $accName,
-                        'balance' => (float) ($accArr['BALANCE'] ?? $accArr['balance'] ?? 0),
+                        // الرصيد النهائي المحسوب من الحركات (لا CHART_ACC.BALANCE)
+                        // Computed final balance, never the stored column.
+                        'balance' => $ledgerBalance,
                         'group_id' => isset($accArr['GROUP_ID']) || isset($accArr['group_id']) ? (int) ($accArr['GROUP_ID'] ?? $accArr['group_id']) : null,
                     ],
                     'transactions' => $transactions,
@@ -1041,8 +1064,18 @@ class AccountController extends Controller
      *
      * يعرض لكل حساب مالي (CHART_ACC) داخل النطاق:
      * مدين/دائن مفصولين إلى عملة محلية (CUR_NO = 1 = يمني) وعملة أجنبية،
-     * مع الرصيد. إن حُددت فترة زمنية تُحسب الإحصائيات من حركات الفترة فقط،
-     * وإلا تُحسب من كامل السجل التاريخي للحساب.
+     * مع رصيدين لكل سطر:
+     *   - balance        : الرصيد النهائي للحساب = صافي كل حركاته في كامل السجل
+     *                      (لا يُقرأ من CHART_ACC.BALANCE أبداً).
+     *   - period_balance : صافي حركة الفترة المختارة (يساوي الرصيد النهائي عند
+     *                      عدم اختيار فترة). عمود «رصيد الفترة» يُعرض في الواجهة
+     *                      فقط عندما يكون has_period = true.
+     * مدين/دائن في التقرير تخصّ الفترة المختارة (أو كل السجل عند ترك الفترة فارغة).
+     *
+     * Two balances are returned per row: `balance` is the account's final balance over
+     * the whole ledger (never CHART_ACC.BALANCE), and `period_balance` is the net of the
+     * selected window. The UI renders the extra «period balance» column only when
+     * `has_period` is true.
      *
      * Query params: acc_no, acc_sub, acc_part, group_id, from_date, to_date
      */
@@ -1113,20 +1146,26 @@ class AccountController extends Controller
                 ], 400);
             }
 
-            // ── فترة اختيارية، تُبنى ديناميكياً داخل شرط الربط (وليس في WHERE)
-            //    حتى تبقى الحسابات بدون حركات في الفترة ظاهرة بأصفار ──
+            // ── فترة اختيارية تُترجم إلى تعبير SUM(CASE …) لا إلى شرط في JOIN:
+            //    بذلك يخرج من المرور نفسه عمودا «رصيد الفترة» و«الرصيد النهائي»،
+            //    وتبقى الحسابات التي لا حركة لها في الفترة ظاهرة بأصفار.
+            // The optional period becomes a SUM(CASE …) expression rather than a JOIN
+            // condition, so one pass yields both the period balance and the account's
+            // final balance, and accounts with no movement in the period still appear.
             $fromIso = $fromDateParam ? $this->parseStatementDateToIso($fromDateParam) : null;
             $toIso = $toDateParam ? $this->parseStatementDateToIso($toDateParam) : null;
 
-            $emDateCondition = '';
+            $periodCond = '1 = 1';
             if ($fromIso) {
-                $emDateCondition .= " AND em.ENTRY_DATE >= TO_DATE(:from_date, 'YYYY-MM-DD')";
+                $periodCond .= " AND em.ENTRY_DATE >= TO_DATE(:from_date, 'YYYY-MM-DD')";
                 $scopeParams['from_date'] = $fromIso;
             }
             if ($toIso) {
-                $emDateCondition .= " AND em.ENTRY_DATE <= TO_DATE(:to_date, 'YYYY-MM-DD')";
+                $periodCond .= " AND em.ENTRY_DATE <= TO_DATE(:to_date, 'YYYY-MM-DD')";
                 $scopeParams['to_date'] = $toIso;
             }
+
+            $hasPeriod = $fromIso !== null || $toIso !== null;
 
             // ملاحظة جوهرية تم التحقق منها من قاعدة البيانات: حركات العملة المحلية (يمني)
             // لا تحتوي على SEQ_PRICE على الإطلاق (يبقي NULL)، بينما حركات العملات الأجنبية
@@ -1136,27 +1175,37 @@ class AccountController extends Controller
             // leave it NULL (no FX price row needed). So "no linked CUR_PRICE row" means
             // local currency, NOT unknown/foreign — the opposite of the initial assumption.
             //
-            // يُربط ENTRY_SUB مع ENTRY_MAIN داخل مجموعة اقواس (joined table) لضمان ان
-            // فلتر التاريخ يؤثر على es نفسه وليس على em فقط (كان الخطأ السابق ان
-            // فلتر التاريخ داخل ON الخاص ب em وحده كان يُبقي صفوف es خارج الفترة
-            // داخلة في المجاميع رغم استبعاد حقول em).
-            $esJoin = "ENTRY_SUB es INNER JOIN ENTRY_MAIN em ON es.ENTRY_NO = em.ENTRY_NO{$emDateCondition}";
+            // يُربط ENTRY_SUB مع ENTRY_MAIN دون شرط تاريخ: التاريخ يُطبَّق داخل
+            // تعبيرات SUM(CASE …) كي تُحسب مجاميع الفترة والرصيد النهائي معاً.
+            // ENTRY_SUB is joined to ENTRY_MAIN without a date predicate; the period is
+            // applied inside the SUM(CASE …) expressions so both figures come from one
+            // scan instead of two.
+            $esJoin = 'ENTRY_SUB es INNER JOIN ENTRY_MAIN em ON es.ENTRY_NO = em.ENTRY_NO';
 
+            // القاعدة: كل مجاميع مدين/دائن ورصيد الفترة تُقيَّد بشرط الفترة، أما
+            // «الرصيد النهائي» فهو صافي كل حركات الحساب بلا أي تاريخ — ولا يُقرأ من
+            // CHART_ACC.BALANCE المخزّن لأنه لقطة قديمة متقادمة (تحقق: 19,126 حساباً
+            // من 20,954 يخالف فيه المخزّن مجموع الحركات).
+            // Period DR/CR and period balance carry the date predicate; the final
+            // balance is the account's net over the whole history and is never read
+            // from the stale CHART_ACC.BALANCE snapshot column.
             $sql = "
-                SELECT c.ACC_NO, c.ACC_NAME, c.BALANCE,
-                       NVL(SUM(CASE WHEN (cp.CUR_NO IS NULL OR cp.CUR_NO = 1) AND es.ENTRY_MNT > 0 THEN es.ENTRY_MNT      ELSE 0 END), 0) AS LOCAL_DEBIT,
-                       NVL(SUM(CASE WHEN (cp.CUR_NO IS NULL OR cp.CUR_NO = 1) AND es.ENTRY_MNT < 0 THEN ABS(es.ENTRY_MNT) ELSE 0 END), 0) AS LOCAL_CREDIT,
-                       NVL(SUM(CASE WHEN cp.CUR_NO IS NOT NULL AND cp.CUR_NO <> 1 AND es.ENTRY_MNT > 0 THEN es.ENTRY_MNT      ELSE 0 END), 0) AS FOREIGN_DEBIT,
-                       NVL(SUM(CASE WHEN cp.CUR_NO IS NOT NULL AND cp.CUR_NO <> 1 AND es.ENTRY_MNT < 0 THEN ABS(es.ENTRY_MNT) ELSE 0 END), 0) AS FOREIGN_CREDIT,
-                       NVL(SUM(CASE WHEN cp.CUR_NO IS NULL OR cp.CUR_NO = 1 THEN es.ENTRY_MNT ELSE 0 END), 0) AS LOCAL_NET,
-                       NVL(SUM(CASE WHEN cp.CUR_NO IS NOT NULL AND cp.CUR_NO <> 1 THEN es.ENTRY_MNT ELSE 0 END), 0) AS FOREIGN_NET,
+                SELECT c.ACC_NO, c.ACC_NAME,
+                       NVL(SUM(CASE WHEN ({$periodCond}) AND (cp.CUR_NO IS NULL OR cp.CUR_NO = 1) AND es.ENTRY_MNT > 0 THEN es.ENTRY_MNT      ELSE 0 END), 0) AS LOCAL_DEBIT,
+                       NVL(SUM(CASE WHEN ({$periodCond}) AND (cp.CUR_NO IS NULL OR cp.CUR_NO = 1) AND es.ENTRY_MNT < 0 THEN ABS(es.ENTRY_MNT) ELSE 0 END), 0) AS LOCAL_CREDIT,
+                       NVL(SUM(CASE WHEN ({$periodCond}) AND cp.CUR_NO IS NOT NULL AND cp.CUR_NO <> 1 AND es.ENTRY_MNT > 0 THEN es.ENTRY_MNT      ELSE 0 END), 0) AS FOREIGN_DEBIT,
+                       NVL(SUM(CASE WHEN ({$periodCond}) AND cp.CUR_NO IS NOT NULL AND cp.CUR_NO <> 1 AND es.ENTRY_MNT < 0 THEN ABS(es.ENTRY_MNT) ELSE 0 END), 0) AS FOREIGN_CREDIT,
+                       NVL(SUM(CASE WHEN ({$periodCond}) AND (cp.CUR_NO IS NULL OR cp.CUR_NO = 1) THEN es.ENTRY_MNT ELSE 0 END), 0) AS LOCAL_NET,
+                       NVL(SUM(CASE WHEN ({$periodCond}) AND cp.CUR_NO IS NOT NULL AND cp.CUR_NO <> 1 THEN es.ENTRY_MNT ELSE 0 END), 0) AS FOREIGN_NET,
+                       NVL(SUM(CASE WHEN cp.CUR_NO IS NULL OR cp.CUR_NO = 1 THEN es.ENTRY_MNT ELSE 0 END), 0) AS LOCAL_NET_ALL,
+                       NVL(SUM(CASE WHEN cp.CUR_NO IS NOT NULL AND cp.CUR_NO <> 1 THEN es.ENTRY_MNT ELSE 0 END), 0) AS FOREIGN_NET_ALL,
                        MAX(CASE WHEN cp.CUR_NO IS NOT NULL AND cp.CUR_NO <> 1 THEN cc.CODE END) AS FOREIGN_CUR_CODE
                 FROM CHART_ACC c
                 LEFT JOIN ({$esJoin}) ON es.ACC_NO = c.ACC_NO
                 LEFT JOIN CUR_PRICE cp ON cp.SEQ = es.SEQ_PRICE
                 LEFT JOIN CUR_CODE cc ON cc.CUR_NO = cp.CUR_NO
                 WHERE {$scopeWhere}
-                GROUP BY c.ACC_NO, c.ACC_NAME, c.BALANCE
+                GROUP BY c.ACC_NO, c.ACC_NAME
                 ORDER BY c.ACC_NO
             ";
 
@@ -1169,6 +1218,7 @@ class AccountController extends Controller
                 'foreign_debit' => 0.0,
                 'foreign_credit' => 0.0,
                 'balance' => 0.0,
+                'period_balance' => 0.0,
             ];
 
             foreach ($rows as $row) {
@@ -1179,7 +1229,15 @@ class AccountController extends Controller
                 $foreignCredit = (float) ($r['FOREIGN_CREDIT'] ?? $r['foreign_credit'] ?? 0);
                 $localNet = (float) ($r['LOCAL_NET'] ?? $r['local_net'] ?? 0);
                 $foreignNet = (float) ($r['FOREIGN_NET'] ?? $r['foreign_net'] ?? 0);
-                $balance = $localNet + $foreignNet;
+                $localNetAll = (float) ($r['LOCAL_NET_ALL'] ?? $r['local_net_all'] ?? 0);
+                $foreignNetAll = (float) ($r['FOREIGN_NET_ALL'] ?? $r['foreign_net_all'] ?? 0);
+
+                // رصيد الفترة = صافي حركة الفترة المختارة،
+                // والرصيد النهائي = صافي كل حركات الحساب مهما كانت الفترة.
+                // Period balance = net of the selected window; final balance = net of
+                // the account's entire ledger.
+                $periodBalance = $localNet + $foreignNet;
+                $finalBalance = $localNetAll + $foreignNetAll;
 
                 // رمز العملة المعروض للسطر: أجنبي إن وُجدت حركة أجنبية وحدها،
                 // وإلا يمني (العملة المحلية الافتراضية للمؤسسة)
@@ -1193,7 +1251,8 @@ class AccountController extends Controller
                 $totals['local_credit'] += $localCredit;
                 $totals['foreign_debit'] += $foreignDebit;
                 $totals['foreign_credit'] += $foreignCredit;
-                $totals['balance'] += $balance;
+                $totals['balance'] += $finalBalance;
+                $totals['period_balance'] += $periodBalance;
 
                 $result[] = [
                     'acc_no' => (int) ($r['ACC_NO'] ?? $r['acc_no'] ?? 0),
@@ -1203,8 +1262,8 @@ class AccountController extends Controller
                     'local_credit' => $localCredit,
                     'foreign_debit' => $foreignDebit,
                     'foreign_credit' => $foreignCredit,
-                    'balance' => $balance,
-                    'current_balance' => (float) ($r['BALANCE'] ?? $r['balance'] ?? 0),
+                    'balance' => $finalBalance,
+                    'period_balance' => $periodBalance,
                 ];
             }
 
@@ -1218,6 +1277,9 @@ class AccountController extends Controller
                     'as_of_date' => date('d/m/Y'),
                     'from_date' => $fromDateParam ?: null,
                     'to_date' => $toDateParam ?: null,
+                    // عمود «رصيد الفترة» يظهر في الواجهة فقط عند وجود فترة مختارة
+                    // The «period balance» column is only rendered when a period is set.
+                    'has_period' => $hasPeriod,
                     'rows' => $result,
                     'totals' => $totals,
                 ],
