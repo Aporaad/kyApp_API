@@ -434,17 +434,22 @@ class WorkerController extends Controller
     /**
      * كشف الحساب لأي عامل بناءً على ACC_NO المخزن في السجل
      *
+     * ملاحظتان جوهريتان (نفس قواعد كشوف العملاء والحسابات):
+     * 1. البيان: `NVL(TRIM(ENTRY_SUB.SUB_DETAILS), ENTRY_MAIN.DETAILS)` — التفصيل
+     *    الفرعي أولاً ثم بيان القيد الرئيسي عند فراغه.
+     * 2. الرصيد: `ENTRY_SUB.BALANCE_S` لا يُقرأ إطلاقاً — لقطة مخزّنة لا تتبع
+     *    الترتيب الزمني؛ الرصيد والرصيد النهائي محسوبان من `ENTRY_MNT`.
+     *
      * الاستعلام المستخدم:
-     * SELECT ACCOUNTS.ENTRY_SUB.ENTRY_NO,
-     *        SUBSTR(ACCOUNTS.ENTRY_SUB.ENTRY_NO,1,1)||SUBSTR(ACCOUNTS.ENTRY_SUB.ENTRY_NO,7,4) SUB_ENTRY_NO,
-     *        ENTRY_MAIN.ENTRY_DATE, ENTRY_TYPE.ENTRY_TYPE_NAME, ENTRY_MAIN.DETAILS,
-     *        ENTRY_SUB.BALANCE_S, ENTRY_SUB.ENTRY_MNT
-     * FROM ACCOUNTS.ENTRY_MAIN, ACCOUNTS.ENTRY_SUB, ACCOUNTS.ENTRY_TYPE
-     * WHERE ENTRY_SUB.ACC_NO = :acc_no
-     *   AND ENTRY_MAIN.ENTRY_DATE BETWEEN :from_date AND :to_date
-     *   AND ENTRY_MAIN.entry_type_no = ENTRY_TYPE.ENTRY_TYPE_no
-     *   AND ACCOUNTS.ENTRY_SUB.ENTRY_NO = ACCOUNTS.ENTRY_MAIN.ENTRY_NO
-     * ORDER BY entry_date
+     * SELECT es.ENTRY_NO,
+     *        SUBSTR(TO_CHAR(es.ENTRY_NO),1,1)||SUBSTR(TO_CHAR(es.ENTRY_NO),7,4) SUB_ENTRY_NO,
+     *        em.ENTRY_DATE, et.ENTRY_TYPE_NAME,
+     *        NVL(TRIM(es.SUB_DETAILS), em.DETAILS) DETAILS, es.ENTRY_MNT
+     * FROM ACCOUNTS.ENTRY_SUB es
+     * JOIN ACCOUNTS.ENTRY_MAIN em ON em.ENTRY_NO = es.ENTRY_NO
+     * JOIN ACCOUNTS.ENTRY_TYPE et ON et.ENTRY_TYPE_NO = em.ENTRY_TYPE_NO
+     * WHERE es.ACC_NO = :acc_no
+     * ORDER BY em.ENTRY_DATE, es.ENTRY_NO, es.SEQ
      */
     private function fetchStatement(string $type, Request $request, $id): JsonResponse
     {
@@ -491,23 +496,23 @@ class WorkerController extends Controller
                 }
             }
 
-            // استعلام جميع الحركات لحساب العامل
+            // استعلام جميع الحركات لحساب العامل — البيان من SUB_DETAILS أولاً ثم بيان
+            // القيد الرئيسي، وبلا أي قراءة لـ BALANCE_S (انظر تعليق الدالة أعلاه).
+            // All movements for the worker's account; description from the sub-entry
+            // text first, main entry text as fallback; BALANCE_S is never selected.
             $sql = "
-                SELECT ACCOUNTS.ENTRY_SUB.ENTRY_NO,
-                       SUBSTR(TO_CHAR(ACCOUNTS.ENTRY_SUB.ENTRY_NO), 1, 1) || SUBSTR(TO_CHAR(ACCOUNTS.ENTRY_SUB.ENTRY_NO), 7, 4) AS SUB_ENTRY_NO,
-                       TO_CHAR(ACCOUNTS.ENTRY_MAIN.ENTRY_DATE, 'DD/MM/YYYY') AS ENTRY_DATE,
-                       TO_CHAR(ACCOUNTS.ENTRY_MAIN.ENTRY_DATE, 'YYYY-MM-DD') AS RAW_DATE,
-                       ACCOUNTS.ENTRY_TYPE.ENTRY_TYPE_NAME,
-                       ACCOUNTS.ENTRY_MAIN.DETAILS,
-                       ACCOUNTS.ENTRY_SUB.BALANCE_S,
-                       ACCOUNTS.ENTRY_SUB.ENTRY_MNT
-                FROM ACCOUNTS.ENTRY_MAIN,
-                     ACCOUNTS.ENTRY_SUB,
-                     ACCOUNTS.ENTRY_TYPE
-                WHERE ACCOUNTS.ENTRY_SUB.ACC_NO = :acc_no
-                  AND ACCOUNTS.ENTRY_MAIN.entry_type_no = ACCOUNTS.ENTRY_TYPE.ENTRY_TYPE_no
-                  AND ACCOUNTS.ENTRY_SUB.ENTRY_NO = ACCOUNTS.ENTRY_MAIN.ENTRY_NO
-                ORDER BY ACCOUNTS.ENTRY_MAIN.ENTRY_DATE, ACCOUNTS.ENTRY_SUB.ENTRY_NO
+                SELECT es.ENTRY_NO,
+                       SUBSTR(TO_CHAR(es.ENTRY_NO), 1, 1) || SUBSTR(TO_CHAR(es.ENTRY_NO), 7, 4) AS SUB_ENTRY_NO,
+                       TO_CHAR(em.ENTRY_DATE, 'DD/MM/YYYY') AS ENTRY_DATE,
+                       TO_CHAR(em.ENTRY_DATE, 'YYYY-MM-DD') AS RAW_DATE,
+                       et.ENTRY_TYPE_NAME,
+                       NVL(TRIM(es.SUB_DETAILS), em.DETAILS) AS DETAILS,
+                       es.ENTRY_MNT
+                FROM ACCOUNTS.ENTRY_SUB es
+                JOIN ACCOUNTS.ENTRY_MAIN em ON em.ENTRY_NO = es.ENTRY_NO
+                JOIN ACCOUNTS.ENTRY_TYPE et ON et.ENTRY_TYPE_NO = em.ENTRY_TYPE_NO
+                WHERE es.ACC_NO = :acc_no
+                ORDER BY em.ENTRY_DATE, es.ENTRY_NO, es.SEQ
             ";
 
             $rows = DB::connection('oracle')->select($sql, ['acc_no' => $accNo]);
@@ -525,9 +530,11 @@ class WorkerController extends Controller
                 }
             }
 
-            // معالجة النتائج وحساب الرصيد الافتتاحي
+            // معالجة النتائج وحساب الرصيد الافتتاحي والرصيد الجاري من ENTRY_MNT
+            // Opening / running balance are derived from ENTRY_MNT, never from BALANCE_S.
             $openingBalance = 0.0;
             $runningBalance = 0.0;
+            $periodMovement = 0.0;
             $totalDebit = 0.0;
             $totalCredit = 0.0;
             $filteredRows = [];
@@ -538,13 +545,12 @@ class WorkerController extends Controller
                 $r = (array) $r;
                 $rawDate = $r['RAW_DATE'] ?? $r['raw_date'] ?? null;
                 $mnt = (float) ($r['ENTRY_MNT'] ?? $r['entry_mnt'] ?? 0);
-                $bal = (float) ($r['BALANCE_S'] ?? $r['balance_s'] ?? 0);
                 $entryDate = $r['ENTRY_DATE'] ?? $r['entry_date'] ?? null;
 
                 // إذا كانت الحركة قبل تاريخ البداية المطلوب، تُحسب ضمن الرصيد الافتتاحي
                 if ($fromDateFilter && $rawDate && $rawDate < $fromDateFilter) {
-                    $openingBalance = $bal;
-                    $runningBalance = $bal;
+                    $openingBalance += $mnt;
+                    $runningBalance = $openingBalance;
 
                     continue;
                 }
@@ -559,7 +565,11 @@ class WorkerController extends Controller
 
                 $totalDebit += $debit;
                 $totalCredit += $credit;
-                $runningBalance = $bal;
+
+                // الرصيد الجاري = الافتتاحي + صافي حركة الفترة التراكمية
+                // Running balance = opening balance + cumulative period movement.
+                $periodMovement += $mnt;
+                $runningBalance = $openingBalance + $periodMovement;
 
                 if ($firstDate === null) {
                     $firstDate = $entryDate;
@@ -572,8 +582,8 @@ class WorkerController extends Controller
                     'entry_date' => $entryDate,
                     'raw_date' => $rawDate,
                     'entry_type_name' => ArabicEncoding::fixMojibake($r['ENTRY_TYPE_NAME'] ?? $r['entry_type_name'] ?? ''),
-                    'details' => ArabicEncoding::fixMojibake(trim((string) ($r['DETAILS'] ?? $r['details'] ?? ''))),
-                    'balance_s' => $bal,
+                    'details' => ArabicEncoding::normalizeStatementText($r['DETAILS'] ?? $r['details'] ?? ''),
+                    'balance' => $runningBalance,
                     'entry_mnt' => $mnt,
                     'debit' => $debit,
                     'credit' => $credit,
@@ -597,7 +607,9 @@ class WorkerController extends Controller
                     'total_debit' => $totalDebit,
                     'total_credit' => $totalCredit,
                     'opening_balance' => $openingBalance,
-                    'final_balance' => count($filteredRows) > 0 ? $runningBalance : $openingBalance,
+                    // الرصيد النهائي = الافتتاحي + صافي حركة الفترة
+                    // Final balance = opening balance + net period movement.
+                    'final_balance' => $openingBalance + $periodMovement,
                     'from_date' => $fromDateParam ?: ($firstDate ?: date('d/m/Y')),
                     'to_date' => $toDateParam ?: ($lastDate ?: date('d/m/Y')),
                     'currency' => 'يمني YR',

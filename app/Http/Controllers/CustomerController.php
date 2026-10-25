@@ -408,7 +408,7 @@ class CustomerController extends Controller
                     'sub_entry_no' => $r['SUB_ENTRY_NO'] ?? $r['sub_entry_no'] ?? null,
                     'entry_date' => $entryDate,
                     'entry_type_name' => ArabicEncoding::fixMojibake($r['ENTRY_TYPE_NAME'] ?? $r['entry_type_name'] ?? ''),
-                    'details' => $this->normalizeStatementText($r['DETAILS'] ?? $r['details'] ?? ''),
+                    'details' => ArabicEncoding::normalizeStatementText($r['DETAILS'] ?? $r['details'] ?? ''),
                     'balance' => $lineBalance,
                     'entry_mnt' => $mnt,
                     'debit' => $debit,
@@ -455,22 +455,6 @@ class CustomerController extends Controller
         } catch (\Throwable $e) {
             return $this->errorResponse('خطأ في جلب كشف حساب العميل', $e);
         }
-    }
-
-    /**
-     * تنظيف نص البيان: إصلاح الترميز، وضغط المسافات المتكررة، وحدّ الطول.
-     * Statement text cleaner: repairs the Arabic encoding, collapses the repeated
-     * spaces Oracle pads these columns with, and trims the edges.
-     */
-    private function normalizeStatementText(mixed $value): string
-    {
-        $text = ArabicEncoding::fixMojibake(trim((string) $value));
-
-        // الحقول VARCHAR2(250) تُخزَّن مع حشو مسافات داخلي أحياناً — يُضغط لمسافة واحدة.
-        // These VARCHAR2(250) columns sometimes carry inner padding — collapse it.
-        $text = (string) preg_replace('/\s+/u', ' ', $text);
-
-        return trim($text);
     }
 
     /**

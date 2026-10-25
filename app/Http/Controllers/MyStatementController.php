@@ -65,14 +65,18 @@ class MyStatementController extends Controller
 
             // ── جلب كامل دفتر حركات الحساب مرتباً زمنياً ──
             // Fetch full ledger ordered chronologically (filtered in PHP for opening balance).
+            //
+            // عمود البيان: تفصيل السطر الفرعي أولاً وإن كان فارغاً بيان القيد الرئيسي.
+            // ولا يُقرأ ENTRY_SUB.BALANCE_S إطلاقاً — الرصيد يُشتق من ENTRY_MNT.
+            // Description: sub-entry text first, main entry text as fallback; the stored
+            // BALANCE_S snapshot is never read — the balance comes from ENTRY_MNT.
             $allSql = '
                 SELECT es.ENTRY_NO,
                        SUBSTR(TO_CHAR(es.ENTRY_NO), 1, 1) || SUBSTR(TO_CHAR(es.ENTRY_NO), 7, 4) AS SUB_ENTRY_NO,
                        TO_CHAR(em.ENTRY_DATE, \'DD/MM/YYYY\') AS ENTRY_DATE,
                        TO_CHAR(em.ENTRY_DATE, \'YYYY-MM-DD\') AS RAW_DATE,
                        et.ENTRY_TYPE_NAME,
-                       NVL(es.SUB_DETAILS, em.DETAILS) AS DETAILS,
-                       es.BALANCE_S,
+                       NVL(TRIM(es.SUB_DETAILS), em.DETAILS) AS DETAILS,
                        es.ENTRY_MNT,
                        es.SEQ_PRICE
                 FROM ACCOUNTS.ENTRY_MAIN em, ACCOUNTS.ENTRY_SUB es, ACCOUNTS.ENTRY_TYPE et
@@ -112,6 +116,7 @@ class MyStatementController extends Controller
 
             $openingBalance = 0.0;
             $runningBalance = 0.0;
+            $periodMovement = 0.0;
             $totalDebit = 0.0;
             $totalCredit = 0.0;
             $firstDate = null;
@@ -123,12 +128,12 @@ class MyStatementController extends Controller
                 $rawDate = $r['RAW_DATE'] ?? $r['raw_date'] ?? null;
                 $entryDate = $r['ENTRY_DATE'] ?? $r['entry_date'] ?? null;
                 $mnt = (float) ($r['ENTRY_MNT'] ?? $r['entry_mnt'] ?? 0);
-                $bal = (float) ($r['BALANCE_S'] ?? $r['balance_s'] ?? 0);
 
                 // الحركات الأقدم من بداية الفترة تُحسب ضمن الرصيد الافتتاحي فقط
                 if ($fromDateFilter && $rawDate && $rawDate < $fromDateFilter) {
-                    $openingBalance = $bal;
-                    $runningBalance = $bal;
+                    $openingBalance += $mnt;
+                    $runningBalance = $openingBalance;
+
                     continue;
                 }
                 if ($toDateFilter && $rawDate && $rawDate > $toDateFilter) {
@@ -145,24 +150,31 @@ class MyStatementController extends Controller
 
                 $totalDebit += $debit;
                 $totalCredit += $credit;
-                $runningBalance = $bal;
+
+                // الرصيد الجاري = الافتتاحي + صافي حركة الفترة التراكمية
+                // Running balance = opening balance + cumulative period movement.
+                $periodMovement += $mnt;
+                $runningBalance = $openingBalance + $periodMovement;
 
                 $allEntries[] = [
                     'entry_no' => (int) ($r['ENTRY_NO'] ?? $r['entry_no'] ?? 0),
                     'sub_entry_no' => (string) ($r['SUB_ENTRY_NO'] ?? $r['sub_entry_no'] ?? ''),
                     'date' => $entryDate,
                     'entry_type_name' => ArabicEncoding::fixMojibake($r['ENTRY_TYPE_NAME'] ?? $r['entry_type_name'] ?? ''),
-                    'description' => ArabicEncoding::fixMojibake(trim((string) ($r['DETAILS'] ?? $r['details'] ?? ''))),
+                    'description' => ArabicEncoding::normalizeStatementText($r['DETAILS'] ?? $r['details'] ?? ''),
                     'debit' => $debit,
                     'credit' => $credit,
-                    'balance' => $bal,
+                    'balance' => $runningBalance,
                 ];
             }
 
             // ── الترقيم اليدوي بعد الانتهاء من حساب الرصيد الافتتاحي ──
             $total = count($allEntries);
             $transactions = array_slice($allEntries, $offset, $limit);
-            $finalBalance = $total > 0 ? $runningBalance : $openingBalance;
+
+            // الرصيد النهائي = الافتتاحي + صافي حركة الفترة (بلا أي عمود مخزَّن)
+            // Final balance = opening balance + net period movement, never a stored column.
+            $finalBalance = $openingBalance + $periodMovement;
 
             // ── العملة من آخر حركة ──
             $currency = 'يمني YR';
@@ -171,7 +183,9 @@ class MyStatementController extends Controller
                 foreach ($rows as $row) {
                     $r = (array) $row;
                     $sp = $r['SEQ_PRICE'] ?? $r['seq_price'] ?? null;
-                    if ($sp) $lastPriceSeq = $sp;
+                    if ($sp) {
+                        $lastPriceSeq = $sp;
+                    }
                 }
                 if ($lastPriceSeq) {
                     $curRow = DB::connection('oracle')->selectOne(
@@ -437,6 +451,7 @@ class MyStatementController extends Controller
                     if (strlen($parts[0]) === 4) {
                         return sprintf('%04d-%02d-%02d', (int) $parts[0], (int) $parts[1], (int) $parts[2]);
                     }
+
                     return sprintf('%04d-%02d-%02d', (int) $parts[2], (int) $parts[1], (int) $parts[0]);
                 }
             }

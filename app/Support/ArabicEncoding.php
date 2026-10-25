@@ -162,6 +162,34 @@ class ArabicEncoding
     }
 
     /**
+     * تنظيف نص "البيان" في كشوف الحساب — مسار واحد لكل الكشوفات.
+     * Statement text cleaner shared by every ledger report.
+     *
+     * ثلاثة أعطال كانت تمنع ظهور البيان صحيحاً:
+     * 1. الترميز: القيم تأتي CP1256 فتظهر مشوّهة (`ÎÇáÏ`) — تُصلَح بـ fixMojibake.
+     * 2. الحشو: أعمدة SUB_DETAILS/DETAILS من نوع VARCHAR2(250) فتأتي محشوّة بمسافات،
+     *    وبلا `TRIM` يكون `NVL(TRIM(es.SUB_DETAILS), em.DETAILS)` صحيحاً في SQL لكن
+     *    النص الناتج يبقى بمسافات بادئة/لاحقة تكسر المحاذاة في الجدول وPDF.
+     * 3. التكرار: بعض السندات تُخزّن عدة مسافات متتالية داخل النص فتضغط إلى مسافة واحدة.
+     * Three defects kept the description wrong or misaligned: the CP1256 mojibake,
+     * the VARCHAR2(250) space padding, and runs of inner spaces.
+     */
+    public static function normalizeStatementText(mixed $value): string
+    {
+        if ($value === null) {
+            return '';
+        }
+
+        $text = (string) self::fixMojibake(trim((string) $value));
+
+        // المسافات المتتالية (بما فيها المحارف غير المرئية) تُضغط لمسافة واحدة.
+        // Collapse every run of whitespace into a single space.
+        $text = (string) preg_replace('/\s+/u', ' ', $text);
+
+        return trim($text);
+    }
+
+    /**
      * معالجة كائن أو مصفوفة بيانات كاملة وإصلاح كل الحقول النصية
      */
     public static function cleanData($data)
