@@ -310,26 +310,39 @@ class CustomerController extends Controller
                 ], 404);
             }
 
-            // استعلام كشف الحساب لجميع الحركات المرتبطة بحساب العميل
-            $sql = "SELECT ACCOUNTS.ENTRY_SUB.ENTRY_NO,
-                        SUBSTR(TO_CHAR(ACCOUNTS.ENTRY_SUB.ENTRY_NO), 1, 1)||SUBSTR(TO_CHAR(ACCOUNTS.ENTRY_SUB.ENTRY_NO), 7, 4) AS SUB_ENTRY_NO,
-                        TO_CHAR(ACCOUNTS.ENTRY_MAIN.ENTRY_DATE, 'DD/MM/YYYY') AS ENTRY_DATE,
-                        TO_CHAR(ACCOUNTS.ENTRY_MAIN.ENTRY_DATE, 'YYYY-MM-DD') AS RAW_DATE,
-                        ACCOUNTS.ENTRY_TYPE.ENTRY_TYPE_NAME,
-                        ACCOUNTS.ENTRY_MAIN.DETAILS,
-                        ACCOUNTS.ENTRY_SUB.BALANCE_S,
-                        ACCOUNTS.ENTRY_SUB.ENTRY_MNT,
-                        ACCOUNTS.CUST.CUST_NAME,
-                        ACCOUNTS.CUST.CUST_NO,
-                        ACCOUNTS.CUST.ACC_NO,
-                        ACCOUNTS.ENTRY_SUB.ACC_NO AS ENTRY_SUB_ACC_NO
-                    FROM ACCOUNTS.ENTRY_MAIN, ACCOUNTS.ENTRY_SUB, ACCOUNTS.ENTRY_TYPE, ACCOUNTS.CUST
-                    WHERE ACCOUNTS.ENTRY_SUB.ACC_NO = ACCOUNTS.CUST.ACC_NO
-                        AND ACCOUNTS.ENTRY_SUB.GIVING = ACCOUNTS.CUST.CUST_NO
-                        AND ACCOUNTS.ENTRY_SUB.ENTRY_NO = ACCOUNTS.ENTRY_MAIN.ENTRY_NO
-                        AND ACCOUNTS.ENTRY_MAIN.ENTRY_TYPE_NO = ACCOUNTS.ENTRY_TYPE.ENTRY_TYPE_NO
-                        AND ACCOUNTS.CUST.CUST_NO = :custNo
-                    ORDER BY ACCOUNTS.ENTRY_MAIN.ENTRY_DATE, ACCOUNTS.ENTRY_SUB.ENTRY_NO";
+            // استعلام كشف الحساب — مقيَّد دائماً بالحساب المالي ورقم العميل معاً.
+            // سبب التقييد المزدوج: آلاف العملاء يشتركون في حساب المراقبة 12310000،
+            // فالتقييد برقم الحساب وحده يعرض حركات كل العملاء وأرصدتهم.
+            //
+            // The statement is always scoped by account number AND customer number.
+            // Thousands of customers share the control account 12310000, so scoping
+            // by the account alone leaks every other customer's movements.
+            //
+            // عمود البيان: التفصيل الفرعي أولاً، وإن كان فارغاً (NULL أو مسافات فقط)
+            // يُؤخذ بيان القيد الرئيسي.
+            // Description: the sub-entry text first; when it is blank (NULL or spaces)
+            // the main entry text is used instead.
+            $sql = 'SELECT es.ENTRY_NO,
+                        SUBSTR(TO_CHAR(es.ENTRY_NO), 1, 1) || SUBSTR(TO_CHAR(es.ENTRY_NO), 7, 4) AS SUB_ENTRY_NO,
+                        TO_CHAR(em.ENTRY_DATE, \'DD/MM/YYYY\') AS ENTRY_DATE,
+                        TO_CHAR(em.ENTRY_DATE, \'YYYY-MM-DD\') AS RAW_DATE,
+                        et.ENTRY_TYPE_NAME,
+                        NVL(TRIM(es.SUB_DETAILS), em.DETAILS) AS DETAILS,
+                        es.ENTRY_MNT,
+                        c.CUST_NAME,
+                        c.CUST_NO,
+                        c.ACC_NO,
+                        es.ACC_NO AS ENTRY_SUB_ACC_NO
+                    FROM ACCOUNTS.CUST c
+                    JOIN ACCOUNTS.ENTRY_SUB es
+                      ON es.ACC_NO = c.ACC_NO
+                     AND es.GIVING = c.CUST_NO
+                    JOIN ACCOUNTS.ENTRY_MAIN em
+                      ON em.ENTRY_NO = es.ENTRY_NO
+                    JOIN ACCOUNTS.ENTRY_TYPE et
+                      ON et.ENTRY_TYPE_NO = em.ENTRY_TYPE_NO
+                    WHERE c.CUST_NO = :custNo
+                    ORDER BY em.ENTRY_DATE, es.ENTRY_NO, es.SEQ';
 
             $rows = DB::connection('oracle')->select($sql, ['custNo' => $custNo]);
 
@@ -338,10 +351,19 @@ class CustomerController extends Controller
             $toDateFilter = $toDateParam ? $this->parseDateToIso($toDateParam) : null;
 
             // حساب الرصيد الافتتاحي والمدين والدائن للحركات المفلترة
+            // Opening balance, period debit/credit and the running balance.
+            //
+            // لا نعتمد على ENTRY_SUB.BALANCE_S إطلاقاً: فهو رصيد الحساب المالي كاملاً
+            // (يشمل كل من يشترك فيه) وليس رصيد العميل، كما أنه لا يطابق الترتيب الزمني.
+            // الرصيد هنا يُحسب تراكمياً من مبالغ الحركات ENTRY_MNT للعميل وحده.
+            //
+            // ENTRY_SUB.BALANCE_S is never used: it is the whole account's stored
+            // balance (shared by every party on that account) and it does not follow
+            // chronological order. The balance is derived from ENTRY_MNT instead.
             $openingBalance = 0.0;
+            $periodMovement = 0.0;
             $totalDebit = 0.0;
             $totalCredit = 0.0;
-            $runningBalance = 0.0;
             $firstDate = null;
             $lastDate = null;
 
@@ -352,12 +374,10 @@ class CustomerController extends Controller
                 $rawDate = $r['RAW_DATE'] ?? $r['raw_date'] ?? null;
                 $entryDate = $r['ENTRY_DATE'] ?? $r['entry_date'] ?? null;
                 $mnt = (float) ($r['ENTRY_MNT'] ?? $r['entry_mnt'] ?? 0);
-                $bal = (float) ($r['BALANCE_S'] ?? $r['balance_s'] ?? 0);
 
                 // إذا كان قبل تاريخ البداية المطلوب، يُحسب ضمن الرصيد الافتتاحي
                 if ($fromDateFilter && $rawDate && $rawDate < $fromDateFilter) {
-                    $openingBalance = $bal;
-                    $runningBalance = $bal;
+                    $openingBalance += $mnt;
 
                     continue;
                 }
@@ -377,15 +397,19 @@ class CustomerController extends Controller
 
                 $totalDebit += $debit;
                 $totalCredit += $credit;
-                $runningBalance = $bal;
+                $periodMovement += $mnt;
+
+                // رصيد السطر = الافتتاحي + حركة الفترة التراكمية
+                // Line balance = opening balance + cumulative period movement.
+                $lineBalance = $openingBalance + $periodMovement;
 
                 $filteredRows[] = [
                     'entry_no' => $r['ENTRY_NO'] ?? $r['entry_no'] ?? null,
                     'sub_entry_no' => $r['SUB_ENTRY_NO'] ?? $r['sub_entry_no'] ?? null,
                     'entry_date' => $entryDate,
                     'entry_type_name' => ArabicEncoding::fixMojibake($r['ENTRY_TYPE_NAME'] ?? $r['entry_type_name'] ?? ''),
-                    'details' => ArabicEncoding::fixMojibake(trim((string) ($r['DETAILS'] ?? $r['details'] ?? ''))),
-                    'balance_s' => $bal,
+                    'details' => $this->normalizeStatementText($r['DETAILS'] ?? $r['details'] ?? ''),
+                    'balance' => $lineBalance,
                     'entry_mnt' => $mnt,
                     'debit' => $debit,
                     'credit' => $credit,
@@ -395,7 +419,9 @@ class CustomerController extends Controller
                 ];
             }
 
-            $finalBalance = count($filteredRows) > 0 ? $runningBalance : $openingBalance;
+            // الرصيد النهائي = الافتتاحي + صافي حركة الفترة
+            // Final balance = opening balance + net period movement.
+            $finalBalance = $openingBalance + $periodMovement;
 
             $cleanedCustomer = ArabicEncoding::cleanData((array) $customer);
 
@@ -409,15 +435,42 @@ class CustomerController extends Controller
                     'total_credit' => $totalCredit,
                     'opening_balance' => $openingBalance,
                     'final_balance' => $finalBalance,
-                    'from_date' => $fromDateParam ?: ($firstDate ?: date('d/m/Y')),
-                    'to_date' => $toDateParam ?: ($lastDate ?: date('d/m/Y')),
+                    // التواريخ تُعرض دائماً بصيغة يوم/شهر/سنة مهما كان شكل الطلب
+                    // Dates always reach the client as DD/MM/YYYY, whatever the input format.
+                    'from_date' => $fromDateFilter
+                        ? Carbon::parse($fromDateFilter)->format('d/m/Y')
+                        : ($firstDate ?: date('d/m/Y')),
+                    'to_date' => $toDateFilter
+                        ? Carbon::parse($toDateFilter)->format('d/m/Y')
+                        : ($lastDate ?: date('d/m/Y')),
                     'currency' => 'يمني YR',
-                    'account_title' => ($cleanedCustomer['ACC_NO'] ?? $cleanedCustomer['acc_no'] ?? '12310000').' عملاء الكبودي للخياطة',
+                    // عنوان الحساب = رقم الحساب المالي + اسم العميل (لا اسم حساب ثابت)
+                    // Account title = the account number plus the customer's own name.
+                    'account_title' => trim(
+                        (string) ($cleanedCustomer['ACC_NO'] ?? $cleanedCustomer['acc_no'] ?? '').' - '.
+                        ArabicEncoding::fixMojibake((string) ($cleanedCustomer['CUST_NAME'] ?? $cleanedCustomer['cust_name'] ?? ''))
+                    ),
                 ],
             ]);
         } catch (\Throwable $e) {
             return $this->errorResponse('خطأ في جلب كشف حساب العميل', $e);
         }
+    }
+
+    /**
+     * تنظيف نص البيان: إصلاح الترميز، وضغط المسافات المتكررة، وحدّ الطول.
+     * Statement text cleaner: repairs the Arabic encoding, collapses the repeated
+     * spaces Oracle pads these columns with, and trims the edges.
+     */
+    private function normalizeStatementText(mixed $value): string
+    {
+        $text = ArabicEncoding::fixMojibake(trim((string) $value));
+
+        // الحقول VARCHAR2(250) تُخزَّن مع حشو مسافات داخلي أحياناً — يُضغط لمسافة واحدة.
+        // These VARCHAR2(250) columns sometimes carry inner padding — collapse it.
+        $text = (string) preg_replace('/\s+/u', ' ', $text);
+
+        return trim($text);
     }
 
     /**
