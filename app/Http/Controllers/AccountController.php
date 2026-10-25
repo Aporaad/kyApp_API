@@ -1077,7 +1077,14 @@ class AccountController extends Controller
      * selected window. The UI renders the extra «period balance» column only when
      * `has_period` is true.
      *
-     * Query params: acc_no, acc_sub, acc_part, group_id, from_date, to_date
+     * Query params: acc_no, acc_sub, acc_part, group_id, from_date, to_date,
+     *               page (default 1), limit (0 = كل الصفوف، وأقصى 2000)،
+     *               include_totals (1/0 — الإجماليات تُحسب على النطاق كله).
+     *
+     * الترقيم على الخادم شرطٌ لبقاء التطبيق حياً: نطاق واحد قد يحمل 20,000 حساب،
+     * وإرسالها دفعةً واحدة كان يستنزف ذاكرة العميل الأصلية ويُجمّد الواجهة.
+     * Pagination is what keeps the client alive: one scope can hold 20,000 accounts,
+     * and shipping them in a single payload exhausted its native heap.
      */
     public function getGroupStatement(Request $request)
     {
@@ -1189,7 +1196,7 @@ class AccountController extends Controller
             // Period DR/CR and period balance carry the date predicate; the final
             // balance is the account's net over the whole history and is never read
             // from the stale CHART_ACC.BALANCE snapshot column.
-            $sql = "
+            $innerSql = "
                 SELECT c.ACC_NO, c.ACC_NAME,
                        NVL(SUM(CASE WHEN ({$periodCond}) AND (cp.CUR_NO IS NULL OR cp.CUR_NO = 1) AND es.ENTRY_MNT > 0 THEN es.ENTRY_MNT      ELSE 0 END), 0) AS LOCAL_DEBIT,
                        NVL(SUM(CASE WHEN ({$periodCond}) AND (cp.CUR_NO IS NULL OR cp.CUR_NO = 1) AND es.ENTRY_MNT < 0 THEN ABS(es.ENTRY_MNT) ELSE 0 END), 0) AS LOCAL_CREDIT,
@@ -1209,7 +1216,41 @@ class AccountController extends Controller
                 ORDER BY c.ACC_NO
             ";
 
-            $rows = DB::connection('oracle')->select($sql, $scopeParams);
+            // ── ترقيم الصفحات على الخادم ──────────────────────────────────────────
+            // سبب وجوده: بودجة نطاق مثل «العملاء» تُرجع أكثر من 20,000 حساب، وكانت
+            // تُرسل في رد واحد فيستنزف العميل ذاكرته (Scudo OOM) ويتجمد التطبيق.
+            // الآن `limit` يحدّ حجم الرد، والعميل يجلب الأقسام تدريجياً.
+            // limit = 0 يعني «كل الصفوف» — يُستخدم للتصدير الكامل من الخادم فقط.
+            //
+            // Server-side pagination: a scope like «customers» holds 20,000+ accounts
+            // and used to arrive in one payload, which exhausted the client's native
+            // heap and froze the app. `limit = 0` means "every row" and is reserved
+            // for the full server-side export.
+            $page = max(1, (int) $request->query('page', 1));
+            $limitRaw = $request->query('limit');
+            $limitValue = ($limitRaw === null || $limitRaw === '') ? 0 : (int) $limitRaw;
+            // 0 أو أقل = بلا ترقيم (كل الصفوف). القيمة الموجبة تُقصّ عند 2000.
+            // 0 or less = unpaginated (every row); a positive value is capped at 2000.
+            $limit = $limitValue > 0 ? min(2000, $limitValue) : 0;
+            $includeTotals = filter_var($request->query('include_totals', '1'), FILTER_VALIDATE_BOOLEAN);
+
+            if ($limit > 0) {
+                $offset = ($page - 1) * $limit;
+                $sql = 'SELECT * FROM (
+                            SELECT a.*, ROWNUM AS RN FROM ('.$innerSql.') a
+                             WHERE ROWNUM <= :max_row
+                        ) WHERE RN > :offset';
+                $fetchParams = $scopeParams;
+                $fetchParams['max_row'] = $offset + $limit;
+                $fetchParams['offset'] = $offset;
+            } else {
+                // بلا ترقيم: استعلام واحد كامل (تصدير كامل)
+                // No pagination: one full pass, used by the full export.
+                $sql = $innerSql;
+                $fetchParams = $scopeParams;
+            }
+
+            $rows = DB::connection('oracle')->select($sql, $fetchParams);
 
             $result = [];
             $totals = [
@@ -1220,6 +1261,35 @@ class AccountController extends Controller
                 'balance' => 0.0,
                 'period_balance' => 0.0,
             ];
+            $totalRows = null;
+
+            // ── الإجماليات تخصّ النطاق كاملاً لا الصفحة الحالية ──────────────────
+            // الصفحة الحالية قد تكون القسم الأول من أقسام كثيرة، فسطر «الإجمالي» يجب
+            // أن يصف النطاق كله وإلا تغيّر رقمه مع كل قسم يُضاف.
+            // Totals describe the whole scope, never the current page — otherwise the
+            // total line would move every time the next chunk arrives.
+            if ($includeTotals) {
+                $totalsSql = "
+                    SELECT COUNT(*)                    AS TOTAL_ROWS,
+                           NVL(SUM(LOCAL_DEBIT),       0) AS LOCAL_DEBIT,
+                           NVL(SUM(LOCAL_CREDIT),      0) AS LOCAL_CREDIT,
+                           NVL(SUM(FOREIGN_DEBIT),     0) AS FOREIGN_DEBIT,
+                           NVL(SUM(FOREIGN_CREDIT),    0) AS FOREIGN_CREDIT,
+                           NVL(SUM(LOCAL_NET_ALL + FOREIGN_NET_ALL), 0) AS FINAL_BALANCE,
+                           NVL(SUM(LOCAL_NET + FOREIGN_NET),         0) AS PERIOD_BALANCE
+                      FROM ({$innerSql}) t
+                ";
+                $totRow = (array) (DB::connection('oracle')->select($totalsSql, $scopeParams)[0] ?? []);
+                $totalRows = (int) ($totRow['TOTAL_ROWS'] ?? $totRow['total_rows'] ?? 0);
+                $totals = [
+                    'local_debit' => (float) ($totRow['LOCAL_DEBIT'] ?? $totRow['local_debit'] ?? 0),
+                    'local_credit' => (float) ($totRow['LOCAL_CREDIT'] ?? $totRow['local_credit'] ?? 0),
+                    'foreign_debit' => (float) ($totRow['FOREIGN_DEBIT'] ?? $totRow['foreign_debit'] ?? 0),
+                    'foreign_credit' => (float) ($totRow['FOREIGN_CREDIT'] ?? $totRow['foreign_credit'] ?? 0),
+                    'balance' => (float) ($totRow['FINAL_BALANCE'] ?? $totRow['final_balance'] ?? 0),
+                    'period_balance' => (float) ($totRow['PERIOD_BALANCE'] ?? $totRow['period_balance'] ?? 0),
+                ];
+            }
 
             foreach ($rows as $row) {
                 $r = (array) $row;
@@ -1247,13 +1317,10 @@ class AccountController extends Controller
                     ? ($r['FOREIGN_CUR_CODE'] ?? $r['foreign_cur_code'] ?? '')
                     : 'YR';
 
-                $totals['local_debit'] += $localDebit;
-                $totals['local_credit'] += $localCredit;
-                $totals['foreign_debit'] += $foreignDebit;
-                $totals['foreign_credit'] += $foreignCredit;
-                $totals['balance'] += $finalBalance;
-                $totals['period_balance'] += $periodBalance;
-
+                // لا جمع هنا: الإجماليات تُحسب في SQL على النطاق كله (أعلاه)، وجمع
+                // الصفحة فوقها كان سيضاعف الرقم عند التحميل التدريجي.
+                // No accumulation here: totals are computed in SQL over the whole
+                // scope; adding the page's sums on top would double-count.
                 $result[] = [
                     'acc_no' => (int) ($r['ACC_NO'] ?? $r['acc_no'] ?? 0),
                     'acc_name' => ArabicEncoding::fixMojibake($r['ACC_NAME'] ?? $r['acc_name'] ?? ''),
@@ -1267,7 +1334,13 @@ class AccountController extends Controller
                 ];
             }
 
-            $total = count($result);
+            $total = $totalRows ?? count($result);
+
+            // has_more مشتق من حجم الصفحة نفسها لا من عدد كلي غير محسوب، فلا يعتمد
+            // العميل على إجماليات مهدرة ليعرف أن هناك قسماً تالياً.
+            // has_more comes from the page size itself, so the client can keep asking
+            // without a count query on every chunk.
+            $hasMore = $limit > 0 && count($result) === $limit;
 
             return response()->json([
                 'success' => true,
@@ -1285,10 +1358,11 @@ class AccountController extends Controller
                 ],
                 'meta' => [
                     'total' => $total,
-                    'page' => 1,
-                    'limit' => $total,
-                    'total_pages' => 1,
-                    'has_more' => false,
+                    'page' => $limit > 0 ? $page : 1,
+                    'limit' => $limit > 0 ? $limit : $total,
+                    'total_pages' => $limit > 0 ? (int) ceil($total / $limit) : 1,
+                    'has_more' => $hasMore,
+                    'totals_included' => $includeTotals,
                 ],
             ]);
         } catch (\Exception $e) {
