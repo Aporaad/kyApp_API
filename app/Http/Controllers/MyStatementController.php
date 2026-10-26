@@ -30,6 +30,10 @@ class MyStatementController extends Controller
      *
      * يعيد كشف حركات الحساب المالي المرتبط بالمستخدم الحالي.
      * Returns ledger transactions for the authenticated user's linked financial account.
+     *
+     * `limit` غير المُمرَّر = كل حركات الفترة. الافتراضي القديم (50) كان يقتطع الكشف.
+     * Omitted `limit` returns every movement of the period; the old 50-row default
+     * truncated the statement.
      */
     public function financialStatement(Request $request): JsonResponse
     {
@@ -60,9 +64,15 @@ class MyStatementController extends Controller
             }
             $accArr = (array) $accRow;
 
+            // ── الترقيم: غياب `limit` (أو limit=0) يعني «كل حركات الفترة» ──
+            // الافتراضي القديم 50 سطراً كان يقتطع الكشف فيبدو أن الفترة مُتجاهَلة.
+            // Absent `limit` (or limit=0) returns every movement of the period; the old
+            // 50-row default truncated the statement and looked like a broken date filter.
             $page = max(1, (int) $request->query('page', 1));
-            $limit = min(200, max(10, (int) $request->query('limit', 50)));
-            $offset = ($page - 1) * $limit;
+            $limitRaw = $request->query('limit');
+            $limitValue = ($limitRaw === null || $limitRaw === '') ? 0 : (int) $limitRaw;
+            $limit = $limitValue > 0 ? min(2000, $limitValue) : 0;
+            $offset = $limit > 0 ? ($page - 1) * $limit : 0;
 
             // ── جلب كامل دفتر حركات الحساب مرتباً زمنياً ──
             // Fetch full ledger ordered chronologically (filtered in PHP for opening balance).
@@ -175,8 +185,10 @@ class MyStatementController extends Controller
             }
 
             // ── الترقيم اليدوي بعد الانتهاء من حساب الرصيد الافتتاحي ──
+            // بلا `limit` تُعاد كل حركات الفترة؛ لا اقتطاع إطلاقاً.
+            // Without a `limit` every movement of the period is returned — no truncation.
             $total = count($allEntries);
-            $transactions = array_slice($allEntries, $offset, $limit);
+            $transactions = $limit > 0 ? array_slice($allEntries, $offset, $limit) : $allEntries;
 
             // الرصيد النهائي = الافتتاحي + صافي حركة الفترة (بلا أي عمود مخزَّن)
             // Final balance = opening balance + net period movement, never a stored column.
@@ -246,9 +258,11 @@ class MyStatementController extends Controller
                 'meta' => [
                     'total' => $total,
                     'page' => $page,
+                    // 0 = بلا ترقيم (كل صفوف الفترة) / 0 means "every row, not paginated".
                     'limit' => $limit,
-                    'total_pages' => $total > 0 ? (int) ceil($total / $limit) : 0,
-                    'has_more' => ($page * $limit) < $total,
+                    'returned' => count($transactions),
+                    'total_pages' => $limit > 0 ? (int) ceil($total / $limit) : 1,
+                    'has_more' => $limit > 0 && ($page * $limit) < $total,
                 ],
             ]);
         } catch (\Throwable $e) {

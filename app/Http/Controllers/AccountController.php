@@ -646,6 +646,10 @@ class AccountController extends Controller
      * Query params: from_date (DD/MM/YYYY or YYYY-MM-DD), to_date, page, limit
      * Default period when both dates are absent: the 30 days preceding the account's
      * last transaction date (confirmed requirement).
+     *
+     * `limit`: غيابه أو القيمة 0 = **كل حركات الفترة** (لا اقتطاع)، وأي قيمة موجبة
+     * تُقيَّد بـ 2000. كان الافتراضي 50 سطراً فبدا الكشف كأنه يتجاهل الفترة.
+     * Absent/0 `limit` = every row of the period; a positive value is capped at 2000.
      */
     public function getAccountStatement(Request $request, $accNo)
     {
@@ -661,10 +665,18 @@ class AccountController extends Controller
             }
             $accArr = (array) $accRow;
 
+            // ── الترقيم: غياب `limit` (أو limit=0) يعني «كل حركات الفترة» ──
+            // كان الافتراضي 50 سطراً، فكان الكشف يعرض أول 50 حركة فقط من الفترة
+            // المختارة ويبدو كأنه يتجاهل بقية المدة — وهذا هو العطل الذي أُصلح هنا.
+            // Absent `limit` (or limit=0) returns EVERY movement in the period. The old
+            // default of 50 silently truncated the statement to the first 50 rows, which
+            // looked exactly like the date range being ignored. A positive limit is still
+            // honoured (capped at 2000) for callers that page on purpose.
             $page = max(1, (int) $request->query('page', 1));
-            $limit = min(200, max(10, (int) $request->query('limit', 50)));
-            $offset = ($page - 1) * $limit;
-            $maxRow = $offset + $limit;
+            $limitRaw = $request->query('limit');
+            $limitValue = ($limitRaw === null || $limitRaw === '') ? 0 : (int) $limitRaw;
+            $limit = $limitValue > 0 ? min(2000, $limitValue) : 0;
+            $offset = $limit > 0 ? ($page - 1) * $limit : 0;
 
             // ── جلب كامل دفتر حركات الحساب مرتباً زمنياً (يُصفّى بالفترة في PHP
             //    لتسهيل حساب الرصيد الافتتاحي، بنفس نمط CustomerController::statement) ──
@@ -789,8 +801,10 @@ class AccountController extends Controller
             }
 
             // ── الترقيم اليدوي (pagination) بعد الانتهاء من حساب الرصيد الافتتاحي ──
+            // بلا `limit` نُعيد كل الأسطر: الكشف يجب أن يعرض الفترة كاملة بلا استثناء.
+            // Without a `limit` every row of the period is returned — nothing is dropped.
             $total = count($allEntries);
-            $transactions = array_slice($allEntries, $offset, $limit);
+            $transactions = $limit > 0 ? array_slice($allEntries, $offset, $limit) : $allEntries;
 
             // الرصيد النهائي = الافتتاحي + صافي حركة الفترة (بلا أي عمود مخزَّن)
             // Final balance = opening balance + net period movement, never a stored column.
@@ -858,9 +872,11 @@ class AccountController extends Controller
                 'meta' => [
                     'total' => $total,
                     'page' => $page,
+                    // 0 = بلا ترقيم (كل صفوف الفترة) / 0 means "every row, not paginated".
                     'limit' => $limit,
-                    'total_pages' => $total > 0 ? (int) ceil($total / $limit) : 0,
-                    'has_more' => ($page * $limit) < $total,
+                    'returned' => count($transactions),
+                    'total_pages' => $limit > 0 ? (int) ceil($total / $limit) : 1,
+                    'has_more' => $limit > 0 && ($page * $limit) < $total,
                 ],
             ]);
         } catch (\Exception $e) {
@@ -926,9 +942,13 @@ class AccountController extends Controller
             $fromDate = $request->query('from_date');
             $toDate = $request->query('to_date');
             $curNo = $request->query('cur_no');
+            // ── الترقيم: غياب `limit` يعني «كل الحسابات» بدل الافتراضي 50 ──
+            // Absent `limit` returns every account instead of the old 50-row default.
             $page = max(1, (int) $request->query('page', 1));
-            $limit = min(200, max(10, (int) $request->query('limit', 50)));
-            $offset = ($page - 1) * $limit;
+            $limitRaw = $request->query('limit');
+            $limitValue = ($limitRaw === null || $limitRaw === '') ? 0 : (int) $limitRaw;
+            $limit = $limitValue > 0 ? min(2000, $limitValue) : 0;
+            $offset = $limit > 0 ? ($page - 1) * $limit : 0;
             $maxRow = $offset + $limit;
 
             $accounts = [];
@@ -947,21 +967,28 @@ class AccountController extends Controller
                     // TRUNC(ACC_NO/10000) كانت تعطي 4 أرقام فلا تطابق جزئياً أبداً.
                     // The correct join is the 3-digit prefix; TRUNC/10000 yields 4 digits
                     // and never matched a 3-digit ACC_PART, so the section came back empty.
+                    // بلا `limit` نُسقط غلاف ROWNUM كلياً: الغلاف بسقف صفري لا يُرجع شيئاً.
+                    // With no `limit` the ROWNUM wrapper is dropped entirely — a zero cap
+                    // inside it would return nothing at all.
                     $rows = $id
                         ? DB::connection('oracle')->select('SELECT c.ACC_NO, c.ACC_NAME, c.BALANCE FROM CHART_ACC c
                                      INNER JOIN ACC_SUB s ON SUBSTR(TO_CHAR(c.ACC_NO), 1, 3) = TO_CHAR(s.ACC_PART)
                                      INNER JOIN ACC_MAIN m ON s.ACC_SUB = m.ACC_SUB
                                      WHERE m.ACC_NO = :id ORDER BY c.ACC_NO', ['id' => $id])
-                        : DB::connection('oracle')->select(
-                            'SELECT * FROM (
-                                SELECT a.*, ROWNUM rnum FROM (
-                                    SELECT ACC_NO, ACC_NAME, BALANCE FROM CHART_ACC ORDER BY ACC_NO
-                                ) a
-                                WHERE ROWNUM <= :max_row
+                        : ($limit > 0
+                            ? DB::connection('oracle')->select(
+                                'SELECT * FROM (
+                                    SELECT a.*, ROWNUM rnum FROM (
+                                        SELECT ACC_NO, ACC_NAME, BALANCE FROM CHART_ACC ORDER BY ACC_NO
+                                    ) a
+                                    WHERE ROWNUM <= :max_row
+                                )
+                                WHERE rnum > :offset',
+                                ['max_row' => $maxRow, 'offset' => $offset]
                             )
-                            WHERE rnum > :offset',
-                            ['max_row' => $maxRow, 'offset' => $offset]
-                        );
+                            : DB::connection('oracle')->select(
+                                'SELECT ACC_NO, ACC_NAME, BALANCE FROM CHART_ACC ORDER BY ACC_NO'
+                            ));
                     break;
 
                 case 'main':
