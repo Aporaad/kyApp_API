@@ -45,10 +45,12 @@ function sealedUngrantedUser(): User
 
 test('no business route is public any more', function () {
     // القائمة صارت عقداً: ما عدا الدخولَين وفحص الاتصال ونقطتَي تهيئة التطبيق العامتين (قراءة
-    // الحمولة بلا سر، وتحقق كلمة سر API مقيّد المعدل)، كل مسار أعمال يتطلب جلسة.
-    // The public surface is a contract: apart from the two sign-in verbs, the connectivity probe, and
+    // الحمولة بلا سر، وتحقق كلمة سر API مقيّد المعدل)، ومسار إرسال استفسار الدعم العام (مقيّد
+    // المعدل أيضاً كي يعمل النموذج قبل الدخول)، كل مسار أعمال يتطلب جلسة.
+    // The public surface is a contract: apart from the two sign-in verbs, the connectivity probe,
     // the two public app-config routes (the secret-free payload read and the rate-limited API-password
-    // verify), every business route demands a session.
+    // verify), and the rate-limited public support-inquiry submit (so the form works before login),
+    // every business route demands a session.
     $public = [];
 
     foreach (Route::getRoutes() as $route) {
@@ -72,6 +74,7 @@ test('no business route is public any more', function () {
         'api/auth/biometric/login',
         'api/auth/login',
         'api/hello',
+        'api/support/inquiries',
     ];
 
     expect($found)->toBe($allowed);
@@ -149,6 +152,8 @@ test('sealed business verbs refuse an unauthenticated caller', function () {
         ['get', '/api/invoices/1'],
         ['get', '/api/my-statement/financial'],
         ['get', '/api/my-statement/work'],
+        ['get', '/api/support/inquiries'],
+        ['put', '/api/support/inquiries/1'],
         ['get', '/api/selectFromTable?table_name=CURRENCY&limit=1'],
     ];
 
@@ -193,6 +198,8 @@ test('an ungranted caller is refused per module with the named permission', func
         ['get', '/api/invoices', 'invoices.view'],
         ['get', '/api/my-statement/financial', 'my_statement.financial'],
         ['get', '/api/my-statement/work', 'my_statement.work'],
+        ['get', '/api/support/inquiries', 'support.view'],
+        ['put', '/api/support/inquiries/1', 'support.update'],
         ['get', '/api/selectFromTable?table_name=CURRENCY&limit=1', 'system.*'],
     ];
 

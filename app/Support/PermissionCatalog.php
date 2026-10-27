@@ -308,6 +308,18 @@ final class PermissionCatalog
                 'toggle' => 'تفعيل أو تعطيل المهمة',
             ],
         ],
+        // الدعم والاستفسارات: لا فعل `create` هنا — الإرسال خدمة ذاتية من شاشة معلومات
+        // البرنامج، وتعريفه صلاحيةً كان سيحجب النموذج عن الزائر قبل الدخول أصلاً.
+        // Support & inquiries: no `create` action — submitting is a self-service call from
+        // the app-info screen, and making it a grant would hide the form from pre-login guests.
+        'support' => [
+            'name_ar' => 'الدعم والاستفسارات',
+            'core' => [
+                'view' => 'عرض استفسارات الدعم',
+                'update' => 'الرد على الاستفسار وإغلاقه',
+            ],
+            'extra' => [],
+        ],
         // الكشوفات الشخصية: كشف مالي وكشف عمل خاصان بالموظف الحالي دون اختيار حساب
         // Personal statements: financial and work statements scoped to the logged-in employee only.
         'my_statement' => [

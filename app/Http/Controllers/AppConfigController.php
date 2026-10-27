@@ -343,6 +343,9 @@ class AppConfigController extends Controller
             // العنوان بنفس السعة في اللغتين (صف واحد طويل أحياناً)
             // The address keeps the same ceiling in either language (it can be one long line).
             AppConfig::COMPANY_ADDRESS, AppConfig::COMPANY_ADDRESS_EN => 300,
+            // النبذة فقرة لا سطر: 400 محرف تبقى داخل سعة SETTING_VALUE البالغة 500 بايت
+            // The brief is a paragraph, not a line: 400 chars stay inside SETTING_VALUE's 500 bytes.
+            AppConfig::COMPANY_SERVICES => 400,
             default => 200,
         };
     }

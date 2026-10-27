@@ -270,6 +270,23 @@ $settings = [
         'lockable' => 0,
         'sort' => 140,
     ],
+    // نبذة خدمات الشركة: فقرة قصيرة تظهر في شاشة «معلومات البرنامج والدعم» بالعميل.
+    // تُترك فارغة عند البذر لأن العمود SETTING_VALUE سعته 500 بايت والقيمة يكتبها المشغّل
+    // من شاشة إعدادات التطبيق (حد 400 محرف في الخادم والعميل).
+    // Company services brief: a short paragraph shown on the client's "app info & support"
+    // screen. Seeded empty — the operator fills it from the app-configuration screen (capped
+    // at 400 chars on both server and client, well inside SETTING_VALUE's 500 bytes).
+    [
+        'key' => AppConfig::COMPANY_SERVICES,
+        'value' => AppConfig::DEFAULTS[AppConfig::COMPANY_SERVICES],
+        'type' => 'string',
+        'name_ar' => 'نبذة عن خدمات الشركة',
+        'desc_ar' => 'فقرة قصيرة تُعرّف بخدمات الشركة وتظهر في شاشة معلومات البرنامج والدعم',
+        'min' => null,
+        'max' => null,
+        'lockable' => 0,
+        'sort' => 145,
+    ],
     [
         'key' => AppConfig::APP_NAME,
         'value' => ArabicEncoding::toOracleSearchChars(AppConfig::DEFAULTS[AppConfig::APP_NAME]),

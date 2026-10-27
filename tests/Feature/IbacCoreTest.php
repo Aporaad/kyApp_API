@@ -49,9 +49,11 @@ function ibacAdminUser(): User
 }
 
 test('catalog gives every module its core actions in fixed order', function () {
-    // 138 = 134 السابقة + 4 للكشوفات الشخصية (my_statement): wildcard + view + financial + work.
-    // 138 = prior 134 plus 4 for the personal statements module (my_statement.* / .view / .financial / .work).
-    expect(PermissionCatalog::count())->toBe(138);
+    // 141 = 138 السابقة + 3 لوحدة الدعم (support): wildcard + view + update — ولا فعل `create`
+    // لأن الإرسال خدمة ذاتية تعمل قبل الدخول.
+    // 141 = prior 138 plus 3 for the support module (support.* / .view / .update); there is no
+    // `create` action because submitting an inquiry is self-service and runs before login.
+    expect(PermissionCatalog::count())->toBe(141);
 
     foreach (PermissionCatalog::grouped() as $module) {
         $coreCodes = array_map(
@@ -114,9 +116,11 @@ test('settings store returns typed session values', function () {
         ->and($settings->bool('biometric_login_enabled', false))->toBeBool()
         // مفتاح غير معروف لا يكسر المسار السريع: يرجع الافتراضي
         ->and($settings->int('no_such_setting', 7))->toBe(7)
-        // 24 = 10 إعدادات أمان + 14 صفاً لتهيئة التطبيق (بذر app_config + صفّا الاسم/العنوان بالإنجليزي)
-        // 24 = the 10 security settings plus the 14 app-configuration rows (seed + the two English branding rows).
-        ->and($settings->definitions())->toHaveCount(24);
+        // 25 = 10 إعدادات أمان + 15 صفاً لتهيئة التطبيق (بذر app_config + صفّا الاسم/العنوان
+        // بالإنجليزي + نبذة خدمات الشركة company_services المضافة لوحدة الدعم)
+        // 25 = the 10 security settings plus the 15 app-configuration rows (seed + the two English
+        // branding rows + the company_services brief added with the support module).
+        ->and($settings->definitions())->toHaveCount(25);
 });
 
 test('settings store refuses an unknown key', function () {

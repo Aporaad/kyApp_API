@@ -15,6 +15,7 @@ use App\Http\Controllers\Services\SmsController;
 use App\Http\Controllers\Services\WhatsappController;
 use App\Http\Controllers\SessionAdminController;
 use App\Http\Controllers\SettingController;
+use App\Http\Controllers\SupportInquiryController;
 use App\Http\Controllers\TableQueryController;
 use App\Http\Controllers\UserAdminController;
 use App\Http\Controllers\WorkerController;
@@ -39,6 +40,21 @@ Route::post('/auth/biometric/login', [AuthController::class, 'biometricLogin']);
 // ============================================================
 Route::get('/app-config', [AppConfigController::class, 'publicConfig']);
 Route::post('/app-config/verify-api-password', [AppConfigController::class, 'verifyApiPassword'])
+    ->middleware('throttle:5,1');
+
+// ============================================================
+// استفسارات الدعم — الإرسال عام كي يعمل من شاشة «معلومات البرنامج والدعم» قبل الدخول
+// Support inquiries — submission is public so it works from the app-info screen before login.
+//
+// التوكن يُقرأ اختيارياً داخل المتحكم (بلا وسيط `auth:sanctum`): تذكرة صاحب الجلسة تُربَط
+// بحسابه، وتذكرة الزائر تُحفظ باسمه وهاتفه. المعدل 5/دقيقة لكل IP يكفي إنساناً ويكفي
+// لكبح أي إغراق آلي على مسار يكتب في القاعدة.
+// The token is read optionally inside the controller (no `auth:sanctum` middleware): a signed-in
+// submitter's ticket binds to the account, a guest's ticket keeps the typed name and phone. The
+// 5-per-minute throttle is generous for a human and still caps automated flooding of a route
+// that writes to the database.
+// ============================================================
+Route::post('/support/inquiries', [SupportInquiryController::class, 'store'])
     ->middleware('throttle:5,1');
 
 Route::middleware('auth:sanctum')->group(function () {
@@ -550,4 +566,12 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:jobs.toggle');
     Route::delete('/jobs/{name}', [JobController::class, 'destroy'])
         ->middleware('permission:jobs.delete');
+
+    // استفسارات الدعم: القراءة والرد في لوحة الإدارة (الإرسال العام في أعلى الملف)
+    // Support inquiries: reading and replying in the management dashboard (public submit is at the top)
+    Route::get('/support/inquiries', [SupportInquiryController::class, 'index'])
+        ->middleware('permission:support.view');
+    Route::put('/support/inquiries/{ticketId}', [SupportInquiryController::class, 'reply'])
+        ->middleware('permission:support.update')
+        ->where('ticketId', '[0-9]+');
 });

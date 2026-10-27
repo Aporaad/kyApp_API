@@ -39,6 +39,15 @@ final class AppConfig
 
     public const COMPANY_PHONE = 'company_phone';
 
+    /**
+     * نبذة قصيرة عن خدمات الشركة — تُعرض في شاشة «معلومات البرنامج والدعم» بالعميل
+     * A short brief about the company's services, shown on the client's app-info screen.
+     *
+     * حدّها 400 محرف (AppConfigController::textLimit) لأن SETTING_VALUE سعته 500 بايت فقط.
+     * Capped at 400 chars because SETTING_VALUE is only 500 bytes wide.
+     */
+    public const COMPANY_SERVICES = 'company_services';
+
     public const APP_NAME = 'app_name';
 
     /**
@@ -78,6 +87,9 @@ final class AppConfig
         self::COMPANY_ADDRESS_EN => 'Airport Street - Next to Al-shayef House',
         self::COMPANY_WEBSITE => '',
         self::COMPANY_PHONE => '',
+        // نبذة الخدمات تبدأ فارغة: الشاشة تُخفي القسم كاملاً بدل عرض بطاقة بيضاء
+        // The services brief starts blank; the screen hides the block rather than show a blank card.
+        self::COMPANY_SERVICES => '',
         self::APP_NAME => 'الكبودي للخياطة الرجاليه',
         self::THEME_PRIMARY_COLOR => '#A27E4E',
         self::THEME_SECONDARY_COLOR => '#0D9488',
@@ -108,6 +120,7 @@ final class AppConfig
         self::COMPANY_ADDRESS_EN,
         self::COMPANY_WEBSITE,
         self::COMPANY_PHONE,
+        self::COMPANY_SERVICES,
         self::APP_NAME,
         self::THEME_PRIMARY_COLOR,
         self::THEME_SECONDARY_COLOR,
