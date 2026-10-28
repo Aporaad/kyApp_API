@@ -79,6 +79,15 @@ final class PermissionCatalog
             'extra' => [
                 'print' => 'طباعة كروت التفصيل',
                 'deliver' => 'تسليم الخدمة وتفريغ الكرت',
+                // خانات المال في كرت التفصيل صلاحية مستقلة: رؤية الفاتورة لا تعني رؤية ما دُفع فيها.
+                // Money fields on a cutting bill are their own grant: viewing the bill is not
+                // viewing what was paid on it. The server nulls the amounts when it is missing,
+                // so the gate lives on the controller and not on the widget alone.
+                'payments_view' => 'عرض تفاصيل دفع فاتورة التفصيل',
+                'export' => 'تصدير بيانات التفصيل',
+                // متابعة السير تُعرض في بطاقة مستقلة عن الاستعراض، فلها صلاحية مستقلة.
+                // Progress tracking is its own card, so it carries its own grant.
+                'progress' => 'متابعة سير فاتورة التفصيل',
             ],
         ],
         'customers' => [
@@ -467,6 +476,8 @@ final class PermissionCatalog
             'group_work_report' => 'Group work report',
             'toggle' => 'Activate / Deactivate',
             'deliver' => 'Deliver',
+            'payments_view' => 'View payment details',
+            'progress' => 'Track progress',
             'edit_limit' => 'Edit credit limit',
             'structure_manage' => 'Manage account structure',
             'prices_view' => 'View exchange rates',

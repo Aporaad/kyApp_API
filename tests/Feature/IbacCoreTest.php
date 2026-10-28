@@ -49,11 +49,11 @@ function ibacAdminUser(): User
 }
 
 test('catalog gives every module its core actions in fixed order', function () {
-    // 141 = 138 السابقة + 3 لوحدة الدعم (support): wildcard + view + update — ولا فعل `create`
-    // لأن الإرسال خدمة ذاتية تعمل قبل الدخول.
-    // 141 = prior 138 plus 3 for the support module (support.* / .view / .update); there is no
-    // `create` action because submitting an inquiry is self-service and runs before login.
-    expect(PermissionCatalog::count())->toBe(141);
+    // 144 = 141 السابقة + 3 لوحدة التفصيل: عرض تفاصيل الدفع وتصدير البيانات ومتابعة السير، وهي
+    // صلاحيات مستقلة لأن رؤية الكرت لا تعني رؤية أمواله ولا متابعة سيره.
+    // 144 = prior 141 plus 3 for the tailoring module: payment details, export and progress —
+    // separate grants because seeing a bill is not seeing its money or its workflow.
+    expect(PermissionCatalog::count())->toBe(144);
 
     foreach (PermissionCatalog::grouped() as $module) {
         $coreCodes = array_map(

@@ -17,6 +17,7 @@ use App\Http\Controllers\SessionAdminController;
 use App\Http\Controllers\SettingController;
 use App\Http\Controllers\SupportInquiryController;
 use App\Http\Controllers\TableQueryController;
+use App\Http\Controllers\TailoringController;
 use App\Http\Controllers\UserAdminController;
 use App\Http\Controllers\WorkerController;
 use Illuminate\Http\Request;
@@ -205,6 +206,34 @@ Route::middleware(['auth:sanctum', 'permission:invoices.view'])->group(function 
     Route::get('/invoices', [InvoiceController::class, 'index']);
     Route::get('/invoices/{billNo}', [InvoiceController::class, 'show'])
         ->where('billNo', '[0-9]+');
+});
+
+// ============================================================
+// مسارات التفصيل - Tailoring Routes (قراءة فقط)
+// Read-only, because cutting bills are authored in the legacy ERP.
+//
+// هوية الفاتورة مركّبة: (BILL_NO, YEAR) — وكل مسار هنا يحمل الرقمين، لأن BILL_NO وحده غير
+// فريد في SALES_BILL ويعيد فاتورة سنة أخرى.
+// The bill identity is the composite (BILL_NO, YEAR); BILL_NO alone is not unique and would
+// return another year's bill.
+//
+// المرجعيات تخدم شاشة الاستعراض (view) ونموذج الإضافة (create) معاً، فتُفتح للصلاحيتين.
+// Reference data serves both the view screen and the add form, so either grant opens it.
+// ============================================================
+Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/tailoring/reference', [TailoringController::class, 'reference'])
+        ->middleware('permission:tailoring.view,tailoring.create');
+    Route::get('/tailoring/bills', [TailoringController::class, 'index'])
+        ->middleware('permission:tailoring.view');
+    Route::get('/tailoring/bills/{billNo}/{year}/movements', [TailoringController::class, 'movements'])
+        ->middleware('permission:tailoring.view')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::post('/tailoring/bills/{billNo}/{year}/activity', [TailoringController::class, 'activity'])
+        ->middleware('permission:tailoring.print,tailoring.export')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::get('/tailoring/bills/{billNo}/{year}', [TailoringController::class, 'show'])
+        ->middleware('permission:tailoring.view')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
 });
 
 // ============================================================
