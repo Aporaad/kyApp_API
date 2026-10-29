@@ -49,11 +49,11 @@ function ibacAdminUser(): User
 }
 
 test('catalog gives every module its core actions in fixed order', function () {
-    // 144 = 141 السابقة + 3 لوحدة التفصيل: عرض تفاصيل الدفع وتصدير البيانات ومتابعة السير، وهي
-    // صلاحيات مستقلة لأن رؤية الكرت لا تعني رؤية أمواله ولا متابعة سيره.
-    // 144 = prior 141 plus 3 for the tailoring module: payment details, export and progress —
-    // separate grants because seeing a bill is not seeing its money or its workflow.
-    expect(PermissionCatalog::count())->toBe(144);
+    // 147 = 144 السابقة + 3 لوحدة العملاء: عرض مقاسات العملاء وطباعتها وتصديرها، وهي صلاحيات
+    // مستقلة لأن رؤية سجل العميل لا تعني رؤية أرشيف مقاساته ولا النشر منه.
+    // 147 = prior 144 plus 3 for the customers module: view, print and export customer
+    // measurements — separate grants because the customer record is not its measurement archive.
+    expect(PermissionCatalog::count())->toBe(147);
 
     foreach (PermissionCatalog::grouped() as $module) {
         $coreCodes = array_map(

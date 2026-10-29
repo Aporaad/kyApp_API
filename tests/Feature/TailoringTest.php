@@ -44,8 +44,10 @@ function tailoringUngrantedUser(): User
 
 test('the tailoring permissions are part of the catalog and nowhere near the old count', function () {
     // ثلاث صلاحيات جديدة: عرض التفاصيل المالية، التصدير، ومتابعة السير.
-    // Three new grants: payment details, export, and progress tracking.
-    expect(PermissionCatalog::count())->toBe(144)
+    // والثلاثة اللاحقة لوحدة العملاء (مقاسات العملاء) رفعت الكتالوج إلى 147.
+    // Three new grants: payment details, export, and progress tracking. The three later ones
+    // for the customers module (customer measurements) bring the catalog to 147.
+    expect(PermissionCatalog::count())->toBe(147)
         ->and(PermissionCatalog::knows('tailoring.payments_view'))->toBeTrue()
         ->and(PermissionCatalog::knows('tailoring.export'))->toBeTrue()
         ->and(PermissionCatalog::knows('tailoring.progress'))->toBeTrue()
@@ -56,7 +58,7 @@ test('the tailoring reads demand a session', function () {
     $samples = [
         ['get', '/api/tailoring/bills'],
         ['get', '/api/tailoring/bills/21394/2026'],
-        ['get', '/api/tailoring/bills/21394/2026/movements?seq_nos=136054'],
+        ['get', '/api/tailoring/bills/21394/2026/movements?ohd_ids=262133'],
         ['get', '/api/tailoring/reference'],
         ['post', '/api/tailoring/bills/21394/2026/activity'],
     ];
@@ -72,7 +74,7 @@ test('an ungranted caller is refused on every tailoring route', function () {
     $cases = [
         ['get', '/api/tailoring/bills', ['tailoring.view']],
         ['get', '/api/tailoring/bills/21394/2026', ['tailoring.view']],
-        ['get', '/api/tailoring/bills/21394/2026/movements?seq_nos=136054', ['tailoring.view']],
+        ['get', '/api/tailoring/bills/21394/2026/movements?ohd_ids=262133', ['tailoring.view']],
         ['get', '/api/tailoring/reference', ['tailoring.view', 'tailoring.create']],
         ['post', '/api/tailoring/bills/21394/2026/activity', ['tailoring.print', 'tailoring.export']],
     ];
@@ -264,7 +266,7 @@ test('a bill outside the view answers 404 with an explicit flag', function () {
         ->assertJsonPath('not_found_in_view', true);
 });
 
-test('the movement log answers the pieces the client already holds', function () {
+test('the movement log answers the fabrics the client already holds', function () {
     Sanctum::actingAs(tailoringAdminUser(), ['*']);
 
     $page = $this->getJson('/api/tailoring/bills?limit=1')->json('data');
@@ -277,14 +279,23 @@ test('the movement log answers the pieces the client already holds', function ()
     $year = $page[0]['year'];
     $detail = $this->getJson("/api/tailoring/bills/{$billNo}/{$year}")->json('data');
 
-    $seqNos = [];
+    // سجل الحركة يُطلب بأرقام طلبات الأقمشة (OHDID) لا بأرقام الموديلات
+    // The log is requested by fabric order ids (OHDID), not by model numbers.
+    $ohdIds = [];
     foreach ($detail['models'] as $model) {
         foreach ($model['pieces'] as $piece) {
-            $seqNos[] = $piece['seq_no1'];
+            expect($piece)->toHaveKey('ohdid');
+            if ($piece['ohdid'] !== null) {
+                $ohdIds[] = (int) $piece['ohdid'];
+            }
         }
     }
 
-    $response = $this->getJson("/api/tailoring/bills/{$billNo}/{$year}/movements?seq_nos=".implode(',', $seqNos));
+    if ($ohdIds === []) {
+        test()->markTestSkipped('لا أقمشة تحمل رقم طلب في هذه البيئة / No piece carries an order id.');
+    }
+
+    $response = $this->getJson("/api/tailoring/bills/{$billNo}/{$year}/movements?ohd_ids=".implode(',', $ohdIds));
 
     $response->assertOk()->assertJsonPath('success', true);
 
@@ -292,12 +303,12 @@ test('the movement log answers the pieces the client already holds', function ()
     expect($movements)->toBeArray();
 
     foreach ($movements as $movement) {
-        expect(array_keys($movement))->toContain('tr_inv_d_id', 'date', 'ords_name', 'qty', 'posted')
-            ->and($seqNos)->toContain((int) $movement['seq_no']);
+        expect(array_keys($movement))->toContain('tr_inv_d_id', 'ohdid', 'date', 'ords_name', 'qty', 'executor')
+            ->and($ohdIds)->toContain((int) $movement['ohdid']);
     }
 
-    // طلب بلا أرقام قطع يُرفض بصراحة بدل أن يعيد سجلاً لكل القطع.
-    // A request without piece numbers is refused instead of returning the whole log.
+    // طلب بلا أرقام أقمشة يُرفض بصراحة بدل أن يعيد سجلاً لكل القطع.
+    // A request without fabric ids is refused instead of returning the whole log.
     $this->getJson("/api/tailoring/bills/{$billNo}/{$year}/movements")
         ->assertStatus(422)
         ->assertJsonPath('success', false);

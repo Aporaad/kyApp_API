@@ -103,6 +103,14 @@ final class PermissionCatalog
                 'print' => 'طباعة كشف حساب العميل',
                 'export' => 'تصدير بيانات العملاء',
                 'edit_limit' => 'تعديل سقف رصيد العميل',
+                // مقاسات العملاء عملية مستقلة داخل القسم: من يرى سجل العميل لا يرى بالضرورة
+                // أرشيف مقاساته، وطباعة الأرشيف وتصديره إجراءان يحتاجان منحاً صريحاً.
+                // Customer measurements are their own operation inside the module: seeing the
+                // customer record is not seeing the measurement archive, and printing or
+                // exporting that archive are two separately-granted actions.
+                'measurements_view' => 'عرض مقاسات العملاء',
+                'measurements_print' => 'طباعة مقاسات العملاء',
+                'measurements_export' => 'تصدير مقاسات العملاء',
             ],
         ],
         'employees' => [
@@ -479,6 +487,12 @@ final class PermissionCatalog
             'payments_view' => 'View payment details',
             'progress' => 'Track progress',
             'edit_limit' => 'Edit credit limit',
+            // أفعال مركّبة لقسم المقاسات: بلا تسمية هنا يظهر الاسم الخام `Measurements_view`.
+            // Compound actions of the measurements feature; without a label here the English
+            // name would fall back to the raw token.
+            'measurements_view' => 'View customer measurements',
+            'measurements_print' => 'Print customer measurements',
+            'measurements_export' => 'Export customer measurements',
             'structure_manage' => 'Manage account structure',
             'prices_view' => 'View exchange rates',
             'prices_manage' => 'Manage exchange rates',

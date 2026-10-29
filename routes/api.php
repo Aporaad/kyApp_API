@@ -5,6 +5,7 @@ use App\Http\Controllers\AppConfigController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CurrencyController;
 use App\Http\Controllers\CustomerController;
+use App\Http\Controllers\CustomerMeasurementController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\MyStatementController;
 use App\Http\Controllers\PermissionController;
@@ -253,6 +254,21 @@ Route::match(['get', 'post'], '/selectFromTable', [TableQueryController::class, 
 // مسارات العملاء - Customer Management Routes
 // ============================================================
 Route::middleware('auth:sanctum')->group(function () {
+    // مقاسات العملاء — وحدة قراءة مستقلة الصلاحية داخل قسم العملاء، تُسجَّل قبل
+    // `/customers/{custNo}` كي لا يفسّر المسار العام كلمة `measurements` رقم عميل.
+    // Customer measurements — a separately-granted read inside the customers module, registered
+    // before `/customers/{custNo}` so the generic route never reads `measurements` as a number.
+    Route::get('/customers/measurements', [CustomerMeasurementController::class, 'index'])
+        ->middleware('permission:customers.measurements_view');
+    Route::get('/customers/measurements/{custNo}/models', [CustomerMeasurementController::class, 'models'])
+        ->middleware('permission:customers.measurements_view')
+        ->where('custNo', '[0-9]+');
+    Route::get('/customers/measurements/{custNo}/models/{billNo}/{year}/{seqNo}', [CustomerMeasurementController::class, 'show'])
+        ->middleware('permission:customers.measurements_view')
+        ->where(['custNo' => '[0-9]+', 'billNo' => '[0-9]+', 'year' => '[0-9]{4}', 'seqNo' => '[0-9]+']);
+    Route::post('/customers/measurements/{custNo}/models/{billNo}/{year}/{seqNo}/activity', [CustomerMeasurementController::class, 'activity'])
+        ->middleware('permission:customers.measurements_print,customers.measurements_export')
+        ->where(['custNo' => '[0-9]+', 'billNo' => '[0-9]+', 'year' => '[0-9]{4}', 'seqNo' => '[0-9]+']);
     Route::get('/customers', [CustomerController::class, 'index'])
         ->middleware('permission:customers.view');
     Route::post('/customers', [CustomerController::class, 'store'])

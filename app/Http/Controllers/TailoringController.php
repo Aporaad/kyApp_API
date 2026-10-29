@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Support\ActivityLogger;
 use App\Support\ArabicEncoding;
+use App\Support\CuttingViewReader;
 use App\Support\PermissionResolver;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
@@ -39,7 +40,7 @@ use Illuminate\Support\Facades\DB;
  */
 class TailoringController extends Controller
 {
-    private const VIEW_CUTTING_BILL = 'ACCOUNTS.CUTTING_SALES_BILL_VIEW';
+    private const VIEW_CUTTING_BILL = CuttingViewReader::VIEW_BILL;
 
     private const TABLE_SALES_BILL = 'ACCOUNTS.SALES_BILL';
 
@@ -64,10 +65,6 @@ class TailoringController extends Controller
     /** أقصى عدد قطع يُقبل في طلب سجل الحركة — سقف صريح كي لا تُبنى قائمة ربط ضخمة
      *  Upper bound on pieces per movement request, so no huge bind list is ever built. */
     private const MAX_MOVEMENT_SEQ_NOS = 200;
-
-    /** القيمة الحرفية التي يكتبها النظام القديم بدل ترك الخانة فارغة
-     *  The literal the legacy system writes instead of leaving the field empty. */
-    private const NO_TAILOR_SENTINEL = 'لا يوجد';
 
     /**
      * قائمة الفواتير: الأحدث أولاً مع البحث والفلترة الزمنية والتصفح
@@ -152,14 +149,7 @@ class TailoringController extends Controller
      */
     private function pageSummaries(array $keyRows): array
     {
-        $keys = [];
-
-        foreach ($keyRows as $row) {
-            $keys[] = [
-                'bill_no' => $this->num((array) $row, 'BILL_NO'),
-                'year' => $this->num((array) $row, 'YEAR'),
-            ];
-        }
+        $keys = CuttingViewReader::billKeys($keyRows);
 
         if ($keys === []) {
             return [];
@@ -318,41 +308,45 @@ class TailoringController extends Controller
     }
 
     /**
-     * سجل حركة القطع المختارة فقط — القراءة التكميلية (2)
-     * Movement log for the selected pieces only — supplementary read (2).
+     * سجل حركة الأقمشة المختارة فقط — القراءة التكميلية (2)
+     * Movement log for the selected fabrics only — supplementary read (2).
      *
-     * `seq_nos` هي أرقام القطع (SEQ_NO1) التي يحملها العميل فعلاً من صفوف الواجهة، فلا حاجة
-     * لقراءة أخرى لمعرفة قطع الفاتورة.
-     * `seq_nos` are the piece numbers (SEQ_NO1) the client already holds from the view rows.
+     * `ohd_ids` هي أرقام طلبات الأقمشة (OHDID) التي يحملها العميل فعلاً من صفوف الواجهة،
+     * فسجل الحركة يخصّ القماش لا الموديل.
+     * `ohd_ids` are the fabric order ids (OHDID) the client already holds from the view rows,
+     * so the log belongs to the fabric rather than the model.
      */
     public function movements(Request $request, int $billNo, int $year): JsonResponse
     {
-        $raw = trim((string) ($request->input('seq_nos') ?? ''));
+        // السجل يخصّ القماش (OHDID) لا الموديل (SEQ_NO): كل قماش له طلبه وحركته.
+        // The log belongs to the fabric (OHDID), not the model (SEQ_NO): each fabric has its
+        // own order id and its own movement history.
+        $raw = trim((string) ($request->input('ohd_ids') ?? ''));
 
         // الأرقام فقط: أي محرف آخر يُسقَط قبل بناء قائمة الربط.
         // Digits only: anything else is dropped before the bind list is built.
-        $seqNos = array_values(array_unique(array_filter(
+        $ohdIds = array_values(array_unique(array_filter(
             array_map('intval', preg_split('/[,\s]+/', $raw) ?: []),
             static fn (int $n): bool => $n > 0
         )));
 
-        if ($seqNos === []) {
+        if ($ohdIds === []) {
             return response()->json([
                 'success' => false,
-                'message' => 'معامل seq_nos مطلوب ويحمل أرقام القطع / seq_nos is required and must hold piece numbers',
+                'message' => 'معامل ohd_ids مطلوب ويحمل أرقام طلبات الأقمشة / ohd_ids is required and must hold fabric order ids',
             ], 422);
         }
 
-        $seqNos = array_slice($seqNos, 0, self::MAX_MOVEMENT_SEQ_NOS);
+        $ohdIds = array_slice($ohdIds, 0, self::MAX_MOVEMENT_SEQ_NOS);
 
         try {
             $placeholders = [];
             $bindings = ['bill_no' => $billNo, 'year' => $year];
 
-            foreach ($seqNos as $index => $seqNo) {
-                $key = 'seq'.$index;
+            foreach ($ohdIds as $index => $ohdId) {
+                $key = 'ohd'.$index;
                 $placeholders[] = ':'.$key;
-                $bindings[$key] = $seqNo;
+                $bindings[$key] = $ohdId;
             }
 
             $sql = 'SELECT ct.TR_INV_D_ID,
@@ -366,6 +360,7 @@ class TailoringController extends Controller
                            ct.PQTY,
                            ct.SQTY,
                            ct.SEQ_NO,
+                           ct.OHDID,
                            ct.POST,
                            ct.CREATED_BY_NAME,
                            ct.UPDATED_BY_NAME
@@ -375,7 +370,7 @@ class TailoringController extends Controller
                      WHERE ct.BILL_NO = :bill_no
                        AND ct.YEAR = :year
                        AND NVL(ct.CANCEL, 0) <> 1
-                       AND ct.SEQ_NO IN ('.implode(', ', $placeholders).')
+                       AND ct.OHDID IN ('.implode(', ', $placeholders).')
                      ORDER BY ct.DDATE, ct.TR_INV_D_ID';
 
             $rows = DB::connection('oracle')->select($sql, $bindings);
@@ -578,7 +573,7 @@ class TailoringController extends Controller
      */
     private function detailSql(): string
     {
-        return 'SELECT v.SEQ_NO, v.SEQ_NO1, v.BENEFICIARY_NAME, v.QTY AS PIECE_QTY,
+        return 'SELECT v.SEQ_NO, v.SEQ_NO1, v.OHDID, v.BENEFICIARY_NAME, v.QTY AS PIECE_QTY,
                        v.SHAPE_STYLE_NO, v.STYLE_NAME, st.STYLE_NAME AS SHAPE_NAME,
                        v.CLOTH_NAME, v.CLOTH_TYPE, v.CLOTHS_COLOR, v.CLOTHS_COLOR2,
                        v.CONSUMED_CLOTH_QTY_HINSH, v.CONSUMED_CLOTH_QTY_YARDS,
@@ -647,6 +642,9 @@ class TailoringController extends Controller
 
             $models[$seqNo]['pieces'][] = [
                 'seq_no1' => $this->num($row, 'SEQ_NO1'),
+                // رقم طلب القماش في الواجهة — مفتاح سجل حركة هذا القماش
+                // The fabric order id in the view — the key of this fabric's movement log.
+                'ohdid' => $this->num($row, 'OHDID'),
                 'sanf_no' => $this->num($row, 'SANF_NO'),
                 'sanf_dno' => $this->num($row, 'SANF_DNO'),
                 'cloth_name' => $this->txt($row, 'CLOTH_NAME'),
@@ -690,18 +688,15 @@ class TailoringController extends Controller
      * المقاسات L1..L12 كما هي — التسمية تأتي من GENERAL_LABELS_CODING لا من الشاشة
      * Measurements L1..L12 as stored; their labels come from GENERAL_LABELS_CODING.
      *
+     * المنطق في `CuttingViewReader` وحده لأن مقاسات العملاء تقرأ الواجهة نفسها.
+     * The logic lives in `CuttingViewReader` alone, because customer measurements read this view.
+     *
      * @param  array<string, mixed>  $row
      * @return array<string, float|null>
      */
     private function measurements(array $row): array
     {
-        $measures = [];
-
-        for ($i = 1; $i <= 12; $i++) {
-            $measures['L'.$i] = $this->num($row, 'L'.$i);
-        }
-
-        return $measures;
+        return CuttingViewReader::measurements($row);
     }
 
     /**
@@ -713,24 +708,7 @@ class TailoringController extends Controller
      */
     private function specs(array $row): array
     {
-        return [
-            'neck_type' => $this->txt($row, 'NECK_TYPE'),
-            'tipper_type' => $this->txt($row, 'TIPPER_TYPE'),
-            'com_cabak_type' => $this->txt($row, 'COM_CABAK_TYPE'),
-            'pocket_or_without' => $this->txt($row, 'POCKET_OR_WITHOUT'),
-            'gabzor_type' => $this->txt($row, 'GABZOR_TYPE'),
-            'button_type' => $this->txt($row, 'BUTTON_TYPE'),
-            'button_no' => $this->txt($row, 'BUTTON_NO'),
-            'mobile_pocket' => $this->txt($row, 'MOBILE_POCKET'),
-            'pen_pocket' => $this->txt($row, 'PEN_POCKET'),
-            'hegazi_type' => $this->txt($row, 'HEGAZI_TYPE'),
-            'notes' => $this->txt($row, 'NOTES2'),
-            'neck_shape_no' => $this->num($row, 'NECK_SHAPE_NO'),
-            'shape_gabzor_no' => $this->num($row, 'SHAPE_GABROZ_NO'),
-            'shape_com_cabak_no' => $this->num($row, 'SHAPE_COM_CABAK_NO'),
-            'shape_pocket_up_no' => $this->num($row, 'SHAPE_POCKET_UP_NO'),
-            'shape_pocket_down_no' => $this->num($row, 'SHAPE_POCKET_DOWN_NO'),
-        ];
+        return CuttingViewReader::specs($row);
     }
 
     /**
@@ -781,13 +759,22 @@ class TailoringController extends Controller
      */
     private function movementRow(array $row): array
     {
+        // المنفذ: من أنشأ الحركة، وإلا قسم التنفيذ، وإلا رقم القسم كما هو
+        // The executor: the creator, else the executing department, else its raw number.
+        $deptId = $this->num($row, 'DEPTID');
+        $executor = $this->txt($row, 'CREATED_BY_NAME')
+            ?? $this->txt($row, 'DEPTNAME')
+            ?? ($deptId === null ? null : (string) (int) $deptId);
+
         return [
             'tr_inv_d_id' => $this->num($row, 'TR_INV_D_ID'),
+            'ohdid' => $this->num($row, 'OHDID'),
             'date' => $this->txt($row, 'DDATE_TXT'),
             'raw_date' => $this->txt($row, 'DDATE_ISO'),
             'ordsid' => (int) ($this->num($row, 'ORDSID') ?? 0),
             'ords_name' => $this->txt($row, 'ORDSNAME'),
             'dept_name' => $this->txt($row, 'DEPTNAME'),
+            'executor' => $executor,
             'details' => $this->txt($row, 'DETAILE'),
             'qty' => $this->num($row, 'QTY'),
             'posted_qty' => $this->num($row, 'PQTY'),
@@ -835,28 +822,7 @@ class TailoringController extends Controller
      */
     private function orderStateOf(mixed $ordsdid): array
     {
-        if ($ordsdid === null || $ordsdid === '') {
-            return ['name' => null];
-        }
-
-        try {
-            $row = DB::connection('oracle')
-                ->table(self::TABLE_ORDSTATE)
-                ->where('ORDSID', (int) $ordsdid)
-                ->first();
-
-            if (! $row) {
-                return ['name' => null];
-            }
-
-            return ['name' => ArabicEncoding::fixMojibake((string) ((array) $row)['ORDSNAME'])];
-        } catch (\Throwable $e) {
-            // اسم الحالة تزييني: فشله لا يُفشل الفاتورة
-            // The stage name is decoration: its failure must not fail the bill
-            report($e);
-
-            return ['name' => null];
-        }
+        return ['name' => CuttingViewReader::orderStateName($ordsdid)];
     }
 
     /**
@@ -867,28 +833,7 @@ class TailoringController extends Controller
      */
     private function measureLabels(): array
     {
-        $labels = [];
-
-        for ($i = 1; $i <= 12; $i++) {
-            $labels['L'.$i] = null;
-        }
-
-        try {
-            $row = DB::connection('oracle')->table(self::TABLE_LABELS)->first();
-
-            if ($row) {
-                foreach ((array) $row as $key => $value) {
-                    $upper = strtoupper((string) $key);
-                    if (preg_match('/^L([0-9]{1,2})$/', $upper) === 1) {
-                        $labels[$upper] = ArabicEncoding::normalizeStatementText($value);
-                    }
-                }
-            }
-        } catch (\Throwable $e) {
-            report($e);
-        }
-
-        return $labels;
+        return CuttingViewReader::measureLabels();
     }
 
     /**
@@ -932,17 +877,7 @@ class TailoringController extends Controller
      */
     private function normalizeTailorName(?string $name): ?string
     {
-        if ($name === null) {
-            return null;
-        }
-
-        $trimmed = trim($name);
-
-        if ($trimmed === '' || $trimmed === self::NO_TAILOR_SENTINEL) {
-            return null;
-        }
-
-        return $trimmed;
+        return CuttingViewReader::normalizeTailorName($name);
     }
 
     /**
@@ -953,13 +888,7 @@ class TailoringController extends Controller
      */
     private function value(array $row, string $key): mixed
     {
-        if (array_key_exists($key, $row)) {
-            return $row[$key];
-        }
-
-        $lower = strtolower($key);
-
-        return $row[$lower] ?? null;
+        return CuttingViewReader::value($row, $key);
     }
 
     /**
@@ -970,15 +899,7 @@ class TailoringController extends Controller
      */
     private function txt(array $row, string $key): ?string
     {
-        $value = $this->value($row, $key);
-
-        if ($value === null || $value === '') {
-            return null;
-        }
-
-        $fixed = ArabicEncoding::normalizeStatementText($value);
-
-        return $fixed === '' ? null : $fixed;
+        return CuttingViewReader::txt($row, $key);
     }
 
     /**
@@ -989,15 +910,7 @@ class TailoringController extends Controller
      */
     private function num(array $row, string $key): float|int|null
     {
-        $value = $this->value($row, $key);
-
-        if ($value === null || $value === '' || ! is_numeric($value)) {
-            return null;
-        }
-
-        $float = (float) $value;
-
-        return floor($float) === $float ? (int) $float : $float;
+        return CuttingViewReader::num($row, $key);
     }
 
     /**
@@ -1008,23 +921,7 @@ class TailoringController extends Controller
      */
     private function lower(array $row, string $key): string|int|float|null
     {
-        $value = $this->value($row, $key);
-
-        if ($value === null || $value === '') {
-            return null;
-        }
-
-        if (is_int($value) || is_float($value)) {
-            return $value;
-        }
-
-        if (is_numeric($value)) {
-            $float = (float) $value;
-
-            return floor($float) === $float ? (int) $float : $float;
-        }
-
-        return ArabicEncoding::normalizeStatementText($value);
+        return CuttingViewReader::lower($row, $key);
     }
 
     /**
@@ -1035,21 +932,7 @@ class TailoringController extends Controller
      */
     private function dateTxt(array $row, string $key): ?string
     {
-        $raw = $this->value($row, $key);
-
-        if ($raw === null || $raw === '') {
-            return null;
-        }
-
-        try {
-            $date = $raw instanceof \DateTimeInterface
-                ? Carbon::instance($raw)
-                : Carbon::parse((string) $raw);
-
-            return $date->year < 1900 ? null : $date->format('d/m/Y');
-        } catch (\Throwable $e) {
-            return null;
-        }
+        return CuttingViewReader::dateTxt($row, $key);
     }
 
     /**
