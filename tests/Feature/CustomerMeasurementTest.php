@@ -256,17 +256,20 @@ test('the model detail carries measurements, specs and fabrics with no money', f
         ->and($first['pieces'])->toBeArray()->not->toBeEmpty();
 
     foreach ($first['pieces'] as $piece) {
-        expect(array_keys($piece))->toContain('seq_no1', 'cloth_name', 'cutter_name', 'tailor_name');
+        expect(array_keys($piece))->toContain(
+            'seq_no1', 'ohdid', 'cloth_name', 'cloth_type', 'cutter_name', 'tailor_name', 'price'
+        );
     }
 
-    // لا خانة مالية إطلاقاً: القسم مقاسات لا حسابات، فلا مبلغ يصل وإن كان المستخدم مديراً.
-    // No money column at all: this is measurements, not accounts, so no amount arrives even for an
-    // administrator.
+    // إجمالات الفاتورة لا تصل إطلاقاً؛ وسعر القطعة هو المال الوحيد في هذا المسار.
+    // Bill totals never arrive: this section is measurements, not accounts.
+    // administrator: grants never widen this path.
     $raw = json_encode($payload, JSON_UNESCAPED_UNICODE);
     expect($raw)->not->toContain('"payment"')
         ->and($raw)->not->toContain('"total"')
         ->and($raw)->not->toContain('"net"')
-        ->and($raw)->not->toContain('"sanf_price"');
+        ->and($raw)->not->toContain('"discount"')
+        ->and($raw)->not->toContain('"amount_paid"');
 
     // الأخوة يشملون الموديل الحالي مع علامة التحديد، للتنقل بلا طلب إضافي.
     // Siblings include the current model flagged as selected, for switching without a new request.

@@ -24,10 +24,12 @@ use Illuminate\Support\Facades\DB;
  * carry: SALES_BILL (address and order data) and SALES_DETAILES_SHAPES (spec texts, columns the
  * view never exposes).
  *
- * لا يقرأ هذا المتحكم أي خانة مالية إطلاقاً: القسم مقاسات ومواصفات وأقمشة، فلا مبالغ تصل
- * إلى الواجهة حتى مع منح أوسع.
- * This controller reads no money column at all: the feature is measurements, specs and fabrics,
- * so no amount ever reaches the client even with broader grants.
+ * المال الوحيد هنا سعرُ القطعة (`SANF_PRICE`) لأنه عمود طلبه المستخدم في جدول الأقمشة؛ أما
+ * إجمالات الفاتورة (TOTAL/DISCOUNT/NET/AMOUNT_PAID) فلا تذكرها أي استعلامات هذا المتحكم،
+ * فلا تسرّب مالي ولو مع منح أوسع.
+ * The only money here is the piece price (SANF_PRICE), a column the user asked the fabrics table
+ * to show. Bill totals (TOTAL/DISCOUNT/NET/AMOUNT_PAID) appear in no query here, so nothing
+ * financial leaks even with broader grants.
  *
  * قاعدة المفتاح: الموديل يُعرَّف بثلاثية (BILL_NO, YEAR, SEQ_NO)، والرقم وحده غير فريد لا
  * للفاتورة ولا للموديل.
@@ -651,7 +653,7 @@ class CustomerMeasurementController extends Controller
      */
     private function detailSql(): string
     {
-        return 'SELECT v.SEQ_NO, v.SEQ_NO1, v.BENEFICIARY_NAME, v.QTY AS PIECE_QTY,
+        return 'SELECT v.SEQ_NO, v.SEQ_NO1, v.OHID, v.OHDID, v.BENEFICIARY_NAME, v.QTY AS PIECE_QTY,
                        v.SHAPE_STYLE_NO, v.STYLE_NAME, st.STYLE_NAME AS SHAPE_NAME,
                        v.CLOTH_NAME, v.CLOTH_TYPE, v.CLOTHS_COLOR, v.CLOTHS_COLOR2,
                        v.CONSUMED_CLOTH_QTY_HINSH, v.CONSUMED_CLOTH_QTY_YARDS,
@@ -659,6 +661,7 @@ class CustomerMeasurementController extends Controller
                        v.CUTTER_NAME, v.TAILOR_NAME1, v.CUTTER_NO1, v.TAILOR_NO1,
                        v.CUTTING_DONE, v.CUTTING_DATE, v.TAILOR_DONE, v.TAILOR_DATE,
                        v.HANDING_DONE1, v.HANDING_DATE1, v.SANF_NO, v.SANF_DNO,
+                       v.SANF_PRICE, v.SANFPRICE,
                        v.MANUAL_BILL_NO, v.DAT, v.CUST_NO, v.CUST_NAME, v.TEL_NO1,
                        v.ACC_NO, v.GROUP_NO, v.HANDING_DONE, v.ORDSDID, v.BILLS_KINDS,
                        v.BATCH_NO_PRINT, v.FIXED_FLEXED,
@@ -707,9 +710,14 @@ class CustomerMeasurementController extends Controller
         foreach ($records as $row) {
             $pieces[] = [
                 'seq_no1' => CuttingViewReader::num($row, 'SEQ_NO1'),
+                // رقم الطلب كما يسمّيه العاملون: `OHDID` هو مفتاح سطر القطعة في النظام القديم
+                // The order number the staff read: OHDID is the legacy piece row's own key.
+                'ohdid' => CuttingViewReader::num($row, 'OHDID'),
                 'sanf_no' => CuttingViewReader::num($row, 'SANF_NO'),
                 'sanf_dno' => CuttingViewReader::num($row, 'SANF_DNO'),
                 'cloth_name' => CuttingViewReader::txt($row, 'CLOTH_NAME'),
+                // `CLOTH_TYPE` تحمل العرض فعلياً («عرضية»/«عادية»)، لا «نوعاً» آخر
+                // CLOTH_TYPE actually carries the width ("عرضية"), not some other "type".
                 'cloth_type' => CuttingViewReader::txt($row, 'CLOTH_TYPE'),
                 'color_no' => CuttingViewReader::num($row, 'CLOTHS_COLOR'),
                 'color_text' => CuttingViewReader::txt($row, 'CLOTHS_COLOR2'),
@@ -719,9 +727,16 @@ class CustomerMeasurementController extends Controller
                 'our_selection' => CuttingViewReader::num($row, 'CLOTHS_OUR_SELECTION'),
                 'shelf_no' => CuttingViewReader::txt($row, 'SHELF_NO'),
                 'cutter_name' => CuttingViewReader::txt($row, 'CUTTER_NAME'),
+                'cutter_no' => CuttingViewReader::num($row, 'CUTTER_NO1'),
                 'tailor_name' => CuttingViewReader::normalizeTailorName(
                     CuttingViewReader::txt($row, 'TAILOR_NAME1')
                 ),
+                'tailor_no' => CuttingViewReader::num($row, 'TAILOR_NO1'),
+                // سعر القطعة من `SANF_PRICE` كما في كرت التفصيل — إجمالات الفاتورة
+                // (TOTAL/DISCOUNT/NET) ما زالت خارج هذا المسار تماماً.
+                // The piece price from SANF_PRICE, as on the cutting card; the bill totals
+                // (TOTAL/DISCOUNT/NET) stay entirely outside this path.
+                'price' => CuttingViewReader::num($row, 'SANF_PRICE'),
                 'cutting_done' => (int) (CuttingViewReader::num($row, 'CUTTING_DONE') ?? 0),
                 'cutting_date' => CuttingViewReader::dateTxt($row, 'CUTTING_DATE'),
                 'tailor_done' => (int) (CuttingViewReader::num($row, 'TAILOR_DONE') ?? 0),
