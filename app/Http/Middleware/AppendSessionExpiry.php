@@ -84,7 +84,7 @@ class AppendSessionExpiry
             // explicitly; other platforms do not care, so this keeps one client code path.
             $response->headers->set(
                 'Access-Control-Expose-Headers',
-                self::HEADER . ', ' . self::SERVER_NOW_HEADER
+                self::HEADER.', '.self::SERVER_NOW_HEADER
             );
         }
 

@@ -9,7 +9,7 @@ REST façade over a **legacy Oracle 11g accounting schema** for الكبودي �
 
 **Stack:** Laravel 12.69 · PHP `^8.2.12` · Sanctum 4 · `yajra/laravel-oci8` 12.0 · Pest 3 · Pint · Vite 7 + Tailwind 4 (unused by the API surface)
 
-**Status:** 129 routes · **IBAC** permission catalog (141 codes / 24 modules) enforced on every business
+**Status:** 138 routes · **IBAC** permission catalog (147 codes / 25 modules) enforced on every business
 route · session idle-sliding policy · admin surface (`/users`, `/permissions`, `/sessions`,
 `/settings`, `/users/{id}/activity`, `/support/inquiries`). The design record is [`../ibac_permissions_plan.md`](../ibac_permissions_plan.md).
 
@@ -60,7 +60,7 @@ Ask the user for real Oracle credentials. **Never invent them and never commit t
 ### Sanity checks
 
 ```bash
-php artisan route:list --path=api            # 129 endpoints
+php artisan route:list --path=api            # 138 endpoints
 php artisan config:show database.default     # should be "oracle"
 curl http://localhost:8000/api/hello         # connectivity probe the Flutter app uses
 php artisan tinker --execute 'DB::connection("oracle")->select("select 1 from dual");'
@@ -100,7 +100,7 @@ app/
 │       SessionPolicy · and hooks `Sanctum::$accessTokenAuthenticationCallback` → SessionPolicy
 └── Support/   ← the IBAC layer, all critical
     ├── ArabicEncoding.php      CP1256 ↔ UTF-8 repair. See §5.1.
-    ├── PermissionCatalog.php   the 24 modules / 141 codes + Arabic names (single source of truth)
+    ├── PermissionCatalog.php   the 25 modules / 147 codes + Arabic names (single source of truth)
     ├── PermissionResolver.php  can()/canAny()/canAll()/payloadFor()/forget() — deny-by-default
     ├── PermissionGrantSync.php atomic replace of a user's grants (+ anti-escalation)
     ├── SessionPolicy.php       idle sliding renewal, absolute cap, prime() on issue,
@@ -109,7 +109,7 @@ app/
     └── ActivityLogger.php      writes APP_USER_ACTIVITY with Arabic through the write path
 database/oracle/               ← IBAC DDL & seeding, applied by hand (NOT migrations)
 ├── 01_ibac_schema.sql         tables + sequences + triggers
-├── 02_ibac_seed.php           catalog (141) + settings/branding rows
+├── 02_ibac_seed.php           catalog (147) + settings/branding rows
 ├── 03_ibac_bootstrap.php      foundational grants
 ├── 04_ibac_rollback.sql
 ├── 05_app_settings_company_en.sql   company/theme branding keys
@@ -141,7 +141,7 @@ controller**; propose a refactor separately rather than introducing a new layer 
 ## 3. Routes
 
 `routes/api.php` is auto-prefixed with `/api` by `withRouting(api:)`. **No route names, no `/v1`
-version prefix.** Comments are bilingual Arabic/English. **129 endpoint registrations** total.
+version prefix.** Comments are bilingual Arabic/English. **138 endpoint registrations** total.
 
 ### Authentication boundary
 
@@ -163,7 +163,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/auth/biometric/register');  Route::delete('/auth/biometric/revoke');
 });
 
-// كل ما عدا ذلك (117): auth:sanctum + permission:<code>
+// كل ما عدا ذلك (126): auth:sanctum + permission:<code>
 Route::get('/customers')->middleware('permission:customers.view');
 ```
 
@@ -195,13 +195,14 @@ Every response out of the `api` group also carries **`X-Session-Expires-At`** �
 | `/settings` | 2 | `SettingController@index` (`settings.view`), `update` (`settings.update`) |
 | `/invoices`, `/invoices/{billNo}` | 2 | `index`, `show` — `invoices.view` |
 | `/selectFromTable` (`Route::match(['get','post'])`) | 1 | `selectFromTable` — `system.*` |
-| `/customers/**` (`{custNo}` constrained `[0-9]+`) | 6 | `index`, `show`, `store`, `update`, `destroy`, `statement` |
-| `/workers/{employees\|cutters\|tailors}/**` (`{id}` constrained `[0-9]+`) | 18 | `employees`/`cutters`/`tailors`, `store*`, `update*`, `destroy*`, `toggle*` (PATCH `/{id}/toggle`), `statement*` (GET `/{id}/statement`) — thin public wrappers over shared privates `listWorkers`, `storeWorker`, `updateWorker`, `destroyWorker`, `toggleWorker`, `fetchStatement` (each taking `string $type` first). **Each of the three registries is its own permission module** (`employees.*`, `cutters.*`, `tailors.*`) |
-| `/accounts/**` | 12 | `getAccounts`, `getAccMain`, `getAccSub`, `getAccSubGroup`, `getAccountTree`, `getChartAccounts`, `createChartAccount`, `updateChartAccount`, `createSubGroup`, `updateSubGroup`, `getAccountStatement`, `getDetailedStatement` |
+| `/customers/**` (`{custNo}` constrained `[0-9]+`) | 10 | `CustomerController@index,show,store,update,destroy,statement` (`customers.*`) · `CustomerMeasurementController@index,models,show,activity` under `/customers/measurements/**` — registered **before** `/customers/{custNo}` so `measurements` is never read as a customer number, guarded by `customers.measurements_view` (the activity trail by `measurements_print,measurements_export`) |
+| `/workers/{employees\|cutters\|tailors}/**` (`{id}` constrained `[0-9]+`) | 22 | `employees`/`cutters`/`tailors`, `store*`, `update*`, `destroy*`, `toggle*` (PATCH `/{id}/toggle`), `statement*` (GET `/{id}/statement`), `workReport*` (GET `/{id}/work-report`), `groupWorkReport*` (GET `/group-work-report`, cutters and tailors only) — thin public wrappers over shared privates `listWorkers`, `storeWorker`, `updateWorker`, `destroyWorker`, `toggleWorker`, `fetchStatement` (each taking `string $type` first). **Each of the three registries is its own permission module** (`employees.*`, `cutters.*`, `tailors.*`) |
+| `/accounts/**` | 24 | `getAccounts`, `updateAccount`, `getAccMain`/`createAccMain`/`updateAccMain`, `getAccSub`/`createAccSub`/`updateAccSub`, `getAccSubGroup`/`createSubGroup`/`updateSubGroup`, `getAccountTree`, `getTreeChildren`, `getChartAccounts`, `getChartAccountDetail`, `createChartAccount`, `updateChartAccount`, `getAccountStatement`, `getGroupStatement`, `getDetailedStatement`, `searchAccounts`, `nextAccountNumber`, `exportTree`, `getCurrencyOptions` — `accounts.view` / `create` / `update` / `structure_manage` / `statement_financial` / `statement_group` / `statement_detail` / `export`+`print` |
+| `/tailoring/**` (`{billNo}` + `{year}` always together) | 5 | `TailoringController@index,show,activity,movements,reference` — `tailoring.view` for reads, `tailoring.print,tailoring.export` for the activity trail; the money block is nulled without `tailoring.payments_view` |
 | `/currencies/**` (`{curNo}`, `{seq}` constrained `[0-9]+`) | 8 | `index`, `store`, `update`, `destroy`, `getPrices`, `addPrice`, `updatePrice`, `deletePrice` |
 | `/my-statement/financial`, `/my-statement/work` | 2 | `MyStatementController@financialStatement`, `workStatement` — `my_statement.financial` / `my_statement.work` |
 | `/jobs/**` (`{name}` slug) | 6 | `JobController@index,store,update,destroy,history,toggle` — `jobs.*` |
-| `/service-config`, `/service-config/corp`, `/services`, `/services/{id}` | 5 | `ServiceConfigController@show,updateCorp,storeService,updateService,destroyService` — `services.view` / `services.settings_manage` / `services.create|update|delete` |
+| `/service-config`, `/service-config/corp`, `/services`, `/services/{id}` | 5 | `ServiceConfigController@show,updateCorp,storeService,updateService,destroyService` — `services.view` / `services.settings_manage`; store/update/destroy all ride on `services.update` because the catalog has **no** `services.create`/`services.delete` code |
 | `/providers/**`, `/provider-subscriptions/{dtlId}` | 10 | `ProviderController@index,show,store,update,destroy,toggle,subscriptions,storeSubscription,updateSubscription,deleteSubscription` — `providers.*` / `providers.subscriptions_manage` |
 | `/sms/messages/**`, `/whatsapp/messages/**` (`{id}` constrained `[0-9]+`) | 12 | `SmsController` / `WhatsappController` — `index`, `store`, `show`, `update`, `destroy`, `toggle` behind `sms.*` / `whatsapp.*` |
 | `/app-config` | 4 | `AppConfigController@publicConfig` (**public**), `update` (`app_config.update`), `updateApiPassword` + `verifyApiPassword` (`app_config.api_manage`; verify is **public** behind `throttle:5,1`) |
@@ -465,9 +466,9 @@ reference. The full design and its accepted decisions D1–D8 live in `../ibac_p
 
 | Piece | Role |
 |---|---|
-| `APP_PERMISSIONS` | the catalog — 141 rows, 24 modules, ASCII `PERMISSION_CODE` (`module.action`) + Arabic `NAME_AR`/`DESCRIPTION_AR`. Seeded, never edited from the UI |
+| `APP_PERMISSIONS` | the catalog — 147 rows, 25 modules, ASCII `PERMISSION_CODE` (`module.action`) + Arabic `NAME_AR`/`DESCRIPTION_AR`. Seeded, never edited from the UI |
 | `APP_USERS_PERMISSIONS` | the grants — `USER_ID`, `PERMISSION_ID`, `GRANTED_BY`, `IS_ACTIVE`, `EXPIRES_ON` |
-| `PermissionCatalog` | the 24 modules / 141 codes and their Arabic names — single source of truth |
+| `PermissionCatalog` | the 25 modules / 147 codes and their Arabic names — single source of truth |
 | `PermissionResolver` | `can()/canAny()/canAll()/payloadFor()/codesFor()/isAdmin()/forget()` — deny-by-default, cached under `MAX_CACHE_BYTES = 3000` |
 | `PermissionGrantSync` | `currentFor()/resolve()/replace()` — atomic replace of a user's grants inside one Oracle transaction |
 | `EnsurePermission` | the `permission:<code>` route guard |
@@ -532,7 +533,7 @@ Legacy tables referenced by the code:
 | Table | Purpose |
 |---|---|
 | `APP_USERS` | logins + biometric enrollment + `IS_ADMIN` (PK `USER_ID`) |
-| `APP_PERMISSIONS` | the IBAC catalog (141 codes / 24 modules) — seeded, not UI-edited |
+| `APP_PERMISSIONS` | the IBAC catalog (147 codes / 25 modules) — seeded, not UI-edited |
 | `APP_USERS_PERMISSIONS` | the IBAC grants: `USER_ID`, `PERMISSION_ID`, `GRANTED_BY`, `IS_ACTIVE`, `EXPIRES_ON` |
 | `APP_SETTINGS` | security/session settings + the runtime branding/theme keys, with `VALUE_TYPE` (`int`/`bool`/`string`) and bounds, via `SettingsStore` / `AppConfig` |
 | `APP_USER_ACTIVITY` | audit trail (`ACTION_TYPE`, `DESCRIPTION_AR`, `STATUS`, `IP_ADDRESS`, `CREATED_ON`), via `ActivityLogger` |
@@ -556,7 +557,7 @@ Legacy tables referenced by the code:
 | File | What it does |
 |---|---|
 | `01_ibac_schema.sql` | the five tables + their sequences + their triggers |
-| `02_ibac_seed.php` | seeds the 141 catalog rows and the settings/branding rows (idempotent) |
+| `02_ibac_seed.php` | seeds the 147 catalog rows and the settings/branding rows (idempotent) |
 | `03_ibac_bootstrap.php` | foundational grants so the first admin is not locked out |
 | `04_ibac_rollback.sql` | the way back |
 | `05_app_settings_company_en.sql` | the company/theme branding keys (`company_name`, `company_name_en`, addresses, website, phone, app name, 5 theme keys, font) |
@@ -611,7 +612,7 @@ php artisan make:test --pest CustomerStatementTest   # no directory in the name
 
 php artisan tinker --execute 'User::where("IS_ACTIVATED", 1)->count();'   # SINGLE quotes
 
-php artisan tinker database/oracle/02_ibac_seed.php        # re-seed catalog(141)+settings/branding — idempotent, WRITES: approval required
+php artisan tinker database/oracle/02_ibac_seed.php        # re-seed catalog(147)+settings/branding — idempotent, WRITES: approval required
 php artisan tinker database/oracle/03_ibac_bootstrap.php   # foundational grants — WRITES: approval required
 ```
 
@@ -778,7 +779,7 @@ git submodule update --init --recursive   # from the parent, after pulling
 Framework      Laravel 12.69 · PHP ^8.2.12
 Auth           Sanctum 4 PATs · expiration=null by design · SessionPolicy on EXPIRES_AT
                (idle 240′ sliding, absolute 14d, touch throttle 5′)
-Access         IBAC — APP_PERMISSIONS (141 codes / 24 modules) + APP_USERS_PERMISSIONS,
+Access         IBAC — APP_PERMISSIONS (147 codes / 25 modules) + APP_USERS_PERMISSIONS,
                deny-by-default, IS_ADMIN=1 bypass, permission:<code> guard
 Oracle         11g · driver yajra/laravel-oci8 12.0 · schema ACCOUNTS · charset WE8MSWIN1252
 Connection     'oracle' (config/database.php:116) · prefix_schema 'accounts'
@@ -788,7 +789,7 @@ Identity       No 11g identity columns → Sequence+Trigger (4 Laravel + 4 IBAC;
                PL/SQL because a VIEW named ACCOUNTS exists), MAX(pk)+1 for legacy business tables
 Cache          3000-byte payload cap (ORA-01461 at 4000) — PermissionResolver / SettingsStore
 Envelope       {success, message, data, meta} · snake_case · bilingual messages · no API Resources
-Routes         129 endpoints in routes/api.php — 6 public · 6 auth-only · 117 guarded · no names · no /v1
+Routes         138 endpoints in routes/api.php — 6 public · 6 auth-only · 126 guarded · no names · no /v1
 Tests          Pest 3 · 170 tests · RefreshDatabase disabled · read-only against live Oracle
 Format         vendor/bin/pint --dirty --format agent
 Dev server     php artisan serve --host 0.0.0.0

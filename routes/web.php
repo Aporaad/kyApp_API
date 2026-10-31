@@ -9,4 +9,3 @@ Route::get('/', fn () => response('', 204));
 // نقطة فحص الاتصال للتطبيق — يجب بقاؤها عامة
 // Connectivity probe for the Flutter client — must remain public
 Route::get('/hello', fn () => 'ok');
-

@@ -83,10 +83,14 @@ final class AppConfig
         // الاسم الإنجليزي لا يُترك فارغاً: ترويسة التقارير تعرضه في الجهة اليسرى دائماً
         // The English name is never blank: the report letterhead always prints its left column.
         self::COMPANY_NAME_EN => "ALKABODI FOR MEN's TAILORING",
-        self::COMPANY_ADDRESS => '',
+        // العنوان والهاتف: هوية الشركة المعلومة، تُخدَم حين يكون الصف فارغاً في القاعدة كي لا
+        // يفقد العميل وسيلة الاتصال — عمود «معلومات الشركة» وشاشة الدخول تقرآن من هنا.
+        // Address and phone: the company's known identity, served when the row is blank so the
+        // client never loses its contact channel — the company card and the login screen read them.
+        self::COMPANY_ADDRESS => 'الجراف- جوار بيت الشايف',
         self::COMPANY_ADDRESS_EN => 'Airport Street - Next to Al-shayef House',
         self::COMPANY_WEBSITE => '',
-        self::COMPANY_PHONE => '',
+        self::COMPANY_PHONE => '780154000',
         // نبذة الخدمات تبدأ فارغة: الشاشة تُخفي القسم كاملاً بدل عرض بطاقة بيضاء
         // The services brief starts blank; the screen hides the block rather than show a blank card.
         self::COMPANY_SERVICES => '',

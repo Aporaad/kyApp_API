@@ -56,6 +56,12 @@ class TailoringController extends Controller
 
     private const TABLE_DEPTS = 'ACCOUNTS.DEPTS';
 
+    /** جدول القطع الذي يحمل عرض القماش (58/45/38) خارج الواجهة */
+    private const TABLE_MULTI_CLOTHS = 'ACCOUNTS.MULTI_CLOTHS';
+
+    /** أسماء محتملة لعرض القماش — يُختار أول اسم موجود فعلاً في القاموس */
+    private const CLOTH_WIDTH_CANDIDATES = ['CLOTH_WIDTH', 'WIDTH', 'CLOTH_W', 'W', 'CLOTH_SIZE'];
+
     private const TABLE_LABELS = 'ACCOUNTS.GENERAL_LABELS_CODING';
 
     private const DEFAULT_LIMIT = 50;
@@ -573,7 +579,22 @@ class TailoringController extends Controller
      */
     private function detailSql(): string
     {
+        // عرض القماش (58/45/38) ليس في الواجهة: يُقرأ من MULTI_CLOTHS بربط على مفتاح القطعة
+        // The cloth width (58/45/38) is not in the view: it is read from MULTI_CLOTHS on the
+        // piece key.
+        $widthColumn = $this->clothWidthColumn();
+        $widthSelect = $widthColumn === null
+            ? 'CAST(NULL AS VARCHAR2(20)) AS CLOTH_WIDTH'
+            : 'm.'.$widthColumn.' AS CLOTH_WIDTH';
+        $widthJoin = $widthColumn === null ? '' : '
+                  LEFT JOIN '.self::TABLE_MULTI_CLOTHS.' m
+                         ON m.BILL_NO = v.BILL_NO
+                        AND m.YEAR = v.YEAR
+                        AND m.SEQ_NO = v.SEQ_NO
+                        AND m.SEQ_NO1 = v.SEQ_NO1';
+
         return 'SELECT v.SEQ_NO, v.SEQ_NO1, v.OHDID, v.BENEFICIARY_NAME, v.QTY AS PIECE_QTY,
+                       '.$widthSelect.',
                        v.SHAPE_STYLE_NO, v.STYLE_NAME, st.STYLE_NAME AS SHAPE_NAME,
                        v.CLOTH_NAME, v.CLOTH_TYPE, v.CLOTHS_COLOR, v.CLOTHS_COLOR2,
                        v.CONSUMED_CLOTH_QTY_HINSH, v.CONSUMED_CLOTH_QTY_YARDS,
@@ -604,10 +625,56 @@ class TailoringController extends Controller
                         AND s.YEAR = v.YEAR
                         AND s.SEQ_NO = v.SEQ_NO
                   LEFT JOIN '.self::TABLE_STYLE.' st
-                         ON st.SHAPE_STYLE_NO = v.SHAPE_STYLE_NO
+                         ON st.SHAPE_STYLE_NO = v.SHAPE_STYLE_NO'.
+            $widthJoin.'
                  WHERE v.BILL_NO = :bill_no
                    AND v.YEAR = :year
                  ORDER BY v.SEQ_NO, v.SEQ_NO1';
+    }
+
+    /**
+     * عمود عرض القماش الحقيقي في `MULTI_CLOTHS` — يُكتشف مرة واحدة من قاموس القاعدة
+     * The real cloth-width column in MULTI_CLOTHS — discovered once from the database dictionary.
+     *
+     * التخمين ممنوع: إن لم يوجد عمود عرض واضح تُعاد `null` فتُعرض الخانة فارغة بدل كلمة
+     * لا معنى لها، ولا يُسقط خطأٌ واحد الفاتورة كلها.
+     * Guessing is not allowed: when no clear width column exists this returns null so the cell
+     * stays empty instead of showing a meaningless word, and one error never fails the whole bill.
+     */
+    private function clothWidthColumn(): ?string
+    {
+        static $resolved = false;
+        static $column = null;
+
+        if ($resolved) {
+            return $column;
+        }
+        $resolved = true;
+
+        try {
+            $rows = DB::connection('oracle')->select(
+                "SELECT COLUMN_NAME FROM ALL_TAB_COLUMNS
+                  WHERE OWNER = 'ACCOUNTS' AND TABLE_NAME = 'MULTI_CLOTHS'"
+            );
+
+            $names = array_map(
+                static fn ($row): string => strtoupper((string) (((array) $row)['COLUMN_NAME']
+                    ?? ((array) $row)['column_name']
+                    ?? '')),
+                $rows
+            );
+
+            foreach (self::CLOTH_WIDTH_CANDIDATES as $candidate) {
+                if (in_array($candidate, $names, true)) {
+                    $column = $candidate;
+                    break;
+                }
+            }
+        } catch (\Throwable) {
+            $column = null;
+        }
+
+        return $column;
     }
 
     /**
@@ -645,6 +712,9 @@ class TailoringController extends Controller
                 // رقم طلب القماش في الواجهة — مفتاح سجل حركة هذا القماش
                 // The fabric order id in the view — the key of this fabric's movement log.
                 'ohdid' => $this->num($row, 'OHDID'),
+                // عرض القماش بالأرقام (58/45/38) من MULTI_CLOTHS — فارغ إن غاب العمود
+                // The numeric cloth width (58/45/38) from MULTI_CLOTHS — empty when absent.
+                'cloth_width' => $this->txt($row, 'CLOTH_WIDTH'),
                 'sanf_no' => $this->num($row, 'SANF_NO'),
                 'sanf_dno' => $this->num($row, 'SANF_DNO'),
                 'cloth_name' => $this->txt($row, 'CLOTH_NAME'),

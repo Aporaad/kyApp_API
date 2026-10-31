@@ -135,6 +135,9 @@ class CustomerMeasurementController extends Controller
             // Logged only for the first page of a search: paging must not flood the trail.
             if ($page === 1 && $search !== '') {
                 $this->logActivity($request, 'customers.measurements_listed', [
+                    // البحث يخصّ العميل لا موديلاً بعينه، فالنوع `customer` كما في جدول التدقيق المتفق عليه.
+                    // A search concerns the customer, not one model — hence `customer`, as agreed.
+                    'entity_type' => 'customer',
                     'entity_id' => 'search:'.$search,
                     'description_ar' => 'بحث في مقاسات العملاء: '.$search,
                 ]);
