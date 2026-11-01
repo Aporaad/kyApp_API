@@ -16,6 +16,14 @@ use App\Http\Controllers\Services\SmsController;
 use App\Http\Controllers\Services\WhatsappController;
 use App\Http\Controllers\SessionAdminController;
 use App\Http\Controllers\SettingController;
+use App\Http\Controllers\Stores\IssueOrderController;
+use App\Http\Controllers\Stores\ReceiveOrderController;
+use App\Http\Controllers\Stores\StockSheetController;
+use App\Http\Controllers\Stores\StoreCatalogController;
+use App\Http\Controllers\Stores\StoreController;
+use App\Http\Controllers\Stores\StoreItemController;
+use App\Http\Controllers\Stores\StoreReportController;
+use App\Http\Controllers\Stores\TransferOrderController;
 use App\Http\Controllers\SupportInquiryController;
 use App\Http\Controllers\TableQueryController;
 use App\Http\Controllers\TailoringController;
@@ -619,4 +627,125 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/support/inquiries/{ticketId}', [SupportInquiryController::class, 'reply'])
         ->middleware('permission:support.update')
         ->where('ticketId', '[0-9]+');
+
+    // ============================================================
+    // المخازن / Stores
+    // ============================================================
+    // ترتيب التسجيل مقصود: المسارات الحرفية أولاً (keepers · reference · catalogs · items ·
+    // balances · reports · stock-sheet) ثم مسارات `{kind}` المحصورة، وإلا التهم `{kind}`
+    // المسار الحرفي.
+    // Registration order matters: literal paths first, then the constrained {kind} routes —
+    // otherwise the wildcard swallows the literal path.
+
+    // المخازن / store registry
+    Route::get('/stores', [StoreController::class, 'index'])->middleware('permission:stores.view');
+    Route::post('/stores', [StoreController::class, 'store'])->middleware('permission:stores.create');
+    Route::put('/stores/{storeNo}', [StoreController::class, 'update'])
+        ->middleware('permission:stores.update')->where('storeNo', '[0-9]+');
+    Route::delete('/stores/{storeNo}', [StoreController::class, 'destroy'])
+        ->middleware('permission:stores.delete')->where('storeNo', '[0-9]+');
+
+    // أمناء المخازن / store keepers
+    Route::get('/stores/keepers', [StoreController::class, 'keepers'])
+        ->middleware('permission:stores.keepers_view');
+    Route::post('/stores/keepers', [StoreController::class, 'storeKeeper'])
+        ->middleware('permission:stores.keepers_manage');
+    Route::put('/stores/keepers/{empNo}', [StoreController::class, 'updateKeeper'])
+        ->middleware('permission:stores.keepers_manage')->where('empNo', '[0-9]+');
+    Route::delete('/stores/keepers/{empNo}', [StoreController::class, 'destroyKeeper'])
+        ->middleware('permission:stores.keepers_manage')->where('empNo', '[0-9]+');
+
+    // المراجع المشتركة بين كل شاشات القسم / shared reference payload
+    Route::get('/stores/reference', [StoreReportController::class, 'reference'])
+        ->middleware('permission:stores.view,stores.items_view,stores.reports_view,stores.stocktake_view');
+
+    // المرجعيات: مجموعات · أنواع · فئات · وحدات / catalogs
+    Route::get('/stores/catalogs/{kind}', [StoreCatalogController::class, 'index'])
+        ->middleware('permission:stores.catalogs_view,stores.catalogs_manage');
+    Route::post('/stores/catalogs/{kind}', [StoreCatalogController::class, 'store'])
+        ->middleware('permission:stores.catalogs_manage');
+    Route::put('/stores/catalogs/{kind}/{id}', [StoreCatalogController::class, 'update'])
+        ->middleware('permission:stores.catalogs_manage')->where('id', '[0-9]+');
+    Route::delete('/stores/catalogs/{kind}/{id}', [StoreCatalogController::class, 'destroy'])
+        ->middleware('permission:stores.catalogs_manage')->where('id', '[0-9]+');
+
+    // الأصناف / items
+    Route::get('/stores/items', [StoreItemController::class, 'index'])
+        ->middleware('permission:stores.items_view');
+    Route::post('/stores/items', [StoreItemController::class, 'store'])
+        ->middleware('permission:stores.items_create');
+    Route::get('/stores/items/{sanfNo}', [StoreItemController::class, 'show'])
+        ->middleware('permission:stores.items_view')->where('sanfNo', '[0-9]+');
+    Route::put('/stores/items/{sanfNo}', [StoreItemController::class, 'update'])
+        ->middleware('permission:stores.items_update')->where('sanfNo', '[0-9]+');
+    Route::delete('/stores/items/{sanfNo}', [StoreItemController::class, 'destroy'])
+        ->middleware('permission:stores.items_delete')->where('sanfNo', '[0-9]+');
+    Route::post('/stores/items/{sanfNo}/sub', [StoreItemController::class, 'storeSub'])
+        ->middleware('permission:stores.items_create')->where('sanfNo', '[0-9]+');
+    Route::put('/stores/items/{sanfNo}/sub/{sanfDno}', [StoreItemController::class, 'updateSub'])
+        ->middleware('permission:stores.items_update')
+        ->where('sanfNo', '[0-9]+')->where('sanfDno', '[0-9]+');
+    Route::delete('/stores/items/{sanfNo}/sub/{sanfDno}', [StoreItemController::class, 'destroySub'])
+        ->middleware('permission:stores.items_delete')
+        ->where('sanfNo', '[0-9]+')->where('sanfDno', '[0-9]+');
+    Route::post('/stores/items/{sanfNo}/units', [StoreItemController::class, 'storeUnit'])
+        ->middleware('permission:stores.items_update')->where('sanfNo', '[0-9]+');
+    Route::delete('/stores/items/{sanfNo}/units/{cap}', [StoreItemController::class, 'destroyUnit'])
+        ->middleware('permission:stores.items_update')
+        ->where('sanfNo', '[0-9]+')->where('cap', '[0-9.]+');
+    Route::get('/stores/items/{sanfNo}/movements', [StoreItemController::class, 'movements'])
+        ->middleware('permission:stores.items_view')->where('sanfNo', '[0-9]+');
+
+    // الأرصدة / balances (AVVG)
+    Route::get('/stores/balances', [StoreReportController::class, 'balances'])
+        ->middleware('permission:stores.reports_view');
+
+    // التقارير: حركة · خلاصة · تسجيل تصدير / movement · summary · export log
+    Route::get('/stores/reports/movement', [StoreReportController::class, 'movement'])
+        ->middleware('permission:stores.reports_view');
+    Route::get('/stores/reports/summary', [StoreReportController::class, 'summary'])
+        ->middleware('permission:stores.reports_view');
+    Route::post('/stores/reports/export-log', [StoreReportController::class, 'exportLog'])
+        ->middleware('permission:stores.reports_export,stores.reports_print');
+
+    // الجرد: كشف عدّ حيّ فقط — لا نقطة كتابة (D9 + D13)
+    Route::get('/stores/stock-sheet', [StockSheetController::class, 'index'])
+        ->middleware('permission:stores.stocktake_view');
+    Route::post('/stores/stock-sheet/log', [StockSheetController::class, 'logAction'])
+        ->middleware('permission:stores.stocktake_print,stores.stocktake_export');
+
+    // الأوامر: توريد · صرف · تحويل / receive · issue · transfer
+    Route::get('/stores/receive', [ReceiveOrderController::class, 'index'])
+        ->middleware('permission:stores.receiving_view');
+    Route::post('/stores/receive', [ReceiveOrderController::class, 'store'])
+        ->middleware('permission:stores.receiving_create');
+
+    Route::get('/stores/issue', [IssueOrderController::class, 'index'])
+        ->middleware('permission:stores.issuing_view');
+    Route::post('/stores/issue', [IssueOrderController::class, 'store'])
+        ->middleware('permission:stores.issuing_create');
+    Route::get('/stores/issue/{billNo}', [IssueOrderController::class, 'show'])
+        ->middleware('permission:stores.issuing_view')->where('billNo', '[0-9]+');
+    Route::put('/stores/issue/{billNo}', [IssueOrderController::class, 'update'])
+        ->middleware('permission:stores.issuing_update')->where('billNo', '[0-9]+');
+    Route::delete('/stores/issue/{billNo}', [IssueOrderController::class, 'destroy'])
+        ->middleware('permission:stores.issuing_delete')->where('billNo', '[0-9]+');
+
+    Route::get('/stores/receive/{billNo}', [ReceiveOrderController::class, 'show'])
+        ->middleware('permission:stores.receiving_view')->where('billNo', '[0-9]+');
+    Route::put('/stores/receive/{billNo}', [ReceiveOrderController::class, 'update'])
+        ->middleware('permission:stores.receiving_update')->where('billNo', '[0-9]+');
+    Route::delete('/stores/receive/{billNo}', [ReceiveOrderController::class, 'destroy'])
+        ->middleware('permission:stores.receiving_delete')->where('billNo', '[0-9]+');
+
+    Route::get('/stores/transfer', [TransferOrderController::class, 'index'])
+        ->middleware('permission:stores.transfer_view');
+    Route::post('/stores/transfer', [TransferOrderController::class, 'store'])
+        ->middleware('permission:stores.transfer_create');
+    Route::get('/stores/transfer/{billNo}', [TransferOrderController::class, 'show'])
+        ->middleware('permission:stores.transfer_view')->where('billNo', '[0-9]+');
+    Route::put('/stores/transfer/{billNo}', [TransferOrderController::class, 'update'])
+        ->middleware('permission:stores.transfer_update')->where('billNo', '[0-9]+');
+    Route::delete('/stores/transfer/{billNo}', [TransferOrderController::class, 'destroy'])
+        ->middleware('permission:stores.transfer_delete')->where('billNo', '[0-9]+');
 });

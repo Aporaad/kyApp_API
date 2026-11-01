@@ -49,11 +49,11 @@ function ibacAdminUser(): User
 }
 
 test('catalog gives every module its core actions in fixed order', function () {
-    // 147 = 144 السابقة + 3 لوحدة العملاء: عرض مقاسات العملاء وطباعتها وتصديرها، وهي صلاحيات
-    // مستقلة لأن رؤية سجل العميل لا تعني رؤية أرشيف مقاساته ولا النشر منه.
-    // 147 = prior 144 plus 3 for the customers module: view, print and export customer
-    // measurements — separate grants because the customer record is not its measurement archive.
-    expect(PermissionCatalog::count())->toBe(147);
+    // 173 = 147 السابقة + 26 لقسم المخازن: أوامر التوريد والصرف والتحويل والأصناف والمرجعيات
+    // والأمناء والتقارير والجرد — كل نوع مستند بأفعاله الأربعة، وكل مجموعة مرجعية بصلاحيتها.
+    // 173 = the prior 147 plus 26 for the stores module: receive/issue/transfer orders, items,
+    // reference data, keepers, reports and the counting sheet.
+    expect(PermissionCatalog::count())->toBe(173);
 
     foreach (PermissionCatalog::grouped() as $module) {
         $coreCodes = array_map(

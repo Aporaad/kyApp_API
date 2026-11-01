@@ -205,6 +205,12 @@ final class PermissionCatalog
                 'export' => 'تصدير الفواتير',
             ],
         ],
+        // المخازن: قسم كامل بأوامر حركة وأصناف ومرجعيات وتقارير وكشف جرد.
+        // كل نوع مستند له أفعاله الأربعة، والأصناف والمرجعيات والأمناء كلٌّ بصلاحيته، لأن
+        // رؤية أمر لا تعني إنشاءه، ورؤية الصنف لا تعني تعديله.
+        // Stores: a full module with movement orders, items, reference data, reports and a
+        // counting sheet. Every document kind carries its own four actions, items/reference
+        // data/keepers are separately granted — seeing a document is not creating one.
         'stores' => [
             'name_ar' => 'المخازن',
             'core' => [
@@ -213,7 +219,37 @@ final class PermissionCatalog
                 'update' => 'تعديل بيانات المخزن',
                 'delete' => 'حذف المخزن',
             ],
-            'extra' => [],
+            'extra' => [
+                'keepers_view' => 'عرض أمناء المخازن',
+                'keepers_manage' => 'إدارة أمناء المخازن',
+                'receiving_view' => 'عرض أوامر التوريد',
+                'receiving_create' => 'إنشاء أمر توريد',
+                'receiving_update' => 'تعديل أمر توريد',
+                'receiving_delete' => 'حذف أمر توريد',
+                'issuing_view' => 'عرض أوامر الصرف',
+                'issuing_create' => 'إنشاء أمر صرف',
+                'issuing_update' => 'تعديل أمر صرف',
+                'issuing_delete' => 'حذف أمر صرف',
+                'transfer_view' => 'عرض أوامر التحويل',
+                'transfer_create' => 'إنشاء أمر تحويل',
+                'transfer_update' => 'تعديل أمر تحويل',
+                'transfer_delete' => 'حذف أمر تحويل',
+                'items_view' => 'عرض الأصناف',
+                'items_create' => 'إضافة صنف',
+                'items_update' => 'تعديل صنف',
+                'items_delete' => 'حذف صنف',
+                'catalogs_view' => 'عرض المجموعات والوحدات والفئات',
+                'catalogs_manage' => 'إدارة المجموعات والوحدات والفئات',
+                'reports_view' => 'عرض تقارير المخازن والأرصدة',
+                'reports_print' => 'طباعة تقارير المخازن',
+                'reports_export' => 'تصدير تقارير المخازن',
+                // الجرد كشف عدّ حي بلا حفظ: عرضه منحنى، وطباعته وتصديره منحان صريحان.
+                // The stocktake is a live counting sheet: viewing it is one grant, printing
+                // and exporting are two explicit ones.
+                'stocktake_view' => 'عرض كشف الجرد',
+                'stocktake_print' => 'طباعة كشف الجرد',
+                'stocktake_export' => 'تصدير كشف الجرد',
+            ],
         ],
         'reports' => [
             'name_ar' => 'التقارير',
@@ -507,6 +543,34 @@ final class PermissionCatalog
             'reveal_credentials' => 'Reveal credentials',
             'financial' => 'Personal financial statement',
             'work' => 'Personal work statement',
+            // أفعال قسم المخازن المركّبة — بلا تسمية هنا يظهر الاسم الخام `Receiving_view`.
+            // Compound stores actions; without a label the English name would be the raw token.
+            'keepers_view' => 'View store keepers',
+            'keepers_manage' => 'Manage store keepers',
+            'receiving_view' => 'View receive orders',
+            'receiving_create' => 'Create receive order',
+            'receiving_update' => 'Update receive order',
+            'receiving_delete' => 'Delete receive order',
+            'issuing_view' => 'View issue orders',
+            'issuing_create' => 'Create issue order',
+            'issuing_update' => 'Update issue order',
+            'issuing_delete' => 'Delete issue order',
+            'transfer_view' => 'View transfer orders',
+            'transfer_create' => 'Create transfer order',
+            'transfer_update' => 'Update transfer order',
+            'transfer_delete' => 'Delete transfer order',
+            'items_view' => 'View items',
+            'items_create' => 'Create item',
+            'items_update' => 'Update item',
+            'items_delete' => 'Delete item',
+            'catalogs_view' => 'View groups, units and categories',
+            'catalogs_manage' => 'Manage groups, units and categories',
+            'reports_view' => 'View store reports and balances',
+            'reports_print' => 'Print store reports',
+            'reports_export' => 'Export store reports',
+            'stocktake_view' => 'View stocktake sheet',
+            'stocktake_print' => 'Print stocktake sheet',
+            'stocktake_export' => 'Export stocktake sheet',
         ];
 
         return ($labels[$actionCode] ?? ucfirst($actionCode)).' — '.ucfirst($moduleCode);
