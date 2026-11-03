@@ -114,15 +114,23 @@ class TransferOrderController extends Controller
 
             $sql = 'SELECT * FROM (
                         SELECT q.*, ROWNUM AS RN FROM (
-                            SELECT m.TR_INV_M_ID, m.BILL_NO, m.YEAR, m.DAT, m.TYPENO,
+                            SELECT m.TR_INV_M_ID, m.BILL_NO, m.YEAR, m.DAT, m.TYPENO, m.BILL_TYPE,
                                    m.STORE_NO, fs.STORE_NAME, m.STORE_TO, ts.STORE_NAME AS STORE_TO_NAME,
-                                   m.SANF_NUMS, m.TOTAL, m.NET, m.DETAILES, m.CREATED_ON,
+                                   m.SANF_NUMS, m.TOTAL, m.DIS_RATE, m.NET, m.DETAILES,
+                                   m.CUR_NO, cu.CUR_NAME, m.CUR_PRICE, m.ENTRY_NO, m.RCV_DONE,
+                                   m.CREATED_ON,
+                                   (SELECT NVL(NVL(au.USER_NAME_AR, au.USER_NAME_EN), au.USER_NAME)
+                                      FROM ACCOUNTS.APP_USERS au WHERE au.USER_ID = m.CREATE_BY) AS CREATED_BY_NAME,
+                                   m.THE_TIME, m.LAST_UPDATED_ON, m.LAST_UPDATE_TIME,
                                    m.FLAG_POST,
                                    (SELECT COUNT(*) FROM ACCOUNTS.INVENTORY_TRANSD d
-                                     WHERE d.TR_INV_M_ID = m.TR_INV_M_ID) AS LINES
+                                     WHERE d.TR_INV_M_ID = m.TR_INV_M_ID) AS LINES,
+                                   (SELECT SUM(d.QTY) FROM ACCOUNTS.INVENTORY_TRANSD d
+                                     WHERE d.TR_INV_M_ID = m.TR_INV_M_ID) AS QTY
                               FROM ACCOUNTS.INVENTORY_TRANSM m
                               LEFT JOIN ACCOUNTS.STORES fs ON fs.STORE_NO = m.STORE_NO
                               LEFT JOIN ACCOUNTS.STORES ts ON ts.STORE_NO = m.STORE_TO
+                              LEFT JOIN ACCOUNTS.CURRENCY cu ON cu.CUR_NO = m.CUR_NO
                              WHERE '.$whereSql.'
                              ORDER BY '.$orderBy.' '.strtoupper($dir).', m.BILL_NO '.strtoupper($dir).'
                         ) q WHERE ROWNUM <= :offset2 + :limit
@@ -379,6 +387,10 @@ class TransferOrderController extends Controller
         }
 
         $total = round($total, 2);
+        // الخصم والصافي يُحسبان على الخادم من السطور — لا يُقبل رقم من العميل (D4)
+        // Discount and net are computed here from the lines; no client figure is trusted (D4).
+        $discount = max(0.0, min(round((float) ($payload['discount'] ?? 0), 2), $total));
+        $net = round($total - $discount, 2);
         $detailes = trim((string) ($payload['detailes'] ?? ''));
         $detailes = $detailes !== ''
             ? $detailes
@@ -387,21 +399,24 @@ class TransferOrderController extends Controller
         // النسخة الصادرة: من المخزن المصدر إلى الهدف
         // Outbound master: from the source store to the destination.
         $outId = StorePolicy::nextNumber('SEQ_STORES_TRNM');
-        $this->insertMaster($request, $outId, $billNo, $year, self::TYPENO_OUT, $from, $to, $lines, $total, $detailes, $payload);
+        $this->insertMaster($request, $outId, $billNo, $year, self::TYPENO_OUT, $from, $to, $lines, $total, $discount, $net, $detailes, $payload);
         $this->insertDetails($outId, $billNo, $year, self::TYPENO_OUT, $from, $to, $lines, $payload);
 
         // النسخة الواردة: مخزنها هو الهدف، وهي التي تعطي الرصيد الموجب
         // Inbound master: its store is the destination — this is the row that adds stock.
         $inId = StorePolicy::nextNumber('SEQ_STORES_TRNM');
-        $this->insertMaster($request, $inId, $billNo, $year, self::TYPENO_IN, $to, $from, $lines, $total, $detailes, $payload);
+        $this->insertMaster($request, $inId, $billNo, $year, self::TYPENO_IN, $to, $from, $lines, $total, $discount, $net, $detailes, $payload);
         $this->insertDetails($inId, $billNo, $year, self::TYPENO_IN, $to, $from, $lines, $payload);
 
         return $billNo;
     }
 
     /**
-     * الصف الوارد المرافق — يُبحث برقم المستند ونوع الحركة
-     * The twin inbound master, located by bill number and movement type.
+     * إدراج أحد رأسي زوج التحويل (الصادر والوارد يستخدمان نفس الدالة بأدوار معكوسة)
+     * Insert one head of the transfer pair — outbound and inbound share this with roles swapped.
+     *
+     * @param  array<int, array<string, mixed>>  $lines
+     * @param  array<string, mixed>  $payload
      */
     private function insertMaster(
         Request $request,
@@ -413,33 +428,50 @@ class TransferOrderController extends Controller
         int $storeTo,
         array $lines,
         float $total,
+        float $discount,
+        float $net,
         string $detailes,
         array $payload
     ): void {
         DB::connection('oracle')->insert(
             'INSERT INTO ACCOUNTS.INVENTORY_TRANSM
                 (TR_INV_M_ID, BILL_NO, YEAR, BILL_TYPE, TYPENO, DAT, STORE_NO, STORE_TO,
-                 DETAILES, TOTAL, SANF_NUMS, CUR_NO, CUR_PRICE, NET, DIS_RATE, DISCOUNT,
+                 DETAILES, TOTAL, SANF_NUMS, CUR_NO, CUR_PRICE, CUR_NO1, CUR_PRICE1,
+                 NET, DIS_RATE, DISCOUNT, SELECT1, ACC_NO, ACC_NO1, CREATE_BY,
                  FLAG_POST, FLAG_CANCEL, RCV_DONE, CREATED_ON, THE_TIME, BRANCH_NO,
                  LAST_UPDATED_ON)
              VALUES
-                (:id, :bill_no, :year, 1, :typeno, TO_DATE(:dat, \'YYYY-MM-DD\'), :store_no, :store_to,
-                 :detailes, :total, :sanf_nums, :cur_no, :cur_price, :total, 0, 0,
+                (:id, :bill_no, :year, :bill_type, :typeno, TO_DATE(:dat, \'YYYY-MM-DD\'), :store_no, :store_to,
+                 :detailes, :total, :sanf_nums, :cur_no, :cur_price, :cur_no1, :cur_price1,
+                 :net, :dis_rate, :discount, :select_one, :acc_no, :acc_no1, :user_id,
                  0, 0, 0, SYSDATE, TO_CHAR(SYSDATE, \'HH24:MI:SS\'), :branch_no,
                  SYSDATE)',
             [
                 'id' => $trInvMId,
                 'bill_no' => $billNo,
                 'year' => $year,
+                // التحويل نقدي دائماً في هذا النظام، لكن الحقل يُمرَّر لا يُفرض: النموذج يعرضه
+                // A transfer is cash in this system, yet the field is passed through, not forced:
+                // the form shows it, so writing a hardcoded value would ignore the user's choice.
+                'bill_type' => (int) ($payload['bill_type'] ?? 1),
                 'typeno' => $typeno,
                 'dat' => $payload['dat'],
                 'store_no' => $storeNo,
                 'store_to' => $storeTo,
                 'detailes' => $this->clip(ArabicEncoding::toOracleSearchChars($detailes) ?? $detailes, 200),
                 'total' => $total,
+                'net' => $net,
+                'dis_rate' => (float) ($payload['discount_rate'] ?? 0),
+                'discount' => $discount,
+                'select_one' => (int) ($payload['select_one'] ?? 1),
+                'acc_no' => (int) ($payload['acc_no'] ?? 0) > 0 ? (int) $payload['acc_no'] : null,
+                'acc_no1' => (int) ($payload['acc_no1'] ?? 0) > 0 ? (int) $payload['acc_no1'] : null,
+                'user_id' => $request->user()?->user_id,
                 'sanf_nums' => count($lines),
                 'cur_no' => (int) ($payload['cur_no'] ?? 1),
                 'cur_price' => (float) ($payload['cur_price'] ?? 1),
+                'cur_no1' => (int) ($payload['cur_no1'] ?? ($payload['cur_no'] ?? 1)),
+                'cur_price1' => (float) ($payload['cur_price1'] ?? ($payload['cur_price'] ?? 1)),
                 'branch_no' => $this->branchNo($request),
             ]
         );
@@ -465,13 +497,13 @@ class TransferOrderController extends Controller
             DB::connection('oracle')->insert(
                 'INSERT INTO ACCOUNTS.INVENTORY_TRANSD
                     (TR_INV_D_ID, TR_INV_M_ID, BILL_NO, YEAR, TYPENO, DDATE, STORENO, STORETO,
-                     DETAILE, SANF_NO, SANF_DNO, SANF_PRICE, QTY, CAP, SEQ,
-                     SIZE_FRM, SIZE_TO, COLOR_NO, SEQ_NO, UNIT_NO, SUNIT_NO, SQTY,
+                     DETAILE, SANF_NO, SANF_DNO, SANF_PRICE, QTY, CAP, PCS, SEQ, SHELF_NO,
+                     SIZE_FRM, SIZE_TO, COLOR_NO, CATEGORY, SEQ_NO, UNIT_NO, SUNIT_NO, SQTY,
                      STK_COST, SANF_COST, TOTALD)
                  VALUES
                     (:id, :master_id, :bill_no, :year, :typeno, TO_DATE(:dat, \'YYYY-MM-DD\'), :store_no, :store_to,
-                     :detailes, :sanf_no, :sanf_dno, :price, :qty, :cap, :seq,
-                     :size_frm, :size_to, :color_no, :seq_no, :unit_no, :unit_no, :qty,
+                     :detailes, :sanf_no, :sanf_dno, :price, :qty, :cap, :pcs, :seq, :shelf_no,
+                     :size_frm, :size_to, :color_no, :category, :seq_no, :unit_no, :unit_no, :qty,
                      :stk_cost, :sanf_cost, :total)',
                 [
                     'id' => StorePolicy::nextNumber('SEQ_STORES_TRND'),
@@ -482,18 +514,32 @@ class TransferOrderController extends Controller
                     'dat' => $payload['dat'],
                     'store_no' => $storeNo,
                     'store_to' => $storeTo,
-                    'detailes' => 'تحويل مخزني',
+                    // العربية تُخزَّن بايتات CP1256: نص عربي خام هنا يظهر mojibake في النظام
+                    //    المكتبي، وكان هذا السطر يكتب «تحويل مخزني» خاماً فعلاً.
+                    // Arabic is stored as CP1256 bytes: raw UTF-8 here shows as mojibake in the
+                    // desktop, and this line really did write the label raw.
+                    'detailes' => $this->clip(
+                        ArabicEncoding::toOracleSearchChars('تحويل مخزني') ?? 'تحويل مخزني',
+                        100
+                    ),
                     'sanf_no' => $line['sanf_no'],
                     'sanf_dno' => $line['sanf_dno'],
                     'price' => $line['price'],
                     'qty' => $line['qty'],
                     'cap' => $line['cap'],
+                    'pcs' => $line['pcs'] ?? $line['qty'],
                     'seq' => $index + 1,
+                    'shelf_no' => (int) ($line['shelf_no'] ?? 0),
                     // هذان العمودان هما شرط ظهور التحويل في ITEM_MOVE_D
                     // These two columns are the join condition that makes the transfer visible.
                     'size_frm' => $line['len'],
                     'size_to' => $line['wid'],
                     'color_no' => $line['color_no'],
+                    'category' => $this->clip(
+                        ArabicEncoding::toOracleSearchChars((string) ($line['category'] ?? ''))
+                            ?? ($line['category'] ?? ''),
+                        30
+                    ),
                     'seq_no' => $index + 1,
                     'unit_no' => $line['unit_no'],
                     'stk_cost' => $line['price'],
@@ -531,14 +577,33 @@ class TransferOrderController extends Controller
     private function outboundHeader(int $billNo): ?array
     {
         $row = DB::connection('oracle')->selectOne(
-            'SELECT m.TR_INV_M_ID, m.BILL_NO, m.YEAR, m.DAT, m.TYPENO, m.STORE_NO,
-                    fs.STORE_NAME, m.STORE_TO, ts.STORE_NAME AS STORE_TO_NAME,
-                    m.SANF_NUMS, m.TOTAL, m.NET, m.DETAILES, m.CUR_NO, m.CUR_PRICE, m.CREATED_ON
+            'SELECT m.TR_INV_M_ID, m.BILL_NO, m.YEAR, m.DAT, m.TYPENO, m.BILL_TYPE, m.SELECT1,
+                    m.STORE_NO, fs.STORE_NAME, m.STORE_TO, ts.STORE_NAME AS STORE_TO_NAME,
+                    m.SANF_NUMS, m.TOTAL, m.DIS_RATE, m.DISCOUNT, m.NET, m.DETAILES,
+                    m.CUR_NO, cu.CUR_NAME, m.CUR_PRICE, m.CUR_NO1, cu1.CUR_NAME AS CUR_NAME1, m.CUR_PRICE1,
+                    m.ENTRY_NO, m.PROV_BILL, m.RCV_DONE,
+                    m.ACC_NO, a.ACC_NAME AS ACC_NAME, m.ACC_NO1, a1.ACC_NAME AS ACC_NAME1,
+                    m.CREATED_ON, m.CREATE_BY,
+                    (SELECT NVL(NVL(au.USER_NAME_AR, au.USER_NAME_EN), au.USER_NAME)
+                       FROM ACCOUNTS.APP_USERS au WHERE au.USER_ID = m.CREATE_BY) AS CREATED_BY_NAME,
+                    m.THE_TIME, m.LAST_UPDATED_ON, m.UPDATE_BY,
+                    (SELECT NVL(NVL(au2.USER_NAME_AR, au2.USER_NAME_EN), au2.USER_NAME)
+                       FROM ACCOUNTS.APP_USERS au2 WHERE au2.USER_ID = m.UPDATE_BY) AS LAST_UPDATED_BY_NAME,
+                    m.LAST_UPDATE_TIME,
+                    -- الشقيق الوارد: نفس رقم المستند بنوع حركة معاكس، وهو ما يُطبع في خانة
+                    -- «مسلسل الوارد» في نموذج التحويل المكتبي
+                    -- The inbound twin of the same bill — the "inbound serial" field of the desktop form.
+                    (SELECT MAX(i.TR_INV_M_ID) FROM ACCOUNTS.INVENTORY_TRANSM i
+                      WHERE i.BILL_NO = m.BILL_NO AND i.TYPENO = :typeno_in) AS INBOUND_ID
                FROM ACCOUNTS.INVENTORY_TRANSM m
                LEFT JOIN ACCOUNTS.STORES fs ON fs.STORE_NO = m.STORE_NO
                LEFT JOIN ACCOUNTS.STORES ts ON ts.STORE_NO = m.STORE_TO
+               LEFT JOIN ACCOUNTS.CURRENCY cu ON cu.CUR_NO = m.CUR_NO
+               LEFT JOIN ACCOUNTS.CURRENCY cu1 ON cu1.CUR_NO = m.CUR_NO1
+               LEFT JOIN ACCOUNTS.CHART_ACC a ON a.ACC_NO = m.ACC_NO
+               LEFT JOIN ACCOUNTS.CHART_ACC a1 ON a1.ACC_NO = m.ACC_NO1
               WHERE m.BILL_NO = :bill_no AND m.TYPENO = :typeno',
-            ['bill_no' => $billNo, 'typeno' => self::TYPENO_OUT]
+            ['bill_no' => $billNo, 'typeno' => self::TYPENO_OUT, 'typeno_in' => self::TYPENO_IN]
         );
 
         return $row === null ? null : array_change_key_case((array) $row, CASE_UPPER);
@@ -553,11 +618,22 @@ class TransferOrderController extends Controller
     private function lines(int $trInvMId): array
     {
         $rows = DB::connection('oracle')->select(
-            'SELECT d.SANF_NO, d.SANF_DNO, d.QTY, d.SANF_PRICE, d.CAP, d.TOTALD AS TOTAL, d.SEQ,
-                    s.SANF_NAME, s.PART_NO, u.UNIT_NAME
+            'SELECT d.SANF_NO, d.SANF_DNO, d.QTY, d.SANF_PRICE, d.CAP, d.PCS, d.TOTALD AS TOTAL, d.SEQ,
+                    d.SHELF_NO, d.SIZE_FRM, d.SIZE_TO, d.COLOR_NO, d.CATEGORY, d.SQTY, d.SUNIT_NO,
+                    d.STK_COST, d.SANF_COST, d.RCVDONE, d.STYLE_NO, d.CAT_NO,
+                    s.SANF_NAME, s.PART_NO, s.UNIT_NO, s.TYPE_NO, s.GROUPNO,
+                    sd.PART_NO AS SUB_PART_NO, sd.SANF_DNAME AS SUB_NAME, sd.SANF_COCE AS SUB_CODE,
+                    sd.BARACOCE AS SUB_BARCODE, sd.WID AS SUB_WID, sd.LEN AS SUB_LEN,
+                    sd.DCOLOR AS SUB_DCOLOR, sd.CATEGORY AS SUB_CATEGORY,
+                    u.UNIT_NAME, ty.TYPE_NAME AS TYPE_NAME, gy.GROUP_NAME AS GROUP_NAME,
+                    c1.COLOR_NAME AS COLOR_NAME
                FROM ACCOUNTS.INVENTORY_TRANSD d
                LEFT JOIN ACCOUNTS.SANFS s ON s.SANF_NO = d.SANF_NO
+               LEFT JOIN ACCOUNTS.SANFS_D sd ON sd.SANF_DNO = d.SANF_DNO
                LEFT JOIN ACCOUNTS.UNITS u ON u.UNIT_NO = d.UNIT_NO
+               LEFT JOIN ACCOUNTS.TYPES ty ON ty.TYPE_NO = s.TYPE_NO
+               LEFT JOIN ACCOUNTS.GROUP1 gy ON gy.GROUP_NO = s.GROUPNO
+               LEFT JOIN ACCOUNTS.SANFS_COLOR c1 ON c1.COLOR_NO = d.COLOR_NO
               WHERE d.TR_INV_M_ID = :id
               ORDER BY d.SEQ NULLS LAST, d.SANF_NO',
             ['id' => $trInvMId]
@@ -582,14 +658,31 @@ class TransferOrderController extends Controller
             'store_to' => ['required', 'integer', 'min:1', 'different:store_no'],
             'dat' => ['nullable', 'date_format:Y-m-d'],
             'detailes' => ['nullable', 'string', 'max:200'],
+            'discount' => ['nullable', 'numeric', 'min:0'],
+            'discount_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'cur_no' => ['nullable', 'integer'],
             'cur_price' => ['nullable', 'numeric', 'min:0'],
+            // نفس حقول المستند المكتبي التي يقبلها التوريد والصرف — نموذج يعرض حقلًا ولا
+            // يحفظه يجعل المستخدم يظن أن التعديل تمّ وهو لم يحدث.
+            // The same desktop-document fields receive and issue accept — a form that shows a
+            // field and never saves it makes the user believe a change happened when it did not.
+            'bill_type' => ['nullable', 'integer', 'in:1,2'],
+            'select_one' => ['nullable', 'integer', 'in:1,2'],
+            'acc_no' => ['nullable', 'integer'],
+            'acc_no1' => ['nullable', 'integer'],
+            'cur_no1' => ['nullable', 'integer'],
+            'cur_price1' => ['nullable', 'numeric', 'min:0'],
             'allow_negative' => ['nullable', 'boolean'],
             'lines' => ['required', 'array', 'min:1'],
             'lines.*.sanf_no' => ['required', 'integer', 'min:1'],
             'lines.*.sanf_dno' => ['required', 'integer', 'min:1'],
             'lines.*.qty' => ['required', 'numeric', 'gt:0'],
             'lines.*.price' => ['nullable', 'numeric', 'min:0'],
+            'lines.*.pcs' => ['nullable', 'numeric', 'min:0'],
+            'lines.*.cap' => ['nullable', 'numeric', 'min:0'],
+            'lines.*.shelf_no' => ['nullable', 'integer', 'min:0'],
+            'lines.*.color_no' => ['nullable', 'integer', 'min:0'],
+            'lines.*.category' => ['nullable', 'string', 'max:30'],
         ], [
             'store_to.different' => 'لا يمكن التحويل إلى نفس المخزن / The target store must differ from the source.',
             'lines.*.qty.gt' => 'الكمية يجب أن تكون أكبر من صفر / Quantity must be greater than zero.',

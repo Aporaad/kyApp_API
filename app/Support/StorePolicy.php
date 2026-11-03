@@ -66,6 +66,11 @@ final class StorePolicy
                 'party' => 'PROV_NAME',
                 'bill_type' => 2,
                 'inout' => 1,
+                'title' => 'فاتورة توريد مخزني',
+                'fields' => self::fields([
+                    'bill_type', 'reference', 'party', 'entry_no',
+                    'discount', 'currency_pair', 'line_currency', 'line_pack',
+                ], reference: 'PROV_BILL', partyLabel: 'المورد', referenceWritable: true),
             ],
             self::KIND_ISSUE => [
                 'master' => 'ACCOUNTS.INVENTORY_SARF',
@@ -78,6 +83,13 @@ final class StorePolicy
                 'party' => 'CUST_NAME',
                 'bill_type' => 2,
                 'inout' => -1,
+                'title' => 'منصرف مخزني',
+                // الصرف لا يملك PROV_BILL: خانته المرجعية هي SEQBILL، ويطبع متوسط التكلفة
+                // Issue has no PROV_BILL: its reference box is SEQBILL and it prints the cost.
+                'fields' => self::fields([
+                    'bill_type', 'reference', 'party', 'entry_no',
+                    'discount', 'currency_pair', 'line_cost', 'line_available',
+                ], reference: 'SEQBILL', partyLabel: 'الجهة المستلمة'),
             ],
             self::KIND_TRANSFER => [
                 'master' => 'ACCOUNTS.INVENTORY_TRANSM',
@@ -90,8 +102,96 @@ final class StorePolicy
                 'party' => 'DETAILES',
                 'bill_type' => 1,
                 'inout' => -1,
+                'title' => 'تحويل مخزني',
+                // التحويل لا نوع فاتورة له ولا طرف ولا خصم: مستندان ونقل كمية بين مخزنين
+                // A transfer has no bill type, no party and no discount: two masters moving stock.
+                'fields' => self::fields([
+                    'target_store', 'serials', 'movement_type', 'entry_no',
+                    'line_cost', 'line_available',
+                ], reference: 'PROV_BILL'),
             ],
         ];
+    }
+
+    /**
+     * بناء مجموعة الحقول المعروضة/المقروءة لهذا النوع
+     * Build the display/read field set of one kind.
+     *
+     * ── لماذا صريحة هنا لا مشتقة في كل مكان؟ لأن ثلاثتها تشترك في الجداول-الشقيقة لا في
+     *    الأعمدة: `PROV_*` للتوريد، `CUST_*` للصرف، `STORE_TO` للتحويل. أي عمود يُكتب في مسار
+     *    مشترك بلا هذا التمييز يُسقط نوعاً كاملاً بـORA-00904 — وهو ما حدث فعلاً.
+     * ── Why declared here rather than derived at each call site: the three share sibling tables,
+     *    not columns. Any column written into a shared path without this distinction takes down
+     *    a whole kind with ORA-00904 — which is exactly what happened.
+     *
+     * @param  array<int, string>  $enabled
+     * @return array<string, mixed>
+     */
+    private static function fields(
+        array $enabled,
+        ?string $reference = null,
+        ?string $partyLabel = null,
+        bool $referenceWritable = false
+    ): array {
+        $all = [
+            'bill_type' => false,
+            'reference' => false,
+            'reference_writable' => $referenceWritable,
+            'party' => false,
+            'target_store' => false,
+            'serials' => false,
+            'entry_no' => false,
+            'movement_type' => false,
+            'discount' => false,
+            'currency_pair' => false,
+            'line_currency' => false,
+            'line_cost' => false,
+            'line_pack' => false,
+            'line_available' => false,
+        ];
+
+        foreach ($enabled as $key) {
+            if (array_key_exists($key, $all)) {
+                $all[$key] = true;
+            }
+        }
+
+        $all['reference_column'] = $reference;
+        $all['party_label'] = $partyLabel;
+
+        return $all;
+    }
+
+    /**
+     * حقول نوع مستند — تقرأها المتحكمات والعميل من مصدر واحد
+     * The field flags of one kind — read by the controllers and mirrored by the client.
+     *
+     * @return array<string, mixed>
+     */
+    public static function fieldsOf(string $kind): array
+    {
+        return (array) (self::document($kind)['fields'] ?? []);
+    }
+
+    /**
+     * وصف الأنواع الثلاثة كما يعرضه الخادم للعميل في `/stores/reference`
+     * The three kinds' profiles as the server exposes them to the client.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    public static function documentProfiles(): array
+    {
+        $profiles = [];
+
+        foreach (self::documents() as $kind => $document) {
+            $profiles[$kind] = [
+                'title' => $document['title'],
+                'typeno' => $document['typeno'],
+                'fields' => $document['fields'],
+            ];
+        }
+
+        return $profiles;
     }
 
     /**

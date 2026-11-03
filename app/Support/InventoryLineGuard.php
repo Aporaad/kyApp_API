@@ -109,17 +109,34 @@ final class InventoryLineGuard
             $qty = (float) $line['qty'];
             $price = (float) $line['price'];
 
+            // العبوة والقطعة: يعطيها العميل إن حدّدها، وإلا تُشتق من الصنف الفرعي.
+            // PCS = القطع فعلياً = الكمية × كمية العبوة، وهو ما يطبعه المستند المكتبي.
+            // Pack and piece: client values win, otherwise they fall back to the item's own
+            // pack size. PCS (pieces) = quantity × pack, which is what the document prints.
+            $cap = (float) ($line['cap'] ?? 0) > 0
+                ? (float) $line['cap']
+                : ((float) ($item['CAP'] ?? 1) ?: 1.0);
+
             $lines[] = [
                 'sanf_no' => $sanfNo,
                 'sanf_dno' => $sanfDno,
                 'sanf_name' => $item['SANF_NAME'],
+                'sub_name' => (string) ($item['SANF_DNAME'] ?? ''),
                 'part_no' => (string) ($item['PART_NO'] ?? ''),
+                'sub_part_no' => (string) ($item['SUB_PART_NO'] ?? ''),
                 'unit_no' => (int) ($item['UNIT_NO'] ?? 1),
                 'unit_name' => (string) ($item['UNIT_NAME'] ?? ''),
-                'cap' => (float) ($item['CAP'] ?? 1) === 0.0 ? 1.0 : (float) ($item['CAP'] ?? 1),
+                'cap' => $cap,
+                'pcs' => round($qty * $cap, 3),
+                'shelf_no' => (int) ($line['shelf_no'] ?? 0),
                 'len' => (float) ($item['LEN'] ?? 0),
                 'wid' => (float) ($item['WID'] ?? 0),
-                'color_no' => (int) ($item['COLOR_NO'] ?? 0),
+                'color_no' => (int) ($line['color_no'] ?? $item['COLOR_NO'] ?? 0),
+                // التصنيف نصٌّ مخزّن في السطر نفسه (وليس رقماً معيارياً) كما يفعل النظام المكتبي
+                // Classification is free text stored on the line itself, exactly as the desktop does
+                'category' => (string) ($line['category'] ?? $item['SD_CATEGORY'] ?? ''),
+                'style_no' => (int) ($item['STYL_NO'] ?? 0),
+                'cat_no' => (int) ($item['CAT_NO'] ?? 0),
                 'qty' => $qty,
                 'price' => $price,
                 'total' => round($qty * $price, 2),
@@ -184,6 +201,7 @@ final class InventoryLineGuard
             $sql = 'SELECT s.SANF_NO, s.SANF_NAME, s.PART_NO, s.UNIT_NO, s.CAP, s.SANF_PRICE,
                            s.GROUPNO, s.TYPE_NO, s.STYL_NO, s.CAT_NO, s.CUR_NO,
                            d.SANF_DNO, d.LEN, d.WID, d.COLOR_NO, d.SANF_COCE, d.BARACOCE,
+                           d.SANF_DNAME, d.CATEGORY AS SD_CATEGORY, d.PART_NO AS SUB_PART_NO,
                            u.UNIT_NAME
                       FROM ACCOUNTS.SANFS s
                       JOIN ACCOUNTS.SANFS_D d ON d.SANF_NO = s.SANF_NO

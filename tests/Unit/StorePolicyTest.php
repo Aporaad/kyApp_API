@@ -108,3 +108,70 @@ test('the stores module contributes twenty-six codes to the catalog', function (
         ->and($storesCodes)->toContain('stores.reports_export')
         ->and($storesCodes)->toContain('stores.stocktake_print');
 });
+
+/**
+ * الأنواع الثلاثة ليست متطابقة — كل نوع يعلن حقوله ويقرأ أعمدة جدوله
+ * The three kinds are not identical — each declares its own fields and reads its own columns.
+ *
+ * ── لماذا هذا الاختبار؟ لأن أحد أكبر أعطال القسم كان عموداً موجوداً في التوريد وغير موجود في
+ *    الصرف. التعريف يمنع التكرار، وهذا الاختبار يمنع أن يتساوى التعريفان مرة أخرى بالخطأ.
+ * ── Why this test: one of the module's worst defects was a column that exists on receive and
+ *    not on issue. The declaration prevents duplication, and this prevents the two from
+ *    accidentally becoming equal again.
+ */
+test('each document kind declares its own fields and they differ', function () {
+    $receive = StorePolicy::fieldsOf(StorePolicy::KIND_RECEIVE);
+    $issue = StorePolicy::fieldsOf(StorePolicy::KIND_ISSUE);
+    $transfer = StorePolicy::fieldsOf(StorePolicy::KIND_TRANSFER);
+
+    // التوريد: نوع فاتورة + مرجع نصي قابل للكتابة + طرف + خصم + عملة لكل سطر + عبوة
+    // Receive: bill type, a writable textual reference, a party, discount, per-line currency, pack.
+    expect($receive['bill_type'])->toBeTrue()
+        ->and($receive['reference_column'])->toBe('PROV_BILL')
+        ->and($receive['reference_writable'])->toBeTrue()
+        ->and($receive['party'])->toBeTrue()
+        ->and($receive['discount'])->toBeTrue()
+        ->and($receive['line_currency'])->toBeTrue()
+        ->and($receive['line_pack'])->toBeTrue()
+        ->and($receive['line_cost'])->toBeFalse()
+        ->and($receive['target_store'])->toBeFalse();
+
+    // الصرف: مرجعه SEQBILL للقراءة فقط، ويطبع التكلفة ولا عبوة
+    // Issue: its reference is the read-only SEQBILL, it prints cost and no pack.
+    expect($issue['reference_column'])->toBe('SEQBILL')
+        ->and($issue['reference_writable'])->toBeFalse()
+        ->and($issue['line_cost'])->toBeTrue()
+        ->and($issue['line_currency'])->toBeFalse()
+        ->and($issue['line_pack'])->toBeFalse()
+        ->and($issue['bill_type'])->toBeTrue();
+
+    // التحويل: بلا نوع فاتورة ولا خصم ولا طرف، وبمخزنين ومسلسلين
+    // Transfer: no bill type, no discount, no party — but two stores and two serials.
+    expect($transfer['bill_type'])->toBeFalse()
+        ->and($transfer['discount'])->toBeFalse()
+        ->and($transfer['party'])->toBeFalse()
+        ->and($transfer['currency_pair'])->toBeFalse()
+        ->and($transfer['target_store'])->toBeTrue()
+        ->and($transfer['serials'])->toBeTrue()
+        ->and($transfer['line_cost'])->toBeTrue()
+        ->and($transfer['line_pack'])->toBeFalse();
+
+    // ولا تعريفان متساويان
+    // And no two declarations are equal.
+    expect($receive)->not->toBe($issue)
+        ->and($issue)->not->toBe($transfer)
+        ->and($receive)->not->toBe($transfer);
+});
+
+test('the client-facing profiles expose the same distinctions', function () {
+    $profiles = StorePolicy::documentProfiles();
+
+    expect(array_keys($profiles))->toBe(['receive', 'issue', 'transfer'])
+        ->and($profiles['receive']['title'])->toBe('فاتورة توريد مخزني')
+        ->and($profiles['issue']['title'])->toBe('منصرف مخزني')
+        ->and($profiles['transfer']['title'])->toBe('تحويل مخزني')
+        // ما يراه العميل من أعلام يجب أن يطابق ما تقرأه المتحكمات
+        // What the client sees must be the same flags the controllers read.
+        ->and($profiles['receive']['fields'])->toBe(StorePolicy::fieldsOf('receive'))
+        ->and($profiles['transfer']['fields'])->toBe(StorePolicy::fieldsOf('transfer'));
+});

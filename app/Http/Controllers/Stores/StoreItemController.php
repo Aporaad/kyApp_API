@@ -255,7 +255,7 @@ class StoreItemController extends Controller
                 DB::connection('oracle')->insert(
                     'INSERT INTO ACCOUNTS.SANFS
                         (SANF_NO, TYPE_NO, PART_NO, SANF_NAME, SANF_PRICE, UNIT_NO, GROUPNO,
-                         STYL_NO, SANF_CODE, MAIN_COLOR, CAP, BUY_PRICE, CAT_NO, SANF_TYPE,
+                         STYL_NO, SANF_CODE, MCOLOR, CAP, BUY_PRICE, CAT_NO, SANF_TYPE,
                          ACTIVE, CREATED_ON)
                      VALUES
                         (:sanf_no, :type_no, :part_no, :sanf_name, :sanf_price, :unit_no, :group_no,
@@ -377,7 +377,7 @@ class StoreItemController extends Controller
                     SET SANF_NAME = :sanf_name, PART_NO = :part_no, SANF_PRICE = :sanf_price,
                         BUY_PRICE = :buy_price, UNIT_NO = :unit_no, GROUPNO = :group_no,
                         TYPE_NO = :type_no, CAT_NO = :cat_no, STYL_NO = :styl_no,
-                        SANF_CODE = :sanf_code, MAIN_COLOR = :mcolor, CAP = :cap,
+                        SANF_CODE = :sanf_code, MCOLOR = :mcolor, CAP = :cap,
                         ACTIVE = :active, LAST_UPDATED_DATE = SYSDATE
                   WHERE SANF_NO = :sanf_no',
                 [
@@ -804,7 +804,7 @@ class StoreItemController extends Controller
             'SELECT s.SANF_NO, s.PART_NO, s.SANF_NAME, s.SANF_CODE, s.GROUPNO, g.GROUP_NAME,
                     s.TYPE_NO, t.TYPE_NAME, s.CAT_NO,
                     (SELECT MAX(c.CATEGORY) FROM ACCOUNTS.CATEGORY c WHERE c.CAT_NO = s.CAT_NO) AS CATEGORY_NAME,
-                    s.UNIT_NO, u.UNIT_NAME, s.SANF_PRICE, s.BUY_PRICE, s.CAP, s.MAIN_COLOR,
+                    s.UNIT_NO, u.UNIT_NAME, s.SANF_PRICE, s.BUY_PRICE, s.CAP, s.MCOLOR,
                     s.ACTIVE, s.STYL_NO, st.STYLE_NAME, s.CREATED_ON
                FROM ACCOUNTS.SANFS s
                LEFT JOIN ACCOUNTS.GROUP1 g ON g.GROUP_NO = s.GROUPNO
@@ -828,8 +828,10 @@ class StoreItemController extends Controller
     {
         $rows = DB::connection('oracle')->select(
             'SELECT d.SANF_DNO, d.PART_NO, d.SANF_NAME, d.SANF_DNAME, d.SANF_COCE, d.BARACOCE,
-                    d.LEN, d.WID, d.COLOR_NO, d.SANF_PRICE, d.UNIT_NO, d.ACTIVE
+                    d.LEN, d.WID, d.COLOR_NO, d.SANF_PRICE, d.UNIT_NO, d.CAP, d.ACTIVE,
+                    d.CATEGORY, d.DCOLOR, d.MCOLOR, sc.COLOR_NAME
                FROM ACCOUNTS.SANFS_D d
+               LEFT JOIN ACCOUNTS.SANFS_COLOR sc ON sc.COLOR_NO = d.COLOR_NO
               WHERE d.SANF_NO = :sanf_no
               ORDER BY d.LEN, d.WID, d.COLOR_NO',
             ['sanf_no' => $sanfNo]

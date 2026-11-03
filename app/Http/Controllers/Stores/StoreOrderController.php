@@ -157,12 +157,20 @@ abstract class StoreOrderController extends Controller
                         SELECT q.*, ROWNUM AS RN FROM (
                             SELECT m.BILL_NO, m.YEAR, m.DAT, m.BILL_TYPE, m.STORE_NO,
                                    s.STORE_NAME, '.$this->partySelect().',
-                                   m.SANF_NUMS, m.TOTAL, m.DISCOUNT, m.NET, m.DETAILES,
-                                   m.CREATED_ON, m.CREATED_BY_NAME, m.FLAG_POST,
+                                   '.$this->referenceSelect().'
+                                   m.ENTRY_NO, m.SANF_NUMS,
+                                   m.TOTAL, m.DIS_RATE, m.DISCOUNT, m.NET, m.DETAILES,
+                                   m.CUR_NO, cu.CUR_NAME, m.CUR_PRICE, m.SELECT1,
+                                   m.CREATED_ON, m.CREATED_BY_NAME, m.THE_TIME,
+                                   m.LAST_UPDATED_ON, m.LAST_UPDATED_BY_NAME, m.LAST_UPDATE_TIME,
+                                   m.FLAG_POST,
                                    (SELECT COUNT(*) FROM '.$this->details().' d
-                                     WHERE d.BILL_NO = m.BILL_NO AND d.YEAR = m.YEAR) AS LINES
+                                     WHERE d.BILL_NO = m.BILL_NO AND d.YEAR = m.YEAR) AS LINES,
+                                   (SELECT SUM(d.QTY) FROM '.$this->details().' d
+                                     WHERE d.BILL_NO = m.BILL_NO AND d.YEAR = m.YEAR) AS QTY
                               FROM '.$this->master().' m
                               LEFT JOIN ACCOUNTS.STORES s ON s.STORE_NO = m.STORE_NO
+                              LEFT JOIN ACCOUNTS.CURRENCY cu ON cu.CUR_NO = m.CUR_NO
                              WHERE '.$whereSql.'
                              ORDER BY '.$orderBy.' '.strtoupper($dir).', m.BILL_NO '.strtoupper($dir).'
                         ) q WHERE ROWNUM <= :offset2 + :limit
@@ -425,14 +433,35 @@ abstract class StoreOrderController extends Controller
             'party_no' => ['nullable', 'integer'],
             'detailes' => ['nullable', 'string', 'max:100'],
             'discount' => ['nullable', 'numeric', 'min:0'],
+            'discount_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'cur_no' => ['nullable', 'integer'],
             'cur_price' => ['nullable', 'numeric', 'min:0'],
             'allow_negative' => ['nullable', 'boolean'],
+            // ── حقول المستند المكتبي: نوع الفاتورة (1 نقد · 2 آجل)، رقم المرجع، الحسابات،
+            //    العملة الثانية، واختيار «العملة المحلية / عملة الحساب المدين». تُقبل وتُخزَّن
+            //    لأن النموذج يعرضها؛ نموذج يعرض حقلاً ثم يرميه عند الحفظ هو نموذج كاذب.
+            // ── Desktop-document fields: bill type, reference no, the accounts, the second
+            //    currency, and the local/ledger-currency choice. They are accepted and stored
+            //    because the form shows them — a form that displays a field then drops it lies.
+            'bill_type' => ['nullable', 'integer', 'in:1,2'],
+            'select_one' => ['nullable', 'integer', 'in:1,2'],
+            'party_bill' => ['nullable', 'string', 'max:15'],
+            'acc_no' => ['nullable', 'integer'],
+            'acc_no1' => ['nullable', 'integer'],
+            'cur_no1' => ['nullable', 'integer'],
+            'cur_price1' => ['nullable', 'numeric', 'min:0'],
             'lines' => ['required', 'array', 'min:1'],
             'lines.*.sanf_no' => ['required', 'integer', 'min:1'],
             'lines.*.sanf_dno' => ['required', 'integer', 'min:1'],
             'lines.*.qty' => ['required', 'numeric', 'gt:0'],
             'lines.*.price' => ['nullable', 'numeric', 'min:0'],
+            // أعمدة السطر التي يطبعها المستند المكتبي وتحتاج أن تُحفظ إن عدّلها المستخدم
+            // Line columns the desktop document prints, so edits to them must persist.
+            'lines.*.pcs' => ['nullable', 'numeric', 'min:0'],
+            'lines.*.cap' => ['nullable', 'numeric', 'min:0'],
+            'lines.*.shelf_no' => ['nullable', 'integer', 'min:0'],
+            'lines.*.color_no' => ['nullable', 'integer', 'min:0'],
+            'lines.*.category' => ['nullable', 'string', 'max:30'],
         ];
 
         $validator = validator($request->all(), $rules, [
@@ -479,18 +508,33 @@ abstract class StoreOrderController extends Controller
         $detailes = trim((string) ($payload['detailes'] ?? ''));
         $detailes = $detailes !== '' ? $detailes : $this->documentLabel();
 
+        // حساب المخزن الافتراضي من المخزن نفسه — كما يفعل النظام المكتبي تماماً: المستخدم لا
+        // يختار رقم حساب، بل المخزن يجرّ حسابه، ثم يعدّله إن أراد.
+        // The store's own inventory account is the default, exactly as the desktop does it: the
+        // user picks a store, not an account number, and may still override it.
+        $accNo = (int) ($payload['acc_no'] ?? 0) > 0
+            ? (int) $payload['acc_no']
+            : (int) $this->storeInventoryAccount($storeNo);
+
         $binds = [
             'bill_no' => $billNo,
             'year' => $year,
-            'bill_type' => (int) $this->document()['bill_type'],
+            'bill_type' => (int) ($payload['bill_type'] ?? $this->document()['bill_type']),
             'dat' => $payload['dat'],
             'party_no' => $party['no'],
             'party_name' => $party['name'],
             'total' => $totals['total'],
+            'dis_rate' => (float) ($payload['discount_rate'] ?? 0),
             'discount' => $totals['discount'],
             'net' => $totals['net'],
             'cur_no' => (int) ($payload['cur_no'] ?? 1),
             'cur_price' => (float) ($payload['cur_price'] ?? 1),
+            'cur_no1' => (int) ($payload['cur_no1'] ?? ($payload['cur_no'] ?? 1)),
+            'cur_price1' => (float) ($payload['cur_price1'] ?? ($payload['cur_price'] ?? 1)),
+            'select_one' => (int) ($payload['select_one'] ?? 1),
+            'acc_no' => $accNo > 0 ? $accNo : null,
+            'acc_no1' => (int) ($payload['acc_no1'] ?? 0) > 0 ? (int) $payload['acc_no1'] : null,
+            'party_bill' => $this->clip(trim((string) ($payload['party_bill'] ?? '')), 15) ?: null,
             'sanf_nums' => count($lines),
             'detailes' => $this->clip(ArabicEncoding::toOracleSearchChars($detailes) ?? $detailes, 100),
             'store_no' => $storeNo,
@@ -499,15 +543,23 @@ abstract class StoreOrderController extends Controller
 
         if ($update) {
             DB::connection('oracle')->update(
-                'UPDATE '.$this->master().'
+                $updateSql = 'UPDATE '.$this->master().'
                     SET DAT = TO_DATE(:dat, \'YYYY-MM-DD\'),
+                        BILL_TYPE = :bill_type,
                         '.$this->partyNoColumn().' = :party_no,
                         '.$this->partyNameColumn().' = :party_name,
                         TOTAL = :total,
+                        DIS_RATE = :dis_rate,
                         DISCOUNT = :discount,
                         NET = :net,
                         CUR_NO = :cur_no,
                         CUR_PRICE = :cur_price,
+                        CUR_NO1 = :cur_no1,
+                        CUR_PRICE1 = :cur_price1,
+                        SELECT1 = :select_one,
+                        ACC_NO = :acc_no,
+                        ACC_NO1 = :acc_no1,
+                        '.$this->referenceSetClause().'
                         SANF_NUMS = :sanf_nums,
                         DETAILES = :detailes,
                         STORE_NO = :store_no,
@@ -516,34 +568,189 @@ abstract class StoreOrderController extends Controller
                         LAST_UPDATED_BY_NAME = :user_name,
                         LAST_UPDATE_TIME = TO_CHAR(SYSDATE, \'HH24:MI:SS\')
                   WHERE BILL_NO = :bill_no AND YEAR = :year',
-                [
-                    ...$binds,
-                    'user_id' => $request->user()?->user_id,
-                    'user_name' => $this->clip($this->userName($request), 100),
-                ]
+                $this->bindOnlyUsed(
+                    $updateSql,
+                    [
+                        ...$binds,
+                        'user_id' => $request->user()?->user_id,
+                        'user_name' => $this->clip($this->userName($request), 100),
+                    ]
+                )
             );
 
             return;
         }
 
+        // قائمة الأعمدة تُبنى ديناميكياً: رقم المرجع يُكتب حيث يوجد **ويقبل الكتابة** (التوريد).
+        // الصرف يعرضه للقراءة فقط لأن عموده SEQBILL رقم داخلي لا نص مرجعي.
+        // The column list is dynamic: the reference is written where it exists **and is
+        // writable** (receive). Issue shows it read-only: its SEQBILL is an internal number.
+        $refColumn = $this->referenceWritable() ? $this->referenceColumn() : null;
+
+        $columns = [
+            'BILL_NO', 'YEAR', 'BILL_TYPE', 'DAT',
+            $this->partyNoColumn(), $this->partyNameColumn(),
+            'TOTAL', 'CUR_NO', 'CUR_PRICE', 'SANF_NUMS', 'DETAILES', 'STORE_NO',
+            'DIS_RATE', 'DISCOUNT', 'NET', 'CUR_NO1', 'CUR_PRICE1', 'SELECT1',
+            'ACC_NO', 'ACC_NO1',
+            ...($refColumn !== null ? [$refColumn] : []),
+            'CREATED_ON', 'CREATED_BY', 'CREATED_BY_NAME', 'THE_TIME',
+            'BRANCH_NO', 'TR_TYPE_ID', 'FLAG_POST', 'FLAG_CANCEL',
+        ];
+
+        $values = [
+            ':bill_no', ':year', ':bill_type', "TO_DATE(:dat, 'YYYY-MM-DD')",
+            ':party_no', ':party_name',
+            ':total', ':cur_no', ':cur_price', ':sanf_nums', ':detailes', ':store_no',
+            ':dis_rate', ':discount', ':net', ':cur_no1', ':cur_price1', ':select_one',
+            ':acc_no', ':acc_no1',
+            ...($refColumn !== null ? [':party_bill'] : []),
+            'SYSDATE', ':user_id', ':user_name',
+            "TO_CHAR(SYSDATE, 'HH24:MI:SS')", ':branch_no', ':tr_type_id', '0', '0',
+        ];
+
         DB::connection('oracle')->insert(
-            'INSERT INTO '.$this->master().'
-                (BILL_NO, YEAR, BILL_TYPE, DAT, '.$this->partyNoColumn().', '.$this->partyNameColumn().',
-                 TOTAL, CUR_NO, CUR_PRICE, SANF_NUMS, DETAILES, STORE_NO, DIS_RATE, DISCOUNT, NET,
-                 CUR_NO1, CUR_PRICE1, SELECT1, CREATED_ON, CREATED_BY, CREATED_BY_NAME, THE_TIME,
-                 BRANCH_NO, TR_TYPE_ID, FLAG_POST, FLAG_CANCEL)
+            $insertSql = 'INSERT INTO '.$this->master().'
+                ('.implode(', ', $columns).')
              VALUES
-                (:bill_no, :year, :bill_type, TO_DATE(:dat, \'YYYY-MM-DD\'), :party_no, :party_name,
-                 :total, :cur_no, :cur_price, :sanf_nums, :detailes, :store_no, 0, :discount, :net,
-                 :cur_no, :cur_price, 0, SYSDATE, :user_id, :user_name,
-                 TO_CHAR(SYSDATE, \'HH24:MI:SS\'), :branch_no, :tr_type_id, 0, 0)',
-            [
-                ...$binds,
-                'user_id' => $request->user()?->user_id,
-                'user_name' => $this->clip($this->userName($request), 100),
-                'branch_no' => $this->branchNo($request),
-            ]
+                ('.implode(', ', $values).')',
+            $this->bindOnlyUsed(
+                $insertSql,
+                [
+                    ...$binds,
+                    'user_id' => $request->user()?->user_id,
+                    'user_name' => $this->clip($this->userName($request), 100),
+                    'branch_no' => $this->branchNo($request),
+                ]
+            )
         );
+    }
+
+    /**
+     * عمود رقم المرجع في الجدول الرئيسي — PROV_BILL للتوريد، وnull حيث لا يوجد
+     * The reference-number column: PROV_BILL on receive, null where the table has none.
+     */
+    protected function referenceColumn(): ?string
+    {
+        // المصدر الوحيد للحقيقة: سياسة النوع، لا شرط في المتحكم
+        // Single source of truth: the kind's policy, not a condition in the controller.
+        $column = StorePolicy::fieldsOf($this->kind())['reference_column'] ?? null;
+
+        return is_string($column) && $column !== '' ? $column : null;
+    }
+
+    /**
+     * هل يُكتب رقم المرجع من التطبيق؟ التوريد فقط (الصرف يخزّنه رقماً داخلياً للقراءة)
+     * Is the reference number writable from the app? Receive only; issue stores it as an
+     * internal numeric serial and shows it read-only.
+     */
+    protected function referenceWritable(): bool
+    {
+        return (bool) (StorePolicy::fieldsOf($this->kind())['reference_writable'] ?? false);
+    }
+
+    /**
+     * قطعة الاختيار لرقم المرجع — فارغة حيث لا يوجد العمود
+     * The SELECT fragment for the reference number — empty where the column does not exist.
+     *
+     * ── لماذا لا تُكتب الخانة ثابتة في SELECT؟ لأن جدول الصرف لا يملك رقم مرجع أصلاً،
+     *    فكتابتها ثابتة ترمي ORA-00904 وتُسقِط قائمة أوامر الصرف كاملة: شاشة فراغ لا خانة ناقصة.
+     *    يُسمّى PARTY_BILL في الحالتين حتى لا يختلف عقد العميل بين التوريد والصرف.
+     * ── Why not hardcode it: the issue master has no reference column, so naming it
+     *    unconditionally throws ORA-00904 and empties the whole issue list. It is aliased
+     *    PARTY_BILL either way so the client contract never differs per kind.
+     */
+    protected function referenceSelect(): string
+    {
+        $column = $this->referenceColumn();
+
+        return $column === null ? '' : "m.{$column} AS PARTY_BILL,";
+    }
+
+    /**
+     * أعمدة عملة السطر — تُشتق من علم `line_currency` في سياسة النوع
+     * Per-line currency columns — driven by the kind's `line_currency` flag.
+     *
+     * ── نفس فخ رقم المرجع: جدول سطور الصرف لا يملك هذين العمودين، وكتابتهما ثابتة
+     *    تُسقط تفصيل الصرف وإنشاءه معاً بـORA-00904.
+     * ── The same trap as the reference number: the issue details table has neither column,
+     *    and naming them unconditionally breaks both the issue detail and the issue create.
+     *
+     * @return array<int, string>
+     */
+    protected function lineCurrencyColumns(): array
+    {
+        $enabled = (bool) (StorePolicy::fieldsOf($this->kind())['line_currency'] ?? false);
+
+        return $enabled ? ['CURNO', 'CURPRICE'] : [];
+    }
+
+    /**
+     * قطعة اختيار عملات السطر، فارغة حيث لا توجد
+     * The SELECT fragment for the line currency columns, empty where they do not exist.
+     */
+    protected function lineCurrencySelect(): string
+    {
+        $columns = $this->lineCurrencyColumns();
+
+        return $columns === [] ? '' : implode(', ', array_map(
+            static fn (string $column): string => 'd.'.$column,
+            $columns
+        )).',';
+    }
+
+    /**
+     * قطعة الاختيار لرقم المرجع — فارغة حيث لا يوجد العمود
+     * The reference SET fragment for UPDATE — empty where the column is absent.
+     */
+    protected function referenceSetClause(): string
+    {
+        $column = $this->referenceWritable() ? $this->referenceColumn() : null;
+
+        return $column === null ? '' : "{$column} = :party_bill,";
+    }
+
+    /**
+     * إسقاط كل رابط غير موجود في النص
+     * Drop every bind whose placeholder is not in the statement.
+     *
+     * ── لماذا؟ لأن الأعمدة الاختيارية (رقم المرجع وعملتا السطر) توجد في التوريد لا في الصرف،
+     *    فبقيت أسماؤها في مصفوفة الربط بلا مقابل في النص، ومنتقي OCI8 لا يتجاهل الزائد بل يرمي
+     *    ORA-01036: illegal variable name/number — أي أن حفظ أمر صرف كان مستحيلاً.
+     * ── Why: the optional columns (reference number, line currencies) exist on receive but not on
+     *    issue, so their names stayed in the bind array with no placeholder in the text. OCI8 does
+     *    not ignore extras — it throws ORA-01036, which made saving any issue order impossible.
+     *
+     * @param  array<string, mixed>  $binds
+     * @return array<string, mixed>
+     */
+    protected function bindOnlyUsed(string $sql, array $binds): array
+    {
+        $found = [];
+
+        preg_match_all('/:([a-z0-9_]+)/i', $sql, $found);
+
+        return array_intersect_key($binds, array_flip($found[1] ?? []));
+    }
+
+    /**
+     * حساب مخزون المخزن من STORES.INV_ACC_NO
+     * The store's inventory account, from STORES.INV_ACC_NO.
+     */
+    private function storeInventoryAccount(int $storeNo): int
+    {
+        $row = DB::connection('oracle')->selectOne(
+            'SELECT INV_ACC_NO FROM ACCOUNTS.STORES WHERE STORE_NO = :store_no',
+            ['store_no' => $storeNo]
+        );
+
+        if ($row === null) {
+            return 0;
+        }
+
+        $row = array_change_key_case((array) $row, CASE_UPPER);
+
+        return (int) ($row['INV_ACC_NO'] ?? 0);
     }
 
     /**
@@ -554,32 +761,71 @@ abstract class StoreOrderController extends Controller
      */
     protected function insertLines(array $lines, int $billNo, int $year, int $curNo, float $curPrice): void
     {
+        // أعمدة عملة السطر تُضاف حيث توجد فقط (التوريد) — انظر lineCurrencyColumns()
+        // The currency columns are added only where they exist (receive). See lineCurrencyColumns().
+        $currency = $this->lineCurrencyColumns();
+
+        $columns = [
+            'BILL_NO', 'YEAR', 'SANF_NO', 'SANF_DNO', 'SANF_PRICE', 'QTY', 'CAP', 'PCS',
+            'TOTAL', 'SEQ', 'SHELF_NO', 'SIZE_FRM', 'SIZE_TO', 'COLOR_NO', 'CATEGORY',
+            'BOUNS', 'STK_COST', 'SANF_COST',
+            ...$currency,
+        ];
+
+        $values = [
+            ':bill_no', ':year', ':sanf_no', ':sanf_dno', ':price', ':qty', ':cap', ':pcs',
+            ':total', ':seq', ':shelf_no', ':size_frm', ':size_to', ':color_no', ':category',
+            '0', ':stk_cost', ':sanf_cost',
+            ...array_map(
+                static fn (string $column): string => (string) (
+                    // خريطة اسم العمود إلى رابطته: لا يُترك عمود بلا علامة مطابقة
+                    // Column to placeholder map: no column is ever left without its bind.
+                    ['CURNO' => ':cur_no', 'CURPRICE' => ':cur_price'][$column] ?? 'NULL'
+                ),
+                $currency
+            ),
+        ];
+
         foreach ($lines as $index => $line) {
             DB::connection('oracle')->insert(
-                'INSERT INTO '.$this->details().'
-                    (BILL_NO, YEAR, SANF_NO, SANF_DNO, SANF_PRICE, QTY, CAP, TOTAL, PCS,
-                     COLOR_NO, STK_COST, SANF_COST, CURNO, CURPRICE, SEQ)
+                $lineSql = 'INSERT INTO '.$this->details().'
+                    ('.implode(', ', $columns).')
                  VALUES
-                    (:bill_no, :year, :sanf_no, :sanf_dno, :price, :qty, :cap, :total, 0,
-                     :color_no, :stk_cost, :sanf_cost, :cur_no, :cur_price, :seq)',
-                [
-                    'bill_no' => $billNo,
-                    'year' => $year,
-                    'sanf_no' => $line['sanf_no'],
-                    'sanf_dno' => $line['sanf_dno'],
-                    // SANF_PRICE وTOTAL وCAP أعمدة إلزامية في المخطط القديم
-                    // SANF_PRICE, TOTAL and CAP are NOT NULL in the legacy schema.
-                    'price' => $line['price'],
-                    'qty' => $line['qty'],
-                    'cap' => $line['cap'],
-                    'total' => $line['total'],
-                    'color_no' => $line['color_no'],
-                    'stk_cost' => $line['price'],
-                    'sanf_cost' => $line['price'],
-                    'cur_no' => $curNo,
-                    'cur_price' => $curPrice,
-                    'seq' => $index + 1,
-                ]
+                    ('.implode(', ', $values).')',
+                $this->bindOnlyUsed(
+                    $lineSql,
+                    [
+                        'bill_no' => $billNo,
+                        'year' => $year,
+                        'sanf_no' => $line['sanf_no'],
+                        'sanf_dno' => $line['sanf_dno'],
+                        // SANF_PRICE وTOTAL وCAP أعمدة إلزامية في المخطط القديم
+                        // SANF_PRICE, TOTAL and CAP are NOT NULL in the legacy schema.
+                        'price' => $line['price'],
+                        'qty' => $line['qty'],
+                        'cap' => $line['cap'],
+                        'pcs' => $line['pcs'] ?? $line['qty'],
+                        'total' => $line['total'],
+                        'shelf_no' => (int) ($line['shelf_no'] ?? 0),
+                        // المقاسان يُخزَّنان في السطر نفسه: في التحويل هما شرط ظهور الحركة في الرصيد،
+                        // وفي التوريد والصرف هما ما يطبعه المستند حتى لو تغيّر الصنف الفرعي لاحقاً.
+                        // Sizes are stored on the line: for a transfer they are what makes the
+                        // movement appear in stock at all; elsewhere they are what the document prints.
+                        'size_frm' => (float) ($line['len'] ?? 0),
+                        'size_to' => (float) ($line['wid'] ?? 0),
+                        'color_no' => (int) ($line['color_no'] ?? 0),
+                        'category' => $this->clip(
+                            ArabicEncoding::toOracleSearchChars((string) ($line['category'] ?? ''))
+                                ?? ($line['category'] ?? ''),
+                            30
+                        ),
+                        'stk_cost' => $line['price'],
+                        'sanf_cost' => $line['price'],
+                        'cur_no' => $curNo,
+                        'cur_price' => $curPrice,
+                        'seq' => $index + 1,
+                    ]
+                )
             );
         }
     }
@@ -600,16 +846,37 @@ abstract class StoreOrderController extends Controller
      * رأس المستند من قاعدة البيانات
      * The document header from the database.
      *
+     * ── لماذا كل هذه الأعمدة؟ لأن شاشة الاستعراض والنموذج يجب أن يطابقا مستند النظام المكتبي
+     *    حرفياً: نوع الفاتورة (نقد/آجل)، رقم المرجع، رقم القيد، الحسابات بأسمائها لا بأرقامها،
+     *    Currency pair rows, and the full entry/edit audit strip. النسخ السابقة كانت تعرض
+     *    نصف المستند فيصير المستند «ملخّصاً» لا «نفس المستند».
+     * ── Why every one of these columns: the view screen and the form must match the desktop
+     *    document exactly — bill type, reference no, entry no, accounts by NAME not number,
+     *    both currency rows, and the whole created/updated audit strip.
+     *
      * @return array<string, mixed>|null
      */
     protected function fetchHeader(int $billNo): ?array
     {
         $row = DB::connection('oracle')->selectOne(
             'SELECT m.BILL_NO, m.YEAR, m.DAT, m.BILL_TYPE, m.STORE_NO, s.STORE_NAME,
-                    '.$this->partySelect().', m.SANF_NUMS, m.TOTAL, m.DISCOUNT, m.NET,
-                    m.DETAILES, m.CUR_NO, m.CUR_PRICE, m.CREATED_ON, m.CREATED_BY_NAME
+                    '.$this->partySelect().',
+                    '.$this->referenceSelect().'
+                    m.ENTRY_NO, m.SANF_NUMS, m.TOTAL, m.DIS_RATE, m.DISCOUNT, m.NET,
+                    m.DETAILES, m.SELECT1, m.TR_TYPE_ID, m.BRANCH_NO, m.FLAG_POST, m.FLAG_CANCEL,
+                    m.CUR_NO, c.CUR_NAME, m.CUR_PRICE, m.CUR_NO1, c1.CUR_NAME AS CUR_NAME1, m.CUR_PRICE1,
+                    m.SEQ_PRICE, m.SEQ_PRICE1,
+                    m.ACC_NO, a.ACC_NAME AS ACC_NAME, m.ACC_NO1, a1.ACC_NAME AS ACC_NAME1,
+                    m.ACC_NO2, a2.ACC_NAME AS ACC_NAME2,
+                    m.CREATED_ON, m.CREATED_BY, m.CREATED_BY_NAME, m.THE_TIME,
+                    m.LAST_UPDATED_ON, m.LAST_UPDATED_BY, m.LAST_UPDATED_BY_NAME, m.LAST_UPDATE_TIME
                FROM '.$this->master().' m
                LEFT JOIN ACCOUNTS.STORES s ON s.STORE_NO = m.STORE_NO
+               LEFT JOIN ACCOUNTS.CURRENCY c ON c.CUR_NO = m.CUR_NO
+               LEFT JOIN ACCOUNTS.CURRENCY c1 ON c1.CUR_NO = m.CUR_NO1
+               LEFT JOIN ACCOUNTS.CHART_ACC a ON a.ACC_NO = m.ACC_NO
+               LEFT JOIN ACCOUNTS.CHART_ACC a1 ON a1.ACC_NO = m.ACC_NO1
+               LEFT JOIN ACCOUNTS.CHART_ACC a2 ON a2.ACC_NO = m.ACC_NO2
               WHERE m.BILL_NO = :bill_no',
             ['bill_no' => $billNo]
         );
@@ -618,19 +885,38 @@ abstract class StoreOrderController extends Controller
     }
 
     /**
-     * سطور المستند مع اسم الصنف ووحدته
-     * The document lines with item name and unit.
+     * سطور المستند بكل أعمدة القالب: الفرعي والوحدة والمقاسات والتصنيف واللون والرف والعبوة
+     * Every template column per line: sub item, unit, sizes, classification, colour, shelf, pack.
+     *
+     * ── المقاسات تُقرأ من SIZE_FRM/SIZE_TO **المخزّنة في السطر** لا من SANFS_D مباشرة: السطر
+     *    يحفظ المقاس الذي حُرّر وقت الحركة، ولو غيّر النظام الصنف الفرعي لاحقاً بقي المستند
+     *    التاريخي كما طُبع. (وللتحويل هذان العمودان شرط ظهور الحركة في الرصيد أصلاً.)
+     * ── Sizes come from the line's own SIZE_FRM/SIZE_TO, not SANFS_D: a document keeps the
+     *    dimensions it was moved at even if the sub item is edited later. For transfers these
+     *    two columns are also what makes the movement visible in stock at all.
      *
      * @return array<int, array<string, mixed>>
      */
     protected function fetchLines(int $billNo, int $year): array
     {
         $rows = DB::connection('oracle')->select(
-            'SELECT d.SANF_NO, d.SANF_DNO, d.QTY, d.SANF_PRICE, d.CAP, d.TOTAL, d.SEQ,
-                    s.SANF_NAME, s.PART_NO, u.UNIT_NAME
+            'SELECT d.SANF_NO, d.SANF_DNO, d.QTY, d.SANF_PRICE, d.CAP, d.PCS, d.TOTAL, d.SEQ,
+                    d.BOUNS, d.EXP_DATE, d.SHELF_NO, d.SIZE_FRM, d.SIZE_TO, d.COLOR_NO,
+                    d.CATEGORY, d.COLOR_NO2, d.STK_COST, d.SANF_COST, d.STYLE_NO, d.CAT_NO,
+                    '.$this->lineCurrencySelect().'
+                    s.SANF_NAME, s.PART_NO, s.UNIT_NO, s.TYPE_NO, s.GROUPNO,
+                    sd.PART_NO AS SUB_PART_NO, sd.SANF_DNAME AS SUB_NAME, sd.SANF_COCE AS SUB_CODE,
+                    sd.BARACOCE AS SUB_BARCODE, sd.WID AS SUB_WID, sd.LEN AS SUB_LEN,
+                    sd.DCOLOR AS SUB_DCOLOR, sd.MCOLOR AS SUB_MCOLOR, sd.CATEGORY AS SUB_CATEGORY,
+                    u.UNIT_NAME, ty.TYPE_NAME AS TYPE_NAME, gy.GROUP_NAME AS GROUP_NAME,
+                    c1.COLOR_NAME AS COLOR_NAME
                FROM '.$this->details().' d
                LEFT JOIN ACCOUNTS.SANFS s ON s.SANF_NO = d.SANF_NO
+               LEFT JOIN ACCOUNTS.SANFS_D sd ON sd.SANF_DNO = d.SANF_DNO
                LEFT JOIN ACCOUNTS.UNITS u ON u.UNIT_NO = s.UNIT_NO
+               LEFT JOIN ACCOUNTS.TYPES ty ON ty.TYPE_NO = s.TYPE_NO
+               LEFT JOIN ACCOUNTS.GROUP1 gy ON gy.GROUP_NO = s.GROUPNO
+               LEFT JOIN ACCOUNTS.SANFS_COLOR c1 ON c1.COLOR_NO = d.COLOR_NO
               WHERE d.BILL_NO = :bill_no AND d.YEAR = :year
               ORDER BY d.SEQ NULLS LAST, d.SANF_NO',
             ['bill_no' => $billNo, 'year' => $year]

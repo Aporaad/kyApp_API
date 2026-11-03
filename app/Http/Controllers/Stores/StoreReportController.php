@@ -75,6 +75,18 @@ class StoreReportController extends Controller
                   ORDER BY GROUP_NO, TYPE_NO, SHAPE_STYLE_NO'
             );
 
+            // العملات وألوان الأصناف: نموذج المستند المكتبي يحتاجهما — صفّا عملة (الأساسية
+            // والثانية) وخانة لون — فمرجع بلا عملات يعني نموذجاً يعرض قائمتين فارغتين.
+            // Currencies and item colours: the desktop document form needs both — two currency
+            // rows and a colour field. A reference without them means a form with empty dropdowns.
+            $currencies = DB::connection('oracle')->select(
+                'SELECT CUR_NO, CUR_NAME FROM ACCOUNTS.CURRENCY ORDER BY CUR_NO'
+            );
+
+            $colors = DB::connection('oracle')->select(
+                'SELECT COLOR_NO, COLOR_NAME, COLOR_TYPE FROM ACCOUNTS.SANFS_COLOR ORDER BY COLOR_NO'
+            );
+
             $excluded = StorePolicy::excludedStores();
 
             return response()->json([
@@ -87,12 +99,78 @@ class StoreReportController extends Controller
                     'units' => $this->clean($units),
                     'movement_types' => $this->clean($movementTypes),
                     'styles' => $this->clean($styles),
+                    'currencies' => $this->clean($currencies),
+                    'colors' => $this->clean($colors),
+                    // أنواع الفاتورة كما في النظام المكتبي: 1 نقد · 2 آجل — مُعرَّفة هنا لا
+                    // مكتوبة في الواجهة، حتى يبقى المصدر واحداً لو ظهرت أنواع أخرى.
+                    // Bill types exactly as the desktop uses them: 1 cash · 2 credit.
+                    'bill_types' => [
+                        ['no' => 1, 'name' => 'نقد'],
+                        ['no' => 2, 'name' => 'آجل'],
+                    ],
+                    // وصف الأنواع الثلاثة: حقول كل نوع كما يعلنها الخادم، فيبني العميل
+                    // شاشته من إعلان واحد لا من شروط مكررة في كل شاشة.
+                    // The three kinds' profiles: each kind declares its own fields, so the client
+                    // builds its screen from one declaration instead of duplicate conditions.
+                    'documents' => StorePolicy::documentProfiles(),
                     'excluded_stores' => $excluded,
                     'max_range_days' => StorePolicy::MAX_REPORT_DAYS,
                 ],
             ]);
         } catch (\Throwable $e) {
             return $this->failure('تعذر جلب المراجع / Failed to retrieve reference data.', $e);
+        }
+    }
+
+    /**
+     * بحث الحسابات في دليل الحسابات — لمُنتقي «حساب المخزن / حساب دائن» في نموذج المستند
+     * Chart-of-accounts search — for the document form's store/counter account pickers.
+     *
+     * ── لماذا مسار مستقل؟ لأن النموذج يحتاج بحثاً بالاسم والرقم في CHART_ACC، وقراءة دليل
+     *    الحسابات الكاملة ليست صلاحية كل من يملك إنشاء أمر توريد. هنا تُرجع 30 صفاً فقط،
+     *    بالاسم العربي المُصلَّح، بلا أي رصيد أو أثر مالي.
+     * ── Why a separate route: the form needs a name/number search over CHART_ACC, while reading
+     *    the whole chart of accounts is not a grant every receive-order creator holds. This
+     *    returns at most 30 rows with the repaired Arabic name and no balances at all.
+     */
+    public function accounts(Request $request): JsonResponse
+    {
+        $search = trim((string) ($request->input('search') ?? ''));
+        $limit = max(1, min((int) ($request->input('limit') ?? 30), 100));
+
+        $where = ['1 = 1'];
+        // العلامة تُربط بمفتاحين مختلفين: بعض منتقي OCI8 لا يتعامل مع إعادة استخدام اسم واحد
+        // The placeholder is bound under two keys: OCI8 does not reliably reuse one named bind.
+        $binds = ['limit1' => $limit, 'limit2' => $limit];
+
+        if ($search !== '') {
+            $oracle = ArabicEncoding::toOracleSearchChars($search);
+            $where[] = '(a.ACC_NAME LIKE :name_ar OR a.ACC_NAME LIKE :name_utf OR a.ACC_NO = :acc_no)';
+            $binds['name_ar'] = '%'.$oracle.'%';
+            $binds['name_utf'] = '%'.$search.'%';
+            $binds['acc_no'] = is_numeric($search) ? (int) $search : -1;
+        }
+
+        $sql = 'SELECT * FROM (
+                    SELECT q.*, ROWNUM AS RN FROM (
+                        SELECT a.ACC_NO, a.ACC_NAME, a.GROUP_ID
+                          FROM ACCOUNTS.CHART_ACC a
+                         WHERE '.implode(' AND ', $where).'
+                         ORDER BY a.ACC_NO
+                    ) q WHERE ROWNUM <= :limit1
+                ) WHERE RN <= :limit2';
+
+        try {
+            $rows = DB::connection('oracle')->select($sql, $binds);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'تم جلب الحسابات / Accounts retrieved.',
+                'data' => $this->clean($rows),
+                'meta' => ['total' => count($rows), 'limit' => $limit],
+            ]);
+        } catch (\Throwable $e) {
+            return $this->failure('تعذر جلب الحسابات / Failed to retrieve accounts.', $e);
         }
     }
 

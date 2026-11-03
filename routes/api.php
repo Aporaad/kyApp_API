@@ -659,6 +659,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/stores/reference', [StoreReportController::class, 'reference'])
         ->middleware('permission:stores.view,stores.items_view,stores.reports_view,stores.stocktake_view');
 
+    // بحث الحساب لمُنتقي «حساب المخزن / حساب دائن» في نموذج المستند — 30 صفاً بلا أرصدة
+    // Account lookup for the document form's pickers — 30 rows, no balances exposed.
+    Route::get('/stores/accounts', [StoreReportController::class, 'accounts'])
+        ->middleware('permission:stores.view,stores.receiving_view,stores.issuing_view,stores.transfer_view');
+
     // المرجعيات: مجموعات · أنواع · فئات · وحدات / catalogs
     Route::get('/stores/catalogs/{kind}', [StoreCatalogController::class, 'index'])
         ->middleware('permission:stores.catalogs_view,stores.catalogs_manage');

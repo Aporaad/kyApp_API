@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Stores\IssueOrderController;
 use App\Http\Controllers\Stores\ReceiveOrderController;
+use App\Http\Controllers\Stores\TransferOrderController;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -258,4 +259,117 @@ test('an issue order larger than the available stock is refused', function () {
 
     $body = $response->getData(true);
     expect($body['errors'])->toHaveKey('stock');
+});
+
+/**
+ * مخزن هدف صالح للتحويل — غير المصدر وغير أرشيفي
+ * A usable transfer target — not the source and not an archived store.
+ */
+function storesTargetStore(): ?int
+{
+    $row = DB::connection('oracle')->selectOne(
+        'SELECT STORE_NO FROM ACCOUNTS.STORES
+          WHERE STORE_NO NOT IN (1, 2, 11, 12) AND ROWNUM <= 1 ORDER BY STORE_NO'
+    );
+
+    if ($row === null) {
+        return null;
+    }
+
+    return (int) array_change_key_case((array) $row, CASE_UPPER)['STORE_NO'];
+}
+
+/**
+ * دورة كاملة لكل نوع مستند: إنشاء ثم قراءة ثم حذف
+ * A full round-trip for every document kind: create, read back, delete.
+ *
+ * ── لماذا هذا الاختبار كان ناقصاً؟ لأن عطال ORA-00904 الذي كسر قائمة الصرف وتفصيله
+ *    مرّ أخضر: كل سطور الصرف كانت تُكتب من مسار مشترك مع التوريد، وعمودا
+ *    `CURNO/CURPRICE` موجودان في جدول سطور التوريد وغير موجودان في جدول سطور الصرف.
+ *    لا اختبار صلاحيات ولا اختبار واجهة يرى عموداً مفقوداً في INSERT — يجب نداء كتابة
+ *    على كل نوع بعينه، لأن كل نوع جدولٌ مستقل بأعمدة مستقلة.
+ * ── Why this was missing: the ORA-00904 that broke the issue list stayed green. Issue lines
+ *    were written through a path shared with receive, but CURNO/CURPRICE exist on the receive
+ *    details table and not on the issue one. No permission test and no UI test sees a missing
+ *    column in an INSERT — it takes a write against each kind, because every kind is its own
+ *    table with its own columns.
+ */
+test('every document kind can be created, read back and deleted', function () {
+    $user = storesAdminUser();
+    $item = storesSampleItem();
+    $target = storesTargetStore();
+
+    if ($user === null || $item === null || $target === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية بصنف له رصيد ومخزن هدف.');
+    }
+
+    $oracle = DB::connection('oracle');
+    $before = storesQty($item['sanf_no'], 1);
+
+    $oracle->beginTransaction();
+
+    try {
+        $line = [
+            'sanf_no' => $item['sanf_no'],
+            'sanf_dno' => $item['sanf_dno'],
+            'qty' => 1,
+            'price' => 10,
+        ];
+
+        $cases = [
+            'receive' => [
+                ReceiveOrderController::class,
+                ['store_no' => 1, 'party_name' => 'اختبار آلي', 'lines' => [$line]],
+            ],
+            'issue' => [
+                IssueOrderController::class,
+                ['store_no' => 1, 'party_name' => 'قسم الاختبار', 'lines' => [$line]],
+            ],
+            'transfer' => [
+                TransferOrderController::class,
+                ['store_no' => 1, 'store_to' => $target, 'lines' => [$line]],
+            ],
+        ];
+
+        foreach ($cases as $kind => [$controller, $payload]) {
+            $request = storesRequest($payload + ['dat' => '2026-11-01'], $user);
+
+            $created = app($controller)->store($request);
+
+            expect($created->getStatusCode())->toBe(201)
+                ->and($created->getData(true)['success'])->toBeTrue();
+
+            $billNo = (int) ($created->getData(true)['data']['bill_no'] ?? 0);
+            expect($billNo)->toBeGreaterThan(0);
+
+            // القراءة بعد الكتابة مباشرة: هي وحدها التي تثبت أن ما كُتب يُقرأ بنفس الأعمدة
+            // Reading right after writing is the only thing proving the same columns round-trip.
+            $shown = app($controller)->show($request, $billNo);
+
+            expect($shown->getStatusCode())->toBe(200)
+                ->and($shown->getData(true)['success'])->toBeTrue();
+
+            $data = $shown->getData(true)['data'];
+
+            expect($data['header'])->toBeArray();
+            expect($data['lines'])->toBeArray();
+            expect(count($data['lines']))->toBeGreaterThan(0);
+
+            // كل سطر مقروء يجب أن يحمل أعمدة القالب التي تُطبع
+            // Every read line must carry the columns the document prints.
+            $first = array_change_key_case((array) $data['lines'][0], CASE_UPPER);
+
+            expect($first)->toHaveKeys(['SANF_NO', 'SANF_DNO', 'QTY', 'CAP', 'PCS', 'TOTAL']);
+
+            $deleted = app($controller)->destroy($request, $billNo);
+
+            expect($deleted->getStatusCode())->toBe(200);
+        }
+
+        // الدورة كاملة لا تغيّر الرصيد: كل مستند أُنشئ ثم حُذف في نفس المعاملة
+        // The round trip leaves stock where it found it: each document was created then deleted.
+        expect(storesQty($item['sanf_no'], 1))->toBe($before);
+    } finally {
+        $oracle->rollBack();
+    }
 });

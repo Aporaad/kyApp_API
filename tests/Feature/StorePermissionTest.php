@@ -107,6 +107,93 @@ test('a system administrator passes the same gates', function () {
     $this->getJson('/api/stores/stock-sheet')->assertStatus(200);
 });
 
+/**
+ * القوائم الثلاثة للمستندات تُقرأ فعلاً — لا يكفي أن تكون «غير ممنوعة»
+ * The three document lists must actually read — "not forbidden" is not enough.
+ *
+ * ── لماذا هذا الاختبار موجود؟ لأن قائمة الأوامر كُسرت بـORA-00904 (عمود رقم المرجع موجود
+ *    في التوريد وغير موجود في الصرف) ومرّ كل شيء: الاختبارات السابقة كانت تفتح مسارات
+ *    المخازن والأصناف والتقارير فقط، ولا نداء واحداً على /stores/issue. الحجب الصحيح مع
+ *    استعلام مكسور = شاشة فراغ عند المستخدم، وهذا ما لا يراه أي اختبار صلاحيات.
+ * ── Why this exists: the issue list broke with ORA-00904 (the reference column is on receive,
+ *    not on issue) and every test stayed green — the suite opened stores, items and reports but
+ *    never called /stores/issue. A correctly sealed route with a broken query is still an empty
+ *    screen for the user, and no permission test can see that.
+ */
+test('the three order lists answer an administrator with a real envelope', function () {
+    $admin = storesAdmin();
+
+    if ($admin === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    Sanctum::actingAs($admin, ['*']);
+
+    $this->withoutExceptionHandling();
+
+    foreach (['receive', 'issue', 'transfer'] as $kind) {
+        $response = $this->getJson("/api/stores/{$kind}?limit=5");
+
+        // 200 وحده لا يكفي: المتحكم يرد 500 بغلاف خطأ، فيجب إثبات النجاح والبيانات
+        // A bare 200 is not enough: the controller answers 500 with an error envelope, so
+        // success and the payload shape must be asserted, not just the status.
+        $response->assertStatus(200)
+            ->assertJson(['success' => true]);
+
+        expect($response->json('data'))->toBeArray()
+            ->and($response->json('meta'))->toHaveKeys(['total', 'page', 'limit', 'pages']);
+    }
+});
+
+/**
+ * تفصيل مستند لكل نوع — نفس أعمدة القالب تُقرأ على الجدين الثلاثة
+ * One document detail per kind — the template's columns must read on every master.
+ *
+ * ── الرأس والسطور لكل نوع لهما استعلام مستقل بجدول مستقل، فعمود موجود في جدول وغير موجود
+ *    في آخر لا يكتشفه إلا نداء على ذلك النوع بعينه.
+ * ── Header and lines are a separate query per kind against a separate table, so a column that
+ *    exists on one master and not another is only caught by calling that exact kind.
+ */
+test('the document detail reads for every kind that has documents', function () {
+    $admin = storesAdmin();
+
+    if ($admin === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    Sanctum::actingAs($admin, ['*']);
+
+    $this->withoutExceptionHandling();
+
+    $tables = [
+        'receive' => 'ACCOUNTS.INVENTORY_RECEIVE',
+        'issue' => 'ACCOUNTS.INVENTORY_SARF',
+        'transfer' => 'ACCOUNTS.INVENTORY_TRANSM',
+    ];
+
+    foreach ($tables as $kind => $table) {
+        $row = array_change_key_case(
+            (array) DB::connection('oracle')->selectOne(
+                "SELECT MAX(BILL_NO) AS BILL_NO FROM {$table}"
+            ),
+            CASE_UPPER
+        );
+
+        $billNo = (int) ($row['BILL_NO'] ?? 0);
+
+        if ($billNo === 0) {
+            continue;
+        }
+
+        $response = $this->getJson("/api/stores/{$kind}/{$billNo}");
+
+        $response->assertStatus(200)->assertJson(['success' => true]);
+
+        expect($response->json('data.header'))->toBeArray()
+            ->and($response->json('data.lines'))->toBeArray();
+    }
+});
+
 test('every stores route is registered behind a permission middleware', function () {
     $routes = collect(app('router')->getRoutes()->getRoutes())
         ->filter(static fn ($route): bool => str_starts_with($route->uri(), 'api/stores'));
