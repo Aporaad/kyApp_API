@@ -677,6 +677,10 @@ Route::middleware('auth:sanctum')->group(function () {
     // الأصناف / items
     Route::get('/stores/items', [StoreItemController::class, 'index'])
         ->middleware('permission:stores.items_view');
+    // تبويب الأصناف الفرعية — مسار حرفي قبل `{sanfNo}` حتى لا يُطابق كرقم
+    // The sub-items tab — a literal path registered before {sanfNo} so it is never read as an id.
+    Route::get('/stores/items/sub', [StoreItemController::class, 'subIndex'])
+        ->middleware('permission:stores.items_view');
     Route::post('/stores/items', [StoreItemController::class, 'store'])
         ->middleware('permission:stores.items_create');
     Route::get('/stores/items/{sanfNo}', [StoreItemController::class, 'show'])

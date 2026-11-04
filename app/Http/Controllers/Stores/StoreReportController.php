@@ -611,7 +611,17 @@ class StoreReportController extends Controller
     private function clean(array $rows, array $excluded = []): array
     {
         return array_map(static function ($row) use ($excluded): array {
-            $item = ArabicEncoding::cleanData((array) $row);
+            // ── تطبيع أسماء الأعمدة إلى أحرف كبيرة قبل أي قراءة: منتقي OCI8 يعيدها صغيرة
+            //    (`group_no`)، فكان العميل يقرأ `GROUP_NO` فلا يجدها فيرى كل مجموعة = 0، وكل
+            //    مجموعة فرعية = 0، ثم يطلب أصناف المجموعة 0 فيعود فارغاً. وهو نفسه سبب عدم
+            //    وسم المخازن الأرشيفية: `isset($item['STORE_NO'])` كان يفشل دائماً.
+            // ── Normalise column names to upper case before any read: the OCI8 driver returns
+            //    them lower (`group_no`), so the client looking for `GROUP_NO` saw every group as
+            //    0 and asked for items of group 0 — an empty list. The same failure kept archived
+            //    stores unmarked, because `isset($item['STORE_NO'])` never matched.
+            $item = ArabicEncoding::cleanData(
+                array_change_key_case((array) $row, CASE_UPPER)
+            );
 
             if (isset($item['STORE_NO'])) {
                 $item['ARCHIVED'] = in_array((int) $item['STORE_NO'], $excluded, true) ? 1 : 0;

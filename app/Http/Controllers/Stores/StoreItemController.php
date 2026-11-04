@@ -91,20 +91,62 @@ class StoreItemController extends Controller
         $orderBy = match ($sort) {
             'no' => 's.SANF_NO',
             'part' => 's.PART_NO',
-            'qty' => 'NVL(av.QTY, 0)',
-            'value' => 'NVL(av.VALUE, 0)',
+            'qty' => 'NVL(mv.QTY, 0)',
+            'value' => 'NVL(mv.VALUE, 0)',
             default => 's.SANF_NAME',
         };
 
         $whereSql = implode(' AND ', $where);
 
-        // استعلام الأرصدة المجمّعة لكل صنف على حدة
-        // Aggregated per-item stock sub-query.
+        // ── رصيد الصنف = مجموع أرصدة فروعه، كما حدّد المستخدم. المصدر `ITEM_MOVEMENT_D` مجمَّعاً
+        //    لكل فرع (`P_CODE`) ثم ملفوفاً بمجموع الأصناف الفرعية لكل صنف أب.
+        // ── لا `AVVG` هنا: مقاسٌ، تجميعها الكامل يكلّف 14,589 مللي مقابل 1,552 مللي لتجميع
+        //    الحركة بالفرع — نفس الأرقام (كلاهما مشتق من الحركة) بسُبع الزمن.
+        // ── An item's balance is the sum of its branches, exactly as specified. The source is
+        //    ITEM_MOVEMENT_D aggregated per branch (P_CODE), then rolled up by parent item.
+        //    Not AVVG: measured 14,589ms against 1,552ms for the branch aggregate — same numbers
+        //    (both derive from movement) at a seventh of the time.
+        // ── التجميع يبدأ من قائمة فروعه **المميزة** (`DISTINCT`) لا من الجدول مباشرة: لو تكرّر
+        //    سطر الفرع في `SANFS_D` لتكرّر رصيده في المجموع وقرأ المستخدم رقماً مضاعفاً.
+        //   DISTINCT يجعل الرصيد مناعةً لا اعتماداً على نظافة البيانات.
+        //    The rollup starts from the item's *distinct* branches, not the table: a repeated
+        //    SANFS_D row would otherwise double that branch's quantity and the reader would see
+        //    an inflated balance. DISTINCT makes the figure immune rather than dependent on clean data.
         $stockJoin = 'LEFT JOIN (
-                          SELECT I_CODE, SUM(SUM_TP) AS QTY, SUM(SUM_PRICE) AS VALUE,
-                                 MAX(STK_COST) AS COST
-                            FROM ACCOUNTS.AVVG GROUP BY I_CODE
-                      ) av ON av.I_CODE = s.SANF_NO';
+                          SELECT dd.SANF_NO,
+                                 SUM(b.QTY) AS QTY,
+                                 SUM(b.VALUE) AS VALUE,
+                                 MAX(b.COST) AS COST
+                            FROM (SELECT DISTINCT SANF_NO, SANF_DNO FROM ACCOUNTS.SANFS_D) dd
+                            JOIN (
+                                  SELECT P_CODE,
+                                         SUM(P_QTY) AS QTY,
+                                         SUM(P_QTY * STK_COST) AS VALUE,
+                                         MAX(STK_COST) AS COST
+                                    FROM ACCOUNTS.ITEM_MOVEMENT_D
+                                   GROUP BY P_CODE
+                            ) b ON b.P_CODE = dd.SANF_DNO
+                           GROUP BY dd.SANF_NO
+                      ) mv ON mv.SANF_NO = s.SANF_NO';
+
+        // ── عدد الأصناف الفرعية وتسمية الفئة كتجميعين مفردين لا كاستعلامين مترابطين لكل صف:
+        //    النسخة المترابطة تُنفَّذ مرة لكل صف معروض (٥٠ مرة في الصفحة) وتلك كانت السبب في
+        //    تجاوز مهلة العميل (١٥ ثانية) فتُفتح الشاشة فارغة. التجميع يمرّ على `SANFS_D` مرة.
+        // ── The sub-item count and the category label are single grouped joins, not per-row
+        //    correlated sub-queries: the correlated form ran once per visible row (50 times per
+        //    page) and that is what exceeded the client's 15s timeout and left the screen empty.
+        //    A grouped join walks SANFS_D exactly once.
+        $subsJoin = 'LEFT JOIN (
+                         SELECT SANF_NO, COUNT(DISTINCT SANF_DNO) AS SUBS
+                           FROM ACCOUNTS.SANFS_D GROUP BY SANF_NO
+                     ) sd ON sd.SANF_NO = s.SANF_NO';
+        // تجميع الفئة يحفظ دلالة `MAX(CATEGORY)` الأصلية ويمنع تكرار الصف لو تكرر `CAT_NO`
+        // Grouping keeps the original MAX(CATEGORY) semantics and cannot duplicate a row when
+        // CAT_NO repeats.
+        $categoryJoin = 'LEFT JOIN (
+                             SELECT CAT_NO, MAX(CATEGORY) AS CATEGORY
+                               FROM ACCOUNTS.CATEGORY GROUP BY CAT_NO
+                         ) c ON c.CAT_NO = s.CAT_NO';
 
         try {
             $countRow = (array) DB::connection('oracle')->selectOne(
@@ -122,19 +164,20 @@ class StoreItemController extends Controller
                         SELECT q.*, ROWNUM AS RN FROM (
                             SELECT s.SANF_NO, s.PART_NO, s.SANF_NAME, s.SANF_CODE,
                                    s.GROUPNO, g.GROUP_NAME, s.TYPE_NO, t.TYPE_NAME,
-                                   s.CAT_NO, (SELECT MAX(c.CATEGORY) FROM ACCOUNTS.CATEGORY c
-                                               WHERE c.CAT_NO = s.CAT_NO) AS CATEGORY_NAME,
+                                   s.CAT_NO, c.CATEGORY AS CATEGORY_NAME,
                                    s.UNIT_NO, u.UNIT_NAME, s.SANF_PRICE, s.BUY_PRICE,
                                    s.ACTIVE, s.STYL_NO, st.STYLE_NAME,
-                                   (SELECT COUNT(*) FROM ACCOUNTS.SANFS_D d
-                                     WHERE d.SANF_NO = s.SANF_NO) AS SUBS,
-                                   NVL(av.QTY, 0) AS QTY, NVL(av.VALUE, 0) AS VALUE,
-                                   NVL(av.COST, NVL(s.SANF_PRICE, 0)) AS COST
+                                   NVL(sd.SUBS, 0) AS SUBS,
+                                   NVL(mv.QTY, 0) AS QTY,
+                                   NVL(mv.VALUE, 0) AS VALUE,
+                                   NVL(mv.COST, NVL(s.SANF_PRICE, 0)) AS COST
                               FROM ACCOUNTS.SANFS s
                               LEFT JOIN ACCOUNTS.GROUP1 g ON g.GROUP_NO = s.GROUPNO
                               LEFT JOIN ACCOUNTS.TYPES t ON t.TYPE_NO = s.TYPE_NO
                               LEFT JOIN ACCOUNTS.UNITS u ON u.UNIT_NO = s.UNIT_NO
                               LEFT JOIN ACCOUNTS.STYLE st ON st.SHAPE_STYLE_NO = s.STYL_NO
+                              '.$subsJoin.'
+                              '.$categoryJoin.'
                               '.$stockJoin.'
                              WHERE '.$whereSql.'
                              ORDER BY '.$orderBy.' '.strtoupper($dir).', s.SANF_NO
@@ -147,7 +190,7 @@ class StoreItemController extends Controller
                 'success' => true,
                 'message' => 'تم جلب الأصناف / Items retrieved.',
                 'data' => array_map(
-                    static fn ($row): array => ArabicEncoding::cleanData((array) $row),
+                    static fn ($row): array => ArabicEncoding::cleanData(array_change_key_case((array) $row, CASE_UPPER)),
                     $rows
                 ),
                 'meta' => [
@@ -163,8 +206,16 @@ class StoreItemController extends Controller
     }
 
     /**
-     * تفصيل صنف: بياناته + أصنافه الفرعية + وحداته وأسعاره + أرصدته
-     * Item detail: header data, sub items, units/prices and per-store balances.
+     * تفصيل صنف: بياناته + أصنافه الفرعية بكمياتها + وحداته وأسعاره
+     * Item detail: header data, sub items with their quantities, and units/prices.
+     *
+     * ── لا `AVVG` هنا عمداً: استعلامها يكلّف ~١٣ ثانية مهما ضاق نطاقه (تُجمّع تاريخ الحركة
+     *    كاملاً قبل الفلترة). وكمية الصنف الإجمالية تُشتق من كميات فروعه، وهي **نفس المصدر**
+     *    الذي تُبنى منه `AVVG` نفسها (`ITEM_MOVEMENT_D`)، فلا فقد في الدقة وكسب زمني كامل.
+     * ── No AVVG here on purpose: a query against it costs ~13s however narrow (it aggregates
+     *    the entire movement history before filtering). The item's total quantity is derived
+     *    from its branches — the *same* source AVVG is built from (ITEM_MOVEMENT_D) — so no
+     *    accuracy is lost and all of the time is.
      */
     public function show(int $sanfNo): JsonResponse
     {
@@ -181,7 +232,6 @@ class StoreItemController extends Controller
                     'item' => ArabicEncoding::cleanData($item),
                     'subs' => $this->fetchSubs($sanfNo),
                     'units' => $this->fetchUnits($sanfNo),
-                    'balances' => $this->fetchBalances($sanfNo),
                 ],
             ]);
         } catch (\Throwable $e) {
@@ -744,8 +794,9 @@ class StoreItemController extends Controller
      */
     public function movements(Request $request, int $sanfNo): JsonResponse
     {
-        $limit = max(1, min((int) ($request->input('limit') ?? 200), 1000));
+        $limit = max(1, min((int) ($request->input('limit') ?? 500), 2000));
         $storeNo = $request->input('store_no');
+        $subDno = $request->input('sub_dno');
         $from = $request->input('from');
         $to = $request->input('to');
 
@@ -755,6 +806,13 @@ class StoreItemController extends Controller
         if ($storeNo !== null && $storeNo !== '' && $storeNo !== 'all') {
             $where[] = 'm.INV_ID = :store_no';
             $binds['store_no'] = (int) $storeNo;
+        }
+
+        // تصفية على فرع واحد: الأيقونة بجانب كل صنف فرعي تفتح كشفه هو
+        // Scope to one branch: the icon beside a sub item opens its own statement.
+        if ($subDno !== null && $subDno !== '' && $subDno !== 'all') {
+            $where[] = 'm.P_CODE = :sub_dno';
+            $binds['sub_dno'] = (int) $subDno;
         }
 
         if (is_string($from) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $from)) {
@@ -767,25 +825,61 @@ class StoreItemController extends Controller
             $binds['to_date'] = $to;
         }
 
+        $whereSql = implode(' AND ', $where);
+
         try {
+            // ── `P_CODE` هو `SANFS_D.SANF_DNO`: بلا إظهاره يصبح كشف حركة الصنف الرئيسي قائمة
+            //    سطور لا يُعرف أي فرع حرّكها، والمستخدم طلب الكشف «بكامل فروعه».
+            // ── P_CODE is SANFS_D.SANF_DNO. Without it the main item's statement is a list of
+            //    lines with no branch identity, and the whole point is the item with all branches.
             $rows = DB::connection('oracle')->select(
                 'SELECT * FROM (
-                    SELECT m.I_DATE, m.INVOIC_ID AS DOC_NO, m.BILL_DOC_TYPE AS TYPE_NO, m.TR_INV_TYPE_NAME,
-                           m.INV_ID, m.INV_NAME, m.UOM_CODE, m.P_QTY,
+                    SELECT m.I_DATE, m.INVOIC_ID AS DOC_NO, m.BILL_DOC_TYPE AS TYPE_NO,
+                           m.TR_INV_TYPE_NAME, m.INV_ID, m.INV_NAME, m.UOM_CODE, m.P_QTY,
+                           m.P_CODE AS RCRD_NO, m.COLOR_NO, m.WID, m.LEN,
+                           (SELECT MAX(sd.SANF_DNAME) FROM ACCOUNTS.SANFS_D sd
+                             WHERE sd.SANF_DNO = m.P_CODE) AS SUB_NAME,
+                           (SELECT MAX(sd.PART_NO) FROM ACCOUNTS.SANFS_D sd
+                             WHERE sd.SANF_DNO = m.P_CODE) AS SUB_PART_NO,
+                           (SELECT MAX(sc.COLOR_NAME) FROM ACCOUNTS.SANFS_COLOR sc
+                             WHERE sc.COLOR_NO = m.COLOR_NO) AS COLOR_NAME,
+                           CASE WHEN m.P_QTY > 0 THEN m.P_QTY END AS QTY_IN,
+                           CASE WHEN m.P_QTY < 0 THEN -m.P_QTY END AS QTY_OUT,
                            m.STK_COST, m.P_QTY * m.STK_COST AS LINE_VALUE, m.IT_NAME
                       FROM ACCOUNTS.ITEM_MOVEMENT_D m
-                     WHERE '.implode(' AND ', $where).'
+                     WHERE '.$whereSql.'
                      ORDER BY m.I_DATE DESC, m.INVOIC_ID DESC
                  ) WHERE ROWNUM <= :limit',
                 $binds
             );
 
+            $clean = array_map(
+                static fn ($row): array => ArabicEncoding::cleanData(array_change_key_case((array) $row, CASE_UPPER)),
+                $rows
+            );
+
+            // المجاميع تُحسب على كل الصفوف لا على صفحة العرض، وإلا صار رصيد الكشف خاطئاً
+            // Totals come from every row, not the visible page, or the statement balance lies.
+            $totals = (array) DB::connection('oracle')->selectOne(
+                'SELECT SUM(CASE WHEN m.P_QTY > 0 THEN m.P_QTY ELSE 0 END) AS QTY_IN,
+                        SUM(CASE WHEN m.P_QTY < 0 THEN -m.P_QTY ELSE 0 END) AS QTY_OUT,
+                        SUM(m.P_QTY) AS QTY_NET,
+                        SUM(m.P_QTY * m.STK_COST) AS VALUE,
+                        COUNT(*) AS LINES
+                   FROM ACCOUNTS.ITEM_MOVEMENT_D m
+                  WHERE '.$whereSql,
+                array_diff_key($binds, ['limit' => true])
+            );
+
             return response()->json([
                 'success' => true,
-                'data' => array_map(
-                    static fn ($row): array => ArabicEncoding::cleanData((array) $row),
-                    $rows
-                ),
+                'message' => 'تم جلب حركات الصنف / Item movements retrieved.',
+                'data' => $clean,
+                'meta' => [
+                    'total' => count($clean),
+                    'limit' => $limit,
+                    'totals' => array_change_key_case($totals, CASE_UPPER),
+                ],
             ]);
         } catch (\Throwable $e) {
             return $this->failure('تعذر جلب حركات الصنف / Failed to retrieve item movements.', $e);
@@ -819,25 +913,200 @@ class StoreItemController extends Controller
     }
 
     /**
-     * الأصناف الفرعية
-     * The sub items.
+     * الأصناف الفرعية بأرصدتها
+     * The sub items, each with its own balance.
      *
      * @return array<int, array<string, mixed>>
      */
     private function fetchSubs(int $sanfNo): array
     {
+        // ── رصيد الصنف الفرعي: `AVVG` مُجمَّعة على الصنف الرئيسي لا على الفرعي، فالمصدر الوحيد
+        //    لكمية الفرع هو `ITEM_MOVEMENT_D` عبر `P_CODE` (= `SANFS_D.SANF_DNO`).
+        // ── أسماء الألوان والوحدات **استعلامات فردية لا روابط**: القاعدة فيها 54 صفاً في
+        //    `SANFS_COLOR` لـ 27 معرّف لون فقط (كل لون بصفين)، فأي `LEFT JOIN` عليهضاعف كل فرع
+        //    مضاعفة ظاهرة — وهو بالضبط العطل الذي بلّغه المستخدم مراراً عن تكرار الأصناف الفرعية.
+        // ── A sub item's balance: AVVG aggregates on the main item, never the sub, so the only
+        //    source for a branch quantity is ITEM_MOVEMENT_D via P_CODE (= SANFS_D.SANF_DNO).
+        //    Colour and unit names are scalar lookups, not joins: SANFS_COLOR holds 54 rows for
+        //    27 colour ids (every colour twice), so any LEFT JOIN on it doubles every branch —
+        //    exactly the duplication the user kept reporting.
         $rows = DB::connection('oracle')->select(
             'SELECT d.SANF_DNO, d.PART_NO, d.SANF_NAME, d.SANF_DNAME, d.SANF_COCE, d.BARACOCE,
                     d.LEN, d.WID, d.COLOR_NO, d.SANF_PRICE, d.UNIT_NO, d.CAP, d.ACTIVE,
-                    d.CATEGORY, d.DCOLOR, d.MCOLOR, sc.COLOR_NAME
+                    d.CATEGORY, d.DCOLOR, d.MCOLOR,
+                    (SELECT MAX(sc.COLOR_NAME) FROM ACCOUNTS.SANFS_COLOR sc
+                      WHERE sc.COLOR_NO = d.COLOR_NO) AS COLOR_NAME,
+                    (SELECT MAX(u.UNIT_NAME) FROM ACCOUNTS.UNITS u
+                      WHERE u.UNIT_NO = d.UNIT_NO) AS UNIT_NAME,
+                    s.SANF_NAME AS PARENT_NAME, s.PART_NO AS ITEM_PART_NO,
+                    NVL(q.QTY, 0) AS QTY,
+                    NVL(q.VALUE, 0) AS VALUE
                FROM ACCOUNTS.SANFS_D d
-               LEFT JOIN ACCOUNTS.SANFS_COLOR sc ON sc.COLOR_NO = d.COLOR_NO
+               LEFT JOIN ACCOUNTS.SANFS s ON s.SANF_NO = d.SANF_NO
+               LEFT JOIN (
+                    -- رصيد الفرع من حركته هو، بغير تقييد بالصنف الأب: نفس المصدر يستعمل في
+                    -- القائمة والتفصيل وكشف الحركة فتتطابق الأرقام في الثلاثة دائماً. القيد لم
+                    -- يكن يوفّر زمناً أصلاً — العرض يجمع كله قبل الفلترة (مقاس: 1,552 مللي).
+                    -- A branch balance is its own movement, unrestricted by parent: the same
+                    -- source feeds the list, the detail and the statement, so the three always
+                    -- agree. The predicate saved nothing anyway, because the view aggregates
+                    -- everything before filtering (measured 1,552ms).
+                    SELECT P_CODE, SUM(P_QTY) AS QTY, SUM(P_QTY * STK_COST) AS VALUE
+                      FROM ACCOUNTS.ITEM_MOVEMENT_D
+                     GROUP BY P_CODE
+               ) q ON q.P_CODE = d.SANF_DNO
               WHERE d.SANF_NO = :sanf_no
-              ORDER BY d.LEN, d.WID, d.COLOR_NO',
+              ORDER BY d.LEN, d.WID, d.COLOR_NO, d.SANF_DNO',
             ['sanf_no' => $sanfNo]
         );
 
-        return array_map(static fn ($row): array => ArabicEncoding::cleanData((array) $row), $rows);
+        return array_map(static fn ($row): array => ArabicEncoding::cleanData(array_change_key_case((array) $row, CASE_UPPER)), $rows);
+    }
+
+    /**
+     * تبويب الأصناف الفرعية — كل الفروع في النظام بصفحات، ورصيد كل فرع مباشرة
+     * The sub-items tab — every branch in the system, paged, each with its own balance.
+     *
+     * ── رصيد الفرع يُحسب من حركته هو (`P_CODE`)، مقاس: 2,150 مللي للصفحة. وهو نفس الرقم الذي
+     *    يُبنى منه رصيد الصنف الأب، فتبقى اللائحتان متطابقتين دائماً: مجموع الفروع = الرئيسي.
+     * ── A branch balance is its own movement (P_CODE): measured 2,150ms per page. It is the same
+     *    figure the parent item's balance is rolled up from, so the two lists always agree —
+     *    branches sum to the main item, by construction.
+     */
+    public function subIndex(Request $request): JsonResponse
+    {
+        $search = trim((string) ($request->input('search') ?? ''));
+        $limit = max(1, min((int) ($request->input('limit') ?? self::DEFAULT_LIMIT), self::MAX_LIMIT));
+        $page = max((int) ($request->input('page') ?? 1), 1);
+        $offset = ($page - 1) * $limit;
+
+        $where = ['1 = 1'];
+        $binds = [];
+
+        if ($search !== '') {
+            $oracle = ArabicEncoding::toOracleSearchChars($search);
+
+            if (is_numeric($search)) {
+                $where[] = '(d.SANF_DNO = :sanf_dno OR d.SANF_NO = :sanf_no
+                             OR d.PART_NO LIKE :part_like)';
+                $binds['sanf_dno'] = (int) $search;
+                $binds['sanf_no'] = (int) $search;
+                $binds['part_like'] = '%'.$search.'%';
+            } else {
+                $where[] = '(d.SANF_DNAME LIKE :name_ar OR d.SANF_DNAME LIKE :name_utf
+                             OR d.SANF_NAME LIKE :name_ar2 OR d.SANF_NAME LIKE :name_utf2
+                             OR d.PART_NO LIKE :part_like2 OR d.SANF_COCE LIKE :code_like
+                             OR s.SANF_NAME LIKE :parent_ar OR s.SANF_NAME LIKE :parent_utf)';
+                $binds['name_ar'] = '%'.$oracle.'%';
+                $binds['name_utf'] = '%'.$search.'%';
+                $binds['name_ar2'] = '%'.$oracle.'%';
+                $binds['name_utf2'] = '%'.$search.'%';
+                $binds['part_like2'] = '%'.$search.'%';
+                $binds['code_like'] = '%'.$search.'%';
+                $binds['parent_ar'] = '%'.$oracle.'%';
+                $binds['parent_utf'] = '%'.$search.'%';
+            }
+        }
+
+        foreach (['group_no' => 's.GROUPNO', 'type_no' => 's.TYPE_NO'] as $input => $column) {
+            $value = $request->input($input);
+
+            if ($value !== null && $value !== '' && $value !== 'all') {
+                $where[] = $column.' = :'.$input;
+                $binds[$input] = (int) $value;
+            }
+        }
+
+        $active = $request->input('active');
+
+        if ($active !== null && $active !== '' && $active !== 'all') {
+            $where[] = 'NVL(d.ACTIVE, 1) = :active';
+            $binds['active'] = (int) $active;
+        }
+
+        $whereSql = implode(' AND ', $where);
+
+        try {
+            $countRow = (array) DB::connection('oracle')->selectOne(
+                'SELECT COUNT(*) AS TOTAL
+                   FROM ACCOUNTS.SANFS_D d
+                   JOIN ACCOUNTS.SANFS s ON s.SANF_NO = d.SANF_NO
+                  WHERE '.$whereSql,
+                $binds
+            );
+            $total = (int) (reset($countRow) ?: 0);
+
+            $pagedBinds = $binds;
+            $pagedBinds['offset'] = $offset;
+            $pagedBinds['offset2'] = $offset;
+            $pagedBinds['limit'] = $limit;
+
+            $sql = 'SELECT * FROM (
+                        SELECT q.*, ROWNUM AS RN FROM (
+                            -- ── التجميع بمعرّف الفرع وحده يجعل مضاعفة الصفف مستحيلة بنيوياً: أي
+                            --    رابط يصادف أنه 1:N (لوحة ألوان مكررة، صنف أب مكرر) يُدمج في صف واحد.
+                            --    وهذا يحمي من العطل الذي بلّغه المستخدم عن تكرار الصنف الفرعي مرتين.
+                            -- ── Grouping by the branch id alone makes row doubling structurally
+                            --    impossible: any join that happens to be 1:N (a repeated colour row, a
+                            --    duplicated parent) collapses back into one row. This is the guard
+                            --    against the reported "sub item shown twice".
+                            SELECT d.SANF_DNO, d.SANF_NO,
+                                   MAX(d.PART_NO) AS PART_NO, MAX(d.SANF_DNAME) AS SANF_DNAME,
+                                   MAX(d.SANF_COCE) AS SANF_COCE, MAX(d.BARACOCE) AS BARACOCE,
+                                   MAX(d.LEN) AS LEN, MAX(d.WID) AS WID,
+                                   MAX(d.COLOR_NO) AS COLOR_NO, MAX(d.ACTIVE) AS ACTIVE,
+                                   MAX(d.CATEGORY) AS CATEGORY, MAX(d.DCOLOR) AS DCOLOR,
+                                   MAX(d.MCOLOR) AS MCOLOR,
+                                   MAX(d.SANF_PRICE) AS SANF_PRICE, MAX(d.UNIT_NO) AS UNIT_NO,
+                                   MAX(d.CAP) AS CAP, MAX(u.UNIT_NAME) AS UNIT_NAME,
+                                   MAX(s.SANF_NAME) AS SANF_NAME,
+                                   MAX(s.PART_NO) AS ITEM_PART_NO,
+                                   MAX(s.GROUPNO) AS GROUPNO, MAX(g.GROUP_NAME) AS GROUP_NAME,
+                                   MAX(s.TYPE_NO) AS TYPE_NO, MAX(t.TYPE_NAME) AS TYPE_NAME,
+                                   MAX(sc.COLOR_NAME) AS COLOR_NAME,
+                                   NVL(MAX(bt.QTY), 0) AS QTY,
+                                   NVL(MAX(bt.VALUE), 0) AS VALUE
+                              FROM ACCOUNTS.SANFS_D d
+                              JOIN ACCOUNTS.SANFS s ON s.SANF_NO = d.SANF_NO
+                              LEFT JOIN ACCOUNTS.GROUP1 g ON g.GROUP_NO = s.GROUPNO
+                              LEFT JOIN ACCOUNTS.TYPES t ON t.TYPE_NO = s.TYPE_NO
+                              LEFT JOIN ACCOUNTS.UNITS u ON u.UNIT_NO = d.UNIT_NO
+                              LEFT JOIN ACCOUNTS.SANFS_COLOR sc ON sc.COLOR_NO = d.COLOR_NO
+                              LEFT JOIN (
+                                    SELECT P_CODE, SUM(P_QTY) AS QTY,
+                                           SUM(P_QTY * STK_COST) AS VALUE
+                                      FROM ACCOUNTS.ITEM_MOVEMENT_D
+                                     GROUP BY P_CODE
+                              ) bt ON bt.P_CODE = d.SANF_DNO
+                             WHERE '.$whereSql.'
+                             GROUP BY d.SANF_DNO, d.SANF_NO
+                             -- الترتيب بالأسماء المستعارة لا بـMAX(): داخل كتلة مجمّعة ملفوفة
+                             -- بـROWNUM يرمي ORDER BY MAX(...) الخطأ ORA-00935
+                             -- Order by the aliases: ORDER BY MAX(...) inside a grouped block wrapped
+                             -- by ROWNUM raises ORA-00935.
+                             ORDER BY SANF_NAME, LEN, WID, SANF_DNO
+                        ) q WHERE ROWNUM <= :offset2 + :limit
+                    ) WHERE RN > :offset';
+
+            $rows = DB::connection('oracle')->select($sql, $pagedBinds);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'تم جلب الأصناف الفرعية / Sub items retrieved.',
+                'data' => array_map(
+                    static fn ($row): array => ArabicEncoding::cleanData(array_change_key_case((array) $row, CASE_UPPER)),
+                    $rows
+                ),
+                'meta' => [
+                    'total' => $total,
+                    'page' => $page,
+                    'limit' => $limit,
+                    'pages' => $limit > 0 ? (int) ceil($total / $limit) : 1,
+                ],
+            ]);
+        } catch (\Throwable $e) {
+            return $this->failure('تعذر جلب الأصناف الفرعية / Failed to retrieve sub items.', $e);
+        }
     }
 
     /**
@@ -858,28 +1127,7 @@ class StoreItemController extends Controller
             ['sanf_no' => $sanfNo]
         );
 
-        return array_map(static fn ($row): array => ArabicEncoding::cleanData((array) $row), $rows);
-    }
-
-    /**
-     * الأرصدة لكل مخزن
-     * Balances per store.
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    private function fetchBalances(int $sanfNo): array
-    {
-        $rows = DB::connection('oracle')->select(
-            'SELECT INV_ID, MAX(INVNAME) AS INVNAME, SUM(SUM_TP) AS QTY,
-                    MAX(STK_COST) AS COST, SUM(SUM_PRICE) AS VALUE
-               FROM ACCOUNTS.AVVG
-              WHERE I_CODE = :sanf_no
-              GROUP BY INV_ID
-              ORDER BY INV_ID',
-            ['sanf_no' => $sanfNo]
-        );
-
-        return array_map(static fn ($row): array => ArabicEncoding::cleanData((array) $row), $rows);
+        return array_map(static fn ($row): array => ArabicEncoding::cleanData(array_change_key_case((array) $row, CASE_UPPER)), $rows);
     }
 
     /**
