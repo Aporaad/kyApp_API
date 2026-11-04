@@ -1017,6 +1017,15 @@ class StoreItemController extends Controller
             }
         }
 
+        // ── منتقي الأصناف الفرعية يحتاج فروع صنف بعينه: بلا هذا الوسيط يضطر المستخدم للبحث
+        //    في 9,005 فرع ليجد فرعاً يعرف رقمه أصلاً.
+        // ── The branch picker needs one item's branches: without this filter the user hunts
+        //    through 9,005 branches for a branch whose number they already know.
+        if (($sanfNo = $request->input('sanf_no')) !== null && $sanfNo !== '' && $sanfNo !== 'all') {
+            $where[] = 'd.SANF_NO = :sanf_no';
+            $binds['sanf_no'] = (int) $sanfNo;
+        }
+
         $active = $request->input('active');
 
         if ($active !== null && $active !== '' && $active !== 'all') {

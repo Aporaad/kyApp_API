@@ -187,17 +187,10 @@ class StoreReportController extends Controller
         $where = ['1 = 1'];
         $binds = [];
 
-        $storeNos = $this->storeList($request);
+        $storeNos = $this->scopeList($request, 'store_nos', 'store_no');
 
         if ($storeNos !== []) {
-            $placeholders = [];
-
-            foreach ($storeNos as $i => $storeNo) {
-                $binds['st'.$i] = $storeNo;
-                $placeholders[] = ':st'.$i;
-            }
-
-            $where[] = 'INV_ID IN ('.implode(',', $placeholders).')';
+            $where[] = $this->inClause('INV_ID', $storeNos, $binds, 'st');
         }
 
         $search = trim((string) ($request->input('search') ?? ''));
@@ -210,14 +203,20 @@ class StoreReportController extends Controller
             $binds['part'] = '%'.$search.'%';
         }
 
-        if (($groupNo = $this->intOrNull($request->input('group_no'))) !== null) {
-            $where[] = 'GROUPNO = :group_no';
-            $binds['group_no'] = $groupNo;
+        // الأرصدة تتبع نفس قوائم التصفية التي يستعملها التقرير، فلا يختلف «نفس الاختيار»
+        // بين شاشتين
+        // Balances accept the same multi-selection as the reports, so one choice cannot mean
+        // two different things on two screens.
+        $groupNos = $this->scopeList($request, 'group_nos', 'group_no');
+
+        if ($groupNos !== []) {
+            $where[] = $this->inClause('GROUPNO', $groupNos, $binds, 'gr');
         }
 
-        if (($typeNo = $this->intOrNull($request->input('type_no'))) !== null) {
-            $where[] = 'TYPE_NO = :type_no';
-            $binds['type_no'] = $typeNo;
+        $itemTypeNos = $this->scopeList($request, 'item_type_nos', 'type_no');
+
+        if ($itemTypeNos !== []) {
+            $where[] = $this->inClause('TYPE_NO', $itemTypeNos, $binds, 'it');
         }
 
         $only = (string) ($request->input('only') ?? 'all');
@@ -321,6 +320,13 @@ class StoreReportController extends Controller
                            m.BILL_DOC_TYPE AS TYPE_NO, m.TR_INV_TYPE_NAME, m.INV_ID, m.INV_NAME,
                            m.I_CODE, m.P_CODE, m.IT_NAME, m.PART_NO, m.UOM_CODE,
                            m.GROUPNO, m.GROUP_NAME, m.TYPE_NO AS ITEM_TYPE_NO, m.TYPE_NAME, m.CAT_NAME,
+                           -- الفرع بلقطة فردية لا برابط: الرابط على جدول غير فريد يضاعف السطور
+                           -- The branch by a scalar lookup, never a join: joining a non-unique
+                           -- table would multiply the very rows this report counts.
+                           (SELECT MAX(sd.SANF_DNAME) FROM ACCOUNTS.SANFS_D sd
+                             WHERE sd.SANF_DNO = m.P_CODE) AS SUB_NAME,
+                           (SELECT MAX(sc.COLOR_NAME) FROM ACCOUNTS.SANFS_COLOR sc
+                             WHERE sc.COLOR_NO = m.COLOR_NO) AS COLOR_NAME,
                            CASE WHEN m.P_QTY > 0 THEN m.P_QTY END AS QTY_IN,
                            CASE WHEN m.P_QTY < 0 THEN -m.P_QTY END AS QTY_OUT,
                            m.P_QTY, m.STK_COST, ROUND(m.P_QTY * m.STK_COST, 2) AS LINE_VALUE
@@ -381,13 +387,30 @@ class StoreReportController extends Controller
 
         // التجميع بالمخزن والصنف ليبقى مطابقاً لمعنى الرصيد المعروض
         // Grouping by store and item keeps the meaning identical to the displayed balance.
+        // ── مستوى التجميع اختيار صريح لا فرض: «خلاصة لكل صنف في كل مخزن» و«خلاصة على مستوى
+        //    المجموعة» سؤالان مختلفان تماماً، وكان أحدهما فقط ممكناً.
+        // ── The aggregation level is an explicit choice: "summary per item per store" and
+        //    "summary across a whole group" are different questions, and only one was possible.
+        $groupBy = (string) ($request->input('group_by') ?? 'item');
+
+        $groupColumns = match ($groupBy) {
+            'store' => 'm.INV_ID',
+            'group' => 'm.GROUPNO',
+            'subgroup' => 'm.TYPE_NO',
+            'category' => 'm.CAT_NAME',
+            'item' => 'm.I_CODE, m.INV_ID',
+            default => 'm.I_CODE, m.INV_ID',
+        };
+
         try {
             $rows = DB::connection('oracle')->select(
                 'SELECT * FROM (
                     SELECT m.I_CODE, MAX(m.PART_NO) AS PART_NO, MAX(m.IT_NAME) AS ITEM_NAME,
-                           MAX(m.UOM_CODE) AS UOM_CODE, m.INV_ID, MAX(m.INV_NAME) AS INV_NAME,
+                           MAX(m.UOM_CODE) AS UOM_CODE, MAX(m.INV_ID) AS INV_ID,
+                           MAX(m.INV_NAME) AS INV_NAME,
                            MAX(m.GROUPNO) AS GROUPNO, MAX(m.GROUP_NAME) AS GROUP_NAME,
-                           MAX(m.TYPE_NAME) AS TYPE_NAME,
+                           MAX(m.TYPE_NO) AS ITEM_TYPE_NO, MAX(m.TYPE_NAME) AS TYPE_NAME,
+                           MAX(m.CAT_NAME) AS CAT_NAME,
                            SUM(CASE WHEN m.P_QTY > 0 THEN m.P_QTY ELSE 0 END) AS QTY_IN,
                            SUM(CASE WHEN m.P_QTY < 0 THEN -m.P_QTY ELSE 0 END) AS QTY_OUT,
                            SUM(m.P_QTY) AS NET_QTY,
@@ -396,8 +419,12 @@ class StoreReportController extends Controller
                            COUNT(*) AS ROWS_COUNT
                       FROM ACCOUNTS.ITEM_MOVEMENT_D m
                      WHERE '.$whereSql.'
-                     GROUP BY m.I_CODE, m.INV_ID
-                     ORDER BY MAX(m.IT_NAME), m.INV_ID
+                     GROUP BY '.$groupColumns.'
+                     -- الترتيب بالأسماء المستعارة: MAX() مكرراً في ORDER BY داخل كتلة مجمّعة
+                     -- ملفوفة بـROWNUM يرمي ORA-00935
+                     -- Order by the aliases: repeating MAX(...) in the ORDER BY of a grouped
+                     -- block wrapped by ROWNUM raises ORA-00935.
+                     ORDER BY ITEM_NAME, INV_ID
                  ) WHERE ROWNUM <= :limit',
                 $binds
             );
@@ -416,6 +443,7 @@ class StoreReportController extends Controller
                     'from' => $from,
                     'to' => $to,
                     'kind' => 'summary',
+                    'group_by' => $groupBy,
                     'qty_in' => array_sum(array_map(static fn (array $r): float => (float) ($r['QTY_IN'] ?? 0), $clean)),
                     'qty_out' => array_sum(array_map(static fn (array $r): float => (float) ($r['QTY_OUT'] ?? 0), $clean)),
                     'value' => array_sum(array_map(static fn (array $r): float => (float) ($r['NET_VALUE'] ?? 0), $clean)),
@@ -457,27 +485,26 @@ class StoreReportController extends Controller
      */
     private function applyScope(Request $request, array &$where, array &$binds): void
     {
-        $storeNos = $this->storeList($request);
+        $storeNos = $this->scopeList($request, 'store_nos', 'store_no');
 
         if ($storeNos !== []) {
-            $placeholders = [];
-
-            foreach ($storeNos as $i => $storeNo) {
-                $binds['st'.$i] = $storeNo;
-                $placeholders[] = ':st'.$i;
-            }
-
-            $where[] = 'm.INV_ID IN ('.implode(',', $placeholders).')';
+            $where[] = $this->inClause('m.INV_ID', $storeNos, $binds, 'st');
         }
 
-        if (($groupNo = $this->intOrNull($request->input('group_no'))) !== null) {
-            $where[] = 'm.GROUPNO = :group_no';
-            $binds['group_no'] = $groupNo;
+        // ── المجموعات والفرعيات قوائم متعددة الآن: تقرير «كل الأقمشة بكل فروعها» أو
+        //    «ثلاث مجموعات مرة واحدة» طلب عملي لا رفاهية، والمفردة القديمة تبقى مدعومة.
+        // ── Groups and sub groups are multi-valued now: reporting on three groups at once is a
+        //    working need, not a luxury. The legacy single value keeps working.
+        $groupNos = $this->scopeList($request, 'group_nos', 'group_no');
+
+        if ($groupNos !== []) {
+            $where[] = $this->inClause('m.GROUPNO', $groupNos, $binds, 'gr');
         }
 
-        if (($typeNo = $this->intOrNull($request->input('type_no'))) !== null) {
-            $where[] = 'm.TYPE_NO = :type_no';
-            $binds['type_no'] = $typeNo;
+        $itemTypeNos = $this->scopeList($request, 'item_type_nos', 'type_no');
+
+        if ($itemTypeNos !== []) {
+            $where[] = $this->inClause('m.TYPE_NO', $itemTypeNos, $binds, 'it');
         }
 
         if (($sanfNo = $this->intOrNull($request->input('sanf_no'))) !== null) {
@@ -500,21 +527,56 @@ class StoreReportController extends Controller
         $typeNos = $this->intList($request->input('type_nos'));
 
         if ($typeNos !== []) {
-            $placeholders = [];
-
-            foreach ($typeNos as $i => $typeno) {
-                $binds['tn'.$i] = $typeno;
-                $placeholders[] = ':tn'.$i;
-            }
-
             // نوع الحركة هو `BILL_DOC_TYPE` (typeno للـ TRANS_TYPE) وليس `TYPE_NO` الذي يحمل
             // نوع الصنف الفرعي؛ خلطهما كان يجعل منتَقي «نوع الحركة» يرشّح المجموعة الفرعية،
             // فيعود تقرير فارغ أو ناقص بلا سبب ظاهر للمستخدم.
             // The movement type is BILL_DOC_TYPE (the TRANS_TYPE typeno), not TYPE_NO which
             // carries the item's sub group. Mixing them made the movement-type picker filter
             // the sub group, returning an empty or partial report for no visible reason.
-            $where[] = 'm.BILL_DOC_TYPE IN ('.implode(', ', $placeholders).')';
+            $where[] = $this->inClause('m.BILL_DOC_TYPE', $typeNos, $binds, 'tn');
         }
+    }
+
+    /**
+     * قائمة المعرّفات من وسيط plural مع رجوع إلى المفردة القديمة
+     * The id list from the plural parameter, falling back to the legacy singular one.
+     *
+     * ── «لاشي» قيمة صريحة في الواجهة، وتصل كفراغ أو كـ`all`: كلاهما يعني بلا قيد، فلا
+     *    يُرسل رقم وهمي يُرشّح على لا شيء.
+     * ── "None" is an explicit UI choice that arrives as empty or as `all`; both mean
+     *    unconstrained, so no phantom id is ever sent to filter on nothing.
+     *
+     * @return array<int, int>
+     */
+    private function scopeList(Request $request, string $plural, string $singular): array
+    {
+        $values = $this->intList($request->input($plural));
+
+        if ($values !== []) {
+            return $values;
+        }
+
+        $single = $this->intOrNull($request->input($singular));
+
+        return $single === null ? [] : [$single];
+    }
+
+    /**
+     * بناء شرط IN بروابط مسمّاة فريدة — لا أرقام داخل النص أبداً
+     * Build an IN clause with uniquely named binds — never numbers inside the text.
+     *
+     * @param  array<int, int>  $values
+     */
+    private function inClause(string $column, array $values, array &$binds, string $prefix): string
+    {
+        $placeholders = [];
+
+        foreach (array_values($values) as $i => $value) {
+            $binds[$prefix.$i] = $value;
+            $placeholders[] = ':'.$prefix.$i;
+        }
+
+        return $column.' IN ('.implode(', ', $placeholders).')';
     }
 
     /**
@@ -557,23 +619,6 @@ class StoreReportController extends Controller
         }
 
         return [$from, $to];
-    }
-
-    /**
-     * قائمة المخازن المطلوبة: الكل (فارغة) أو أرقام مفصولة بفواصل
-     * The requested stores: empty means all, otherwise comma-separated numbers.
-     *
-     * @return array<int, int>
-     */
-    private function storeList(Request $request): array
-    {
-        $raw = $request->input('store_no');
-
-        if ($raw === null || $raw === '' || $raw === 'all') {
-            return [];
-        }
-
-        return $this->intList($raw);
     }
 
     /**
