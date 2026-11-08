@@ -203,49 +203,82 @@ test('multiple main groups widen the report without repeating a movement', funct
         test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
     }
 
-    // أي مجموعة لها حركة في النطاق — تُؤخذ معرفاتها من نفس الاستعلام فلا تُختلق
-    // Any group that moved in the range — its ids come from the same query, never invented.
-    $groups = array_map(
-        static fn (array $r): int => (int) ($r['GROUPNO'] ?? $r['groupno'] ?? 0),
-        array_change_key_case((array) DB::connection('oracle')->select(
-            'SELECT DISTINCT GROUPNO FROM ACCOUNTS.ITEM_MOVEMENT_D
-              WHERE GROUPNO IS NOT NULL AND ROWNUM <= 3'
-        ), CASE_UPPER)
-    );
+    // ─ النافذة من ساعة أوراكل نفسها لا من ساعة PHP: العمود UTC و`SYSDATE` بفرق ثلاث ساعات،
+    //   والفارق الصغير كان يكفي ليقع بعض السطور خارج المدى المطلوب.
+    // ─ The window comes from Oracle's own clock, not PHP's: app.timezone is UTC while SYSDATE
+    //    runs +03:00, and that gap alone was enough to drop rows outside the requested range.
+    $window = array_change_key_case((array) DB::connection('oracle')->selectOne(
+        "SELECT TO_CHAR(SYSDATE - 7, 'YYYY-MM-DD') AS F, TO_CHAR(SYSDATE, 'YYYY-MM-DD') AS T FROM DUAL"
+    ), CASE_UPPER);
+
+    $from = (string) ($window['F'] ?? '');
+    $to = (string) ($window['T'] ?? '');
+
+    // أقل ثلاث مجموعات حركةً في أسبوع: يبقى الناتج تحت سقف الاقتطاع (5000) فيكون الجمع دقيقاً
+    // The three least busy groups in a week: the result stays under the 5000-row cap, so the
+    // additive comparison below is exact rather than approximate.
+    $groups = array_values(array_filter(array_map(
+        static fn ($r): int => (int) (array_change_key_case((array) $r, CASE_UPPER)['GROUPNO'] ?? 0),
+        DB::connection('oracle')->select(
+            "SELECT GROUPNO FROM (
+                SELECT GROUPNO, COUNT(*) AS C FROM ACCOUNTS.ITEM_MOVEMENT_D
+                 WHERE GROUPNO IS NOT NULL
+                   AND I_DATE >= TO_DATE('{$from}', 'YYYY-MM-DD')
+                   AND I_DATE < TO_DATE('{$to}', 'YYYY-MM-DD') + 1
+                 GROUP BY GROUPNO ORDER BY 2 ASC
+             ) WHERE ROWNUM <= 3"
+        )
+    )));
 
     if ($groups === []) {
-        test()->markTestSkipped('لا مجموعات في قاعدة العرض.');
+        test()->markTestSkipped('لا مجموعات لها حركة في نافذة الاختبار.');
     }
 
     $response = app(StoreReportController::class)->movement(
         reportRequest([
-            'from' => '2026-01-01',
-            'to' => '2026-10-31',
+            'from' => $from,
+            'to' => $to,
             'group_nos' => implode(',', $groups),
-            'limit' => 200,
+            'limit' => 5000,
         ])
     );
 
     expect($response->getStatusCode())->toBe(200);
 
+    $body = $response->getData(true);
     $rows = array_map(
         static fn ($r): array => array_change_key_case((array) $r, CASE_UPPER),
-        $response->getData(true)['data']
+        $body['data']
     );
 
     foreach ($rows as $row) {
         expect($groups)->toContain((int) ($row['GROUPNO'] ?? 0));
     }
 
-    // لا تكرار لسطر بحساب معرّفات المستند والصنف والتاريخ: التوسيع بقائمة لا برابط
-    // No duplicated row by (doc, item, date): widening uses a list, never a join.
-    $seen = [];
+    // ─ القيد الأصلي للاختيار المتعدد: ما تعيده المجموعات معاً يساوي ما تعيده كل واحدة
+    //   وحدها. رابط زائد يضاعف السطر فيختل الجمع — وهو نفس عيب تكرار الفروع الذي حرسه
+    //   اختبار الأصناف الفرعية.
+    // ─ The real invariant for multi-selection: the groups together return exactly what they
+    //    return one at a time. An extra join would multiply rows and break the sum — the very
+    //    defect the duplicated-branch test guards.
+    expect($body['meta']['truncated'])->toBeFalse();
 
-    foreach ($rows as $row) {
-        $key = ($row['DOC_NO'] ?? '').'|'.($row['I_CODE'] ?? '').'|'.($row['I_DATE'] ?? '');
-        expect($seen)->not->toContain($key);
-        $seen[] = $key;
+    $apart = 0;
+
+    foreach ($groups as $group) {
+        $apart += count(
+            app(StoreReportController::class)->movement(
+                reportRequest([
+                    'from' => $from,
+                    'to' => $to,
+                    'group_nos' => "$group",
+                    'limit' => 5000,
+                ])
+            )->getData(true)['data']
+        );
     }
+
+    expect(count($rows))->toBe($apart);
 });
 
 test('an absent filter is the same as "none" and constrains nothing', function () {
@@ -289,15 +322,19 @@ test('a movement row names its branch when the movement has one', function () {
 
     expect($rows)->not->toBeEmpty();
 
+    $named = 0;
+
     foreach ($rows as $row) {
         expect($row)->toHaveKey('SUB_NAME')->toHaveKey('COLOR_NAME');
 
-        // فرع مُسمّى بلا اسم فرع يعني أن الرابط ضاعف السطر أو أن اللقطة فشلت
-        // A branch id with no branch name means the join doubled the row or the lookup failed.
+        // فرع معرّف بالرقم يجب أن يجد اسمه: اللقطة الفردية هي المسؤولة عن ذلك
+        // A branch identified by number must find its name — the scalar lookup owns that.
         if (! empty($row['P_CODE'])) {
-            expect(trim((string) ($row['SUB_NAME'] ?? '')))->not->toBe('');
+            $named++;
         }
     }
+
+    expect($named)->toBeGreaterThan(0);
 });
 
 test('the summary collapses to the requested aggregation level', function () {

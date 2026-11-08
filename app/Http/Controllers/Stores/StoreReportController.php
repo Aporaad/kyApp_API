@@ -292,6 +292,13 @@ class StoreReportController extends Controller
     /**
      * عرض حركة — سطر لكل حركة مخزنية في المدى المحدد
      * Movement view — one row per stock movement inside the range.
+     *
+     * ── التقرير الآن يُبنى على **نطاق** لا على مجرد فلاتر: حركة صنف فرعي جدول واحد،
+     *    وحركة صنف رئيسي تُقسَّم لكل فرع، وحركة مجموعة فرعية لكل صنف رئيسي، وحركة
+     *    مجموعة رئيسية لكل مجموعة فرعية — ولكل قسم إحصاؤه ثم إحصاء عام في النهاية.
+     * ── A report now has a SCOPE, not just filters: a branch statement is one table, an item
+     *    statement sections by branch, a sub-group statement by main item, a main-group one by
+     *    sub group — each section with its own statistics and a grand total at the end.
      */
     public function movement(Request $request): JsonResponse
     {
@@ -309,9 +316,26 @@ class StoreReportController extends Controller
 
         $this->applyScope($request, $where, $binds);
 
+        // شروط النطاق بدون المدى الزمني: بها يُقاس الرصيد السابق على نفس الأقسام بالضبط
+        // The scope predicates without the date window: the opening balance must be measured
+        // over the very same sections or the two halves of the report would not add up.
+        $outerWhere = [];
+        $outerBinds = [];
+        $this->applyScope($request, $outerWhere, $outerBinds);
+
+        $scope = $this->movementScope($request);
+        $sectionColumn = self::MOVEMENT_SECTIONS[$scope] ?? null;
+
         $limit = max(1, min((int) ($request->input('limit') ?? 2000), self::MAX_LIMIT));
         $binds['limit'] = $limit;
         $whereSql = implode(' AND ', $where);
+
+        // الترتيب بالقسم ثم بالتاريخ: الرصيد الجاري والإحصاء يُحسبان بتراكم صفّي واحد
+        // Order by section then date: the running balance and the section stats come out of a
+        // single sequential pass, with no second query and no guesswork.
+        $orderSql = $sectionColumn === null
+            ? 'm.I_DATE, m.INVOIC_ID, m.I_CODE'
+            : $sectionColumn.', m.I_DATE, m.INVOIC_ID, m.I_CODE';
 
         try {
             $rows = DB::connection('oracle')->select(
@@ -332,7 +356,7 @@ class StoreReportController extends Controller
                            m.P_QTY, m.STK_COST, ROUND(m.P_QTY * m.STK_COST, 2) AS LINE_VALUE
                       FROM ACCOUNTS.ITEM_MOVEMENT_D m
                      WHERE '.$whereSql.'
-                     ORDER BY m.I_DATE, m.INVOIC_ID, m.I_CODE
+                     ORDER BY '.$orderSql.'
                  ) WHERE ROWNUM <= :limit',
                 $binds
             );
@@ -342,23 +366,90 @@ class StoreReportController extends Controller
                 $rows
             );
 
+            $openings = $sectionColumn === null
+                ? []
+                : $this->openingBySection(
+                    '('.implode(') AND (', $outerWhere ?: ['1 = 1']).')',
+                    $outerBinds,
+                    $from,
+                    $sectionColumn
+                );
+
             return response()->json([
                 'success' => true,
-                'data' => $clean,
-                'meta' => [
-                    'total' => count($clean),
-                    'truncated' => count($clean) >= $limit,
-                    'from' => $from,
-                    'to' => $to,
-                    'kind' => 'movement',
-                    'qty_in' => array_sum(array_map(static fn (array $r): float => (float) ($r['QTY_IN'] ?? 0), $clean)),
-                    'qty_out' => array_sum(array_map(static fn (array $r): float => (float) ($r['QTY_OUT'] ?? 0), $clean)),
-                    'value' => array_sum(array_map(static fn (array $r): float => (float) ($r['LINE_VALUE'] ?? 0), $clean)),
-                ],
+                'data' => $this->stampMovement($clean, $scope, $sectionColumn, $openings),
+                'meta' => $this->movementMeta($clean, $scope, $sectionColumn, $openings, $from, $to, $limit),
             ]);
         } catch (\Throwable $e) {
             return $this->failure('تعذر جلب حركة المخزون / Failed to retrieve stock movement.', $e);
         }
+    }
+
+    /**
+     * عمود التقسيم لكل نطاق حركة — لا قسم البتة في حركة الصنف الفرعي
+     * The section column per movement scope — a branch statement has no sections at all.
+     */
+    private const MOVEMENT_SECTIONS = [
+        'branch' => null,
+        'item' => 'm.P_CODE',
+        'subgroup' => 'm.I_CODE',
+        'group' => 'm.TYPE_NO',
+    ];
+
+    /**
+     * نطاق تقرير الحركة: من المعطيات إن لم يُرسل صراحة
+     * The movement report's scope, inferred from the parameters when not sent explicitly.
+     */
+    private function movementScope(Request $request): string
+    {
+        $scope = (string) ($request->input('scope') ?? '');
+
+        if (array_key_exists($scope, self::MOVEMENT_SECTIONS)) {
+            return $scope;
+        }
+
+        // التراتيب الطبيعي للسؤال: فرع ← صنف ← مجموعة فرعية ← مجموعة رئيسية
+        // The natural order of the question: branch, item, sub group, main group.
+        if ($this->intOrNull($request->input('sanf_dno')) !== null) {
+            return 'branch';
+        }
+
+        if ($this->intOrNull($request->input('sanf_no')) !== null) {
+            return 'item';
+        }
+
+        return $this->scopeList($request, 'item_type_nos', 'type_no') !== [] ? 'subgroup' : 'group';
+    }
+
+    /**
+     * رصيد ما قبل الفترة لكل قسم — مجموعة واحدة لا استعلام لكل صنف
+     * The pre-period balance per section — one grouped query, never one per item.
+     *
+     * @return array<string, float>
+     */
+    private function openingBySection(
+        string $scopeSql,
+        array $binds,
+        string $from,
+        string $sectionColumn
+    ): array {
+        $rows = DB::connection('oracle')->select(
+            'SELECT '.$sectionColumn.' AS SK, NVL(SUM(m.P_QTY), 0) AS OPEN_QTY
+              FROM ACCOUNTS.ITEM_MOVEMENT_D m
+             WHERE '.$scopeSql.'
+               AND m.I_DATE < TO_DATE(:open_from, \'YYYY-MM-DD\')
+             GROUP BY '.$sectionColumn,
+            $binds + ['open_from' => $from]
+        );
+
+        $openings = [];
+
+        foreach ($rows as $row) {
+            $row = array_change_key_case((array) $row, CASE_UPPER);
+            $openings[(string) ($row['SK'] ?? '')] = (float) ($row['OPEN_QTY'] ?? 0);
+        }
+
+        return $openings;
     }
 
     /**
@@ -405,7 +496,7 @@ class StoreReportController extends Controller
         try {
             $rows = DB::connection('oracle')->select(
                 'SELECT * FROM (
-                    SELECT m.I_CODE, MAX(m.PART_NO) AS PART_NO, MAX(m.IT_NAME) AS ITEM_NAME,
+                    SELECT MAX(m.I_CODE) AS I_CODE, MAX(m.PART_NO) AS PART_NO, MAX(m.IT_NAME) AS ITEM_NAME,
                            MAX(m.UOM_CODE) AS UOM_CODE, MAX(m.INV_ID) AS INV_ID,
                            MAX(m.INV_NAME) AS INV_NAME,
                            MAX(m.GROUPNO) AS GROUPNO, MAX(m.GROUP_NAME) AS GROUP_NAME,
