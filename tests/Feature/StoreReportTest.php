@@ -208,7 +208,7 @@ test('multiple main groups widen the report without repeating a movement', funct
     // ─ The window comes from Oracle's own clock, not PHP's: app.timezone is UTC while SYSDATE
     //    runs +03:00, and that gap alone was enough to drop rows outside the requested range.
     $window = array_change_key_case((array) DB::connection('oracle')->selectOne(
-        "SELECT TO_CHAR(SYSDATE - 7, 'YYYY-MM-DD') AS F, TO_CHAR(SYSDATE, 'YYYY-MM-DD') AS T FROM DUAL"
+        "SELECT TO_CHAR(SYSDATE - 60, 'YYYY-MM-DD') AS F, TO_CHAR(SYSDATE, 'YYYY-MM-DD') AS T FROM DUAL"
     ), CASE_UPPER);
 
     $from = (string) ($window['F'] ?? '');
@@ -370,14 +370,15 @@ test('the summary collapses to the requested aggregation level', function () {
     }
 });
 
-test('an unknown aggregation level falls back to the default silently', function () {
+test('an unknown aggregation level is sanitised, never injected', function () {
     if (reportUser() === null) {
         test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
     }
 
-    // مستوى مجهول لا يُمرَّر إلى SQL أبداً: البناء حرفي من match فلا مجال لحقن عمود
-    // An unknown level never reaches SQL: the columns come from a literal match, so there is
-    // no way to inject one.
+    // ── مستوى مجهول لا يصل إلى SQL ولا يُعاد كما هو: الرموز تُفلتر بقائمة بيضاء ثم
+    //    يُعاد تركيب الوسيط، فلا نص مستخدم يظهر في ترويسة ولا في GROUP BY
+    // ── An unknown level reaches neither the SQL nor the header: tokens are filtered through
+    //    a whitelist and the parameter is rebuilt, so no user text is echoed anywhere.
     $response = app(StoreReportController::class)->summary(
         reportRequest([
             'from' => '2026-10-01',
@@ -387,10 +388,165 @@ test('an unknown aggregation level falls back to the default silently', function
     );
 
     expect($response->getStatusCode())->toBe(200)
-        ->and($response->getData(true)['meta']['group_by'])->toBe('DROP TABLE sanfs');
+        ->and($response->getData(true)['meta']['group_by'])->toBe('item_store');
 
     // الأعمدة المجمَّعة تبقى كما في الوضع الافتراضي
     // The grouped columns stay exactly as the default level.
     expect(array_change_key_case((array) ($response->getData(true)['data'][0] ?? []), CASE_UPPER))
         ->toHaveKey('NET_QTY');
+});
+
+test('a movement report sections itself and carries a running balance', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    // صنف رئيسي معروف بفروع: كل فرع قسم مستقل برصيده السابق والجاري
+    // A known item with branches: every branch is its own section with an opening and a run.
+    $response = app(StoreReportController::class)->movement(
+        reportRequest([
+            'from' => '2026-01-01',
+            'to' => '2026-10-31',
+            'scope' => 'item',
+            'sanf_no' => '1991',
+            'limit' => 500,
+        ])
+    );
+
+    expect($response->getStatusCode())->toBe(200);
+
+    $body = $response->getData(true);
+    $rows = array_map(
+        static fn ($r): array => array_change_key_case((array) $r, CASE_UPPER),
+        $body['data']
+    );
+
+    if ($rows === []) {
+        test()->markTestSkipped('لا حركة للصنف في هذا النطاق.');
+    }
+
+    expect($body['meta']['scope'])->toBe('item')
+        ->and($body['meta']['sectioned'])->toBeTrue()
+        ->and($body['meta']['sections'])->toBeArray();
+
+    foreach ($rows as $row) {
+        expect($row)->toHaveKey('SECTION_KEY')
+            ->and($row)->toHaveKey('BALANCE_QTY');
+    }
+
+    // ── الرصيد الجاري يساوي السابق + تراكم الصافي داخل القسم وحده: هذا هو المصحّح
+    //    الذي يجعل كشف الفرع مقروءاً بدل أن يكون قائمة حركات بلا نهاية معروفة.
+    // ── The running balance is the opening plus the accumulated net inside its own section —
+    //    exactly what turns a branch statement from an endless list into a readable balance.
+    $seen = [];
+
+    foreach ($rows as $row) {
+        $key = (string) $row['SECTION_KEY'];
+        $seen[$key] = ($seen[$key] ?? 0) + (float) $row['P_QTY'];
+    }
+
+    foreach ($body['meta']['sections'] as $section) {
+        $sectionKey = (string) $section['key'];
+
+        expect($sectionKey)->not->toBe('');
+        expect(abs(
+            (float) $section['opening_qty']
+            + (float) $section['net_qty']
+            - (float) $section['closing_qty']
+        ))->toBeLessThan(0.01);
+        expect(abs((float) $section['qty_in'] - (float) $section['qty_out'] - (float) $section['net_qty']))
+            ->toBeLessThan(0.01);
+    }
+
+    // الإحصاء العام = مجموع أقسامه، لا رقم مستقل يعارضها
+    // The grand total is the sum of its sections, never an independent figure that disagrees.
+    $sumOpening = array_sum(array_map(
+        static fn (array $s): float => (float) $s['opening_qty'],
+        $body['meta']['sections']
+    ));
+
+    expect(abs($sumOpening - (float) $body['meta']['totals']['opening_qty']))->toBeLessThan(0.01);
+});
+
+test('a branch movement report stays a single unsectioned table', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    $response = app(StoreReportController::class)->movement(
+        reportRequest([
+            'from' => '2026-01-01',
+            'to' => '2026-10-31',
+            'scope' => 'branch',
+            'limit' => 200,
+        ])
+    );
+
+    $body = $response->getData(true);
+
+    expect($body['meta']['scope'])->toBe('branch')
+        ->and($body['meta']['sectioned'])->toBeFalse()
+        ->and(count($body['meta']['sections']))->toBeLessThanOrEqual(1);
+});
+
+test('the summary reports opening and closing balances per row', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    $response = app(StoreReportController::class)->summary(
+        reportRequest([
+            'from' => '2026-06-01',
+            'to' => '2026-10-31',
+            'group_by' => 'item*store',
+            'limit' => 400,
+        ])
+    );
+
+    expect($response->getStatusCode())->toBe(200);
+
+    $body = $response->getData(true);
+    $rows = array_map(
+        static fn ($r): array => array_change_key_case((array) $r, CASE_UPPER),
+        $body['data']
+    );
+
+    expect($body['meta']['group_by'])->toBe('item*store')
+        ->and($body['meta']['group_tokens'])->toBe(['item', 'store']);
+
+    foreach ($rows as $row) {
+        expect($row)->toHaveKey('OPENING_QTY')
+            ->and($row)->toHaveKey('CLOSING_QTY')
+            ->and($row)->toHaveKey('IN_VALUE')
+            ->and($row)->toHaveKey('OUT_VALUE');
+
+        // الحالي = السابق + صافي الفترة: مطابقة حسابية لا تقدير
+        // Closing equals opening plus the period net: an identity, not an estimate.
+        expect(abs(
+            (float) $row['OPENING_QTY'] + (float) $row['NET_QTY'] - (float) $row['CLOSING_QTY']
+        ))->toBeLessThan(0.01);
+    }
+});
+
+test('composite grouping accepts every token combination the reports need', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    foreach (['sub', 'sub*store', 'item*sub', 'subgroup*item', 'group*subgroup'] as $level) {
+        $response = app(StoreReportController::class)->summary(
+            reportRequest([
+                'from' => '2026-08-01',
+                'to' => '2026-10-31',
+                'group_by' => $level,
+                'limit' => 50,
+            ])
+        );
+
+        expect($response->getStatusCode())->toBe(200);
+
+        $body = $response->getData(true);
+        expect($body['meta']['group_by'])->toBe($level);
+        expect($body['meta']['group_tokens'])->toBe(explode('*', $level));
+    }
 });

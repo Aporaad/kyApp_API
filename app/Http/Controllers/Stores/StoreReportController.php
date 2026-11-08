@@ -453,6 +453,177 @@ class StoreReportController extends Controller
     }
 
     /**
+     * وسم السطور بالقسم والرصيد الجاري — تراكم واحد فوق السطور المرتبة أصلاً
+     * Stamp the rows with their section and running balance — one accumulation over rows
+     * that are already ordered by section and date.
+     *
+     * ── الرصيد الجاري يُحسب بالتراكم لا باستعلام لكل سطر: الفرق بين 2000 سطر و 2000
+     *    رحلة قاعدة بيانات هو ما يجعل التقرير مستحيلاً لا بطيئاً فحسب.
+     * ── The running balance accumulates instead of querying per row: the difference between
+     *    2000 rows and 2000 database round-trips is the line between slow and impossible.
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @param  array<string, float>  $openings
+     * @return array<int, array<string, mixed>>
+     */
+    private function stampMovement(
+        array $rows,
+        string $scope,
+        ?string $sectionColumn,
+        array $openings
+    ): array {
+        // عمود المفتاح في الصف نفسه: السطور لا تحمل أسماء أعمدة الـ SQL الخام
+        // The key as the row carries it: rows never hold the raw SQL column names.
+        $keyField = match ($scope) {
+            'item' => 'P_CODE',
+            'subgroup' => 'I_CODE',
+            'group' => 'ITEM_TYPE_NO',
+            default => null,
+        };
+
+        $labelField = match ($scope) {
+            'item' => 'SUB_NAME',
+            'subgroup' => 'IT_NAME',
+            'group' => 'TYPE_NAME',
+            default => null,
+        };
+
+        $current = null;
+        $balanceQty = 0.0;
+        $balanceValue = 0.0;
+
+        foreach ($rows as $index => $row) {
+            $key = $keyField === null
+                ? '__all__'
+                : (string) ($row[$keyField] ?? '');
+
+            if ($key !== $current) {
+                $current = $key;
+                // الرصيد يبدأ من رصيد افتتاح قسمه، لا من الصفر
+                // A section starts at its own opening balance, never at zero.
+                $balanceQty = (float) ($openings[$key] ?? 0);
+                $balanceValue = 0.0;
+            }
+
+            $balanceQty += (float) ($row['P_QTY'] ?? 0);
+            $balanceValue += (float) ($row['LINE_VALUE'] ?? 0);
+
+            $rows[$index]['SECTION_KEY'] = $key;
+            $rows[$index]['SECTION_LABEL'] = $labelField === null
+                ? ''
+                : trim((string) ($row[$labelField] ?? ''));
+            $rows[$index]['BALANCE_QTY'] = round($balanceQty, 4);
+            $rows[$index]['BALANCE_VALUE'] = round($balanceValue, 2);
+        }
+
+        return $rows;
+    }
+
+    /**
+     * إحصاءات الأقسام والإحصاء العام — لكل قسم رصيد سابق ووارد ومنصرف ورصيد حالي
+     * Per-section statistics plus the grand total: opening, inbound, outbound, closing.
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @param  array<string, float>  $openings
+     * @return array<string, mixed>
+     */
+    private function movementMeta(
+        array $rows,
+        string $scope,
+        ?string $sectionColumn,
+        array $openings,
+        string $from,
+        string $to,
+        int $limit
+    ): array {
+        $sections = [];
+
+        foreach ($rows as $row) {
+            $key = (string) ($row['SECTION_KEY'] ?? '__all__');
+            $label = (string) ($row['SECTION_LABEL'] ?? '');
+
+            if (! isset($sections[$key])) {
+                $sections[$key] = [
+                    'key' => $key,
+                    'label' => $label,
+                    'opening_qty' => (float) ($openings[$key] ?? 0),
+                    'rows' => 0,
+                    'qty_in' => 0.0,
+                    'qty_in_value' => 0.0,
+                    'qty_out' => 0.0,
+                    'qty_out_value' => 0.0,
+                ];
+            }
+
+            $qtyIn = (float) ($row['QTY_IN'] ?? 0);
+            $qtyOut = (float) ($row['QTY_OUT'] ?? 0);
+            $value = (float) ($row['LINE_VALUE'] ?? 0);
+
+            $sections[$key]['rows']++;
+            $sections[$key]['qty_in'] += $qtyIn;
+            $sections[$key]['qty_out'] += $qtyOut;
+
+            // قيمة الوارد/المنصرف تُفصل لأن المستند قد يدخل بتكلفة ويخرج بأخرى
+            // Inbound and outbound values stay separate: a document may cost in at one price
+            // and leave at another.
+            $sections[$key]['qty_in_value'] += $qtyIn > 0 ? $value : 0;
+            $sections[$key]['qty_out_value'] += $qtyOut > 0 ? -$value : 0;
+
+            // الوصف قد يأتي على أول سطر ثم يفرغ على بقية السطور: لا يُستبدل بوصف أعمى
+            // A label can be blank on the first row and present later: never keep the blank.
+            if ($sections[$key]['label'] === '' && $label !== '') {
+                $sections[$key]['label'] = $label;
+            }
+        }
+
+        foreach ($sections as $key => $section) {
+            $net = (float) $section['qty_in'] - (float) $section['qty_out'];
+
+            $sections[$key]['net_qty'] = round($net, 4);
+            $sections[$key]['closing_qty'] = round((float) $section['opening_qty'] + $net, 4);
+            $sections[$key]['closing_value'] = round(
+                (float) $section['qty_in_value'] - (float) $section['qty_out_value'],
+                2
+            );
+            $sections[$key]['qty_in'] = round((float) $section['qty_in'], 4);
+            $sections[$key]['qty_out'] = round((float) $section['qty_out'], 4);
+            $sections[$key]['qty_in_value'] = round((float) $section['qty_in_value'], 2);
+            $sections[$key]['qty_out_value'] = round((float) $section['qty_out_value'], 2);
+            $sections[$key]['opening_qty'] = round((float) $section['opening_qty'], 4);
+        }
+
+        $totals = [
+            'sections' => count($sections),
+            'rows' => count($rows),
+            'opening_qty' => array_sum(array_column($sections, 'opening_qty')),
+            'qty_in' => array_sum(array_column($sections, 'qty_in')),
+            'qty_in_value' => array_sum(array_column($sections, 'qty_in_value')),
+            'qty_out' => array_sum(array_column($sections, 'qty_out')),
+            'qty_out_value' => array_sum(array_column($sections, 'qty_out_value')),
+            'net_qty' => array_sum(array_column($sections, 'net_qty')),
+            'closing_qty' => array_sum(array_column($sections, 'closing_qty')),
+            'closing_value' => array_sum(array_column($sections, 'closing_value')),
+        ];
+
+        return [
+            'total' => count($rows),
+            'truncated' => count($rows) >= $limit,
+            'from' => $from,
+            'to' => $to,
+            'kind' => 'movement',
+            'scope' => $scope,
+            'sectioned' => $sectionColumn !== null,
+            'sections' => array_values($sections),
+            'totals' => $totals,
+            // مفتاحان قديمان يُبقيانهما لأن شاشات الاختبارات والمستهلكين تقرأهما
+            // Two legacy keys stay because existing tests and consumers read them.
+            'qty_in' => $totals['qty_in'],
+            'qty_out' => $totals['qty_out'],
+            'value' => $totals['closing_value'],
+        ];
+    }
+
+    /**
      * خلاصة — وارد/صادر/صافي لكل صنف خلال المدى
      * Summary — inbound/outbound/net per item across the range.
      */
@@ -476,35 +647,58 @@ class StoreReportController extends Controller
         $binds['limit'] = $limit;
         $whereSql = implode(' AND ', $where);
 
-        // التجميع بالمخزن والصنف ليبقى مطابقاً لمعنى الرصيد المعروض
-        // Grouping by store and item keeps the meaning identical to the displayed balance.
-        // ── مستوى التجميع اختيار صريح لا فرض: «خلاصة لكل صنف في كل مخزن» و«خلاصة على مستوى
-        //    المجموعة» سؤالان مختلفان تماماً، وكان أحدهما فقط ممكناً.
-        // ── The aggregation level is an explicit choice: "summary per item per store" and
-        //    "summary across a whole group" are different questions, and only one was possible.
-        $groupBy = (string) ($request->input('group_by') ?? 'item');
+        // ── التجميع مركّب لا مفرد: «صنف فرعي × مخزن» و«مجموعة فرعية × صنف رئيسي» سؤالان
+        //    حقيقيان في المراجعة، وكان كل مستوى منها يستلزم دالة GROUP BY جديدة بيده.
+        //    الرموز تُقرأ من قائمة بيضاء فقط، فلا يصل أي نص مستخدم إلى نص SQL.
+        // ── Grouping is composite, not single: "branch × store" and "sub group × main item" are
+        //    real review questions, and each level used to need its own hand-written GROUP BY.
+        //    Tokens come from a whitelist only, so no user text ever reaches the SQL.
+        $groupBy = (string) ($request->input('group_by') ?? 'item_store');
 
-        $groupColumns = match ($groupBy) {
-            'store' => 'm.INV_ID',
-            'group' => 'm.GROUPNO',
-            'subgroup' => 'm.TYPE_NO',
-            'category' => 'm.CAT_NAME',
-            'item' => 'm.I_CODE, m.INV_ID',
-            default => 'm.I_CODE, m.INV_ID',
-        };
+        // الصيغة القديمة «item» كانت تعني صنف × مخزن حرفياً، فتبقى معناها لا يتغير
+        // The legacy "item" already meant item × store, so its meaning must not drift.
+        if ($groupBy === 'item') {
+            $groupBy = 'item_store';
+        }
+
+        $tokens = $this->groupTokens($groupBy);
+
+        if ($tokens === []) {
+            $tokens = ['item', 'store'];
+            $groupBy = 'item_store';
+        }
+
+        $groupColumns = implode(', ', array_map(
+            static fn (string $token): string => 'm.'.self::GROUP_COLUMNS[$token],
+            $tokens
+        ));
+
+        $outerWhere = [];
+        $outerBinds = [];
+        $this->applyScope($request, $outerWhere, $outerBinds);
 
         try {
             $rows = DB::connection('oracle')->select(
-                'SELECT * FROM (
+                'SELECT q.*, (SELECT MAX(sd.SANF_DNAME) FROM ACCOUNTS.SANFS_D sd
+                                WHERE sd.SANF_DNO = q.P_CODE) AS SUB_NAME
+                   FROM (
+                    SELECT * FROM (
                     SELECT MAX(m.I_CODE) AS I_CODE, MAX(m.PART_NO) AS PART_NO, MAX(m.IT_NAME) AS ITEM_NAME,
                            MAX(m.UOM_CODE) AS UOM_CODE, MAX(m.INV_ID) AS INV_ID,
                            MAX(m.INV_NAME) AS INV_NAME,
                            MAX(m.GROUPNO) AS GROUPNO, MAX(m.GROUP_NAME) AS GROUP_NAME,
                            MAX(m.TYPE_NO) AS ITEM_TYPE_NO, MAX(m.TYPE_NAME) AS TYPE_NAME,
                            MAX(m.CAT_NAME) AS CAT_NAME,
+                           -- اسم الفرع في طبقة خارجية لا هنا: تداخل تجميعة داخل استعلام فرعي
+                           -- يرفضه أوراكل، وهو ما كان يضاعف السطور حين جُرّب رابطًا
+                           -- The branch name resolves in the outer layer: an aggregate nested in a
+                           -- scalar subquery is rejected by Oracle, and a join there multiplied rows.
+                           MAX(m.P_CODE) AS P_CODE,
                            SUM(CASE WHEN m.P_QTY > 0 THEN m.P_QTY ELSE 0 END) AS QTY_IN,
                            SUM(CASE WHEN m.P_QTY < 0 THEN -m.P_QTY ELSE 0 END) AS QTY_OUT,
                            SUM(m.P_QTY) AS NET_QTY,
+                           ROUND(SUM(CASE WHEN m.P_QTY > 0 THEN m.P_QTY * m.STK_COST ELSE 0 END), 2) AS IN_VALUE,
+                           ROUND(SUM(CASE WHEN m.P_QTY < 0 THEN -m.P_QTY * m.STK_COST ELSE 0 END), 2) AS OUT_VALUE,
                            MAX(m.STK_COST) AS COST,
                            ROUND(SUM(m.P_QTY * m.STK_COST), 2) AS NET_VALUE,
                            COUNT(*) AS ROWS_COUNT
@@ -516,7 +710,8 @@ class StoreReportController extends Controller
                      -- Order by the aliases: repeating MAX(...) in the ORDER BY of a grouped
                      -- block wrapped by ROWNUM raises ORA-00935.
                      ORDER BY ITEM_NAME, INV_ID
-                 ) WHERE ROWNUM <= :limit',
+                 ) WHERE ROWNUM <= :limit
+                   ) q',
                 $binds
             );
 
@@ -525,24 +720,195 @@ class StoreReportController extends Controller
                 $rows
             );
 
+            $openings = $this->openingByGroups(
+                '('.implode(') AND (', $outerWhere ?: ['1 = 1']).')',
+                $outerBinds,
+                $from,
+                $tokens
+            );
+
+            $clean = $this->stampSummary($clean, $tokens, $openings);
+
             return response()->json([
                 'success' => true,
                 'data' => $clean,
-                'meta' => [
-                    'total' => count($clean),
-                    'truncated' => count($clean) >= $limit,
-                    'from' => $from,
-                    'to' => $to,
-                    'kind' => 'summary',
-                    'group_by' => $groupBy,
-                    'qty_in' => array_sum(array_map(static fn (array $r): float => (float) ($r['QTY_IN'] ?? 0), $clean)),
-                    'qty_out' => array_sum(array_map(static fn (array $r): float => (float) ($r['QTY_OUT'] ?? 0), $clean)),
-                    'value' => array_sum(array_map(static fn (array $r): float => (float) ($r['NET_VALUE'] ?? 0), $clean)),
-                ],
+                'meta' => $this->summaryMeta($clean, $groupBy, $tokens, $from, $to, $limit),
             ]);
         } catch (\Throwable $e) {
             return $this->failure('تعذر جلب خلاصة الحركة / Failed to retrieve the movement summary.', $e);
         }
+    }
+
+    /**
+     * الأعمدة الممكنة للتجميع — قائمة بيضاء وحيدة تصل إلى SQL
+     * The columns that may be grouped by — the only whitelist that reaches the SQL.
+     */
+    private const GROUP_COLUMNS = [
+        'item' => 'I_CODE',
+        'sub' => 'P_CODE',
+        'store' => 'INV_ID',
+        'subgroup' => 'TYPE_NO',
+        'group' => 'GROUPNO',
+        'category' => 'CAT_NAME',
+    ];
+
+    /**
+     * الحقل الذي يحمل الصف قيمته لكل رمز تجميع
+     * The field a row carries each token's value in.
+     */
+    private const GROUP_ROW_FIELDS = [
+        'item' => 'I_CODE',
+        'sub' => 'P_CODE',
+        'store' => 'INV_ID',
+        'subgroup' => 'ITEM_TYPE_NO',
+        'group' => 'GROUPNO',
+        'category' => 'CAT_NAME',
+    ];
+
+    /**
+     * تفكيك رمز التجميع المركّب إلى قائمة بيضاء فقط
+     * Split a composite grouping into whitelisted tokens only.
+     *
+     * @return array<int, string>
+     */
+    private function groupTokens(string $groupBy): array
+    {
+        $tokens = [];
+
+        foreach (explode('*', $groupBy) as $raw) {
+            $token = strtolower(trim($raw));
+
+            // رمز مجهول يُهمل لا يُمرَّر: «مجموعة فرعية*نص عشوائي» لا يجوز أن يصبح عموداً
+            // An unknown token is dropped, never passed through: a typo must not become a column.
+            if (isset(self::GROUP_COLUMNS[$token])) {
+                $tokens[$token] = $token;
+            }
+        }
+
+        return array_values($tokens);
+    }
+
+    /**
+     * رصيد ما قبل الفترة لكل مجموعة مفتاحية
+     * The pre-period balance for each composite group key.
+     *
+     * @param  array<int, string>  $tokens
+     * @return array<string, float>
+     */
+    private function openingByGroups(
+        string $scopeSql,
+        array $binds,
+        string $from,
+        array $tokens
+    ): array {
+        $columns = array_map(static fn (string $t): string => 'm.'.self::GROUP_COLUMNS[$t], $tokens);
+
+        $select = [];
+
+        foreach ($tokens as $i => $token) {
+            $select[] = $columns[$i].' AS GK'.$i;
+        }
+
+        $rows = DB::connection('oracle')->select(
+            'SELECT '.implode(', ', $select).', NVL(SUM(m.P_QTY), 0) AS OPEN_QTY
+              FROM ACCOUNTS.ITEM_MOVEMENT_D m
+             WHERE '.$scopeSql.'
+               AND m.I_DATE < TO_DATE(:open_from, \'YYYY-MM-DD\')
+             GROUP BY '.implode(', ', $columns),
+            $binds + ['open_from' => $from]
+        );
+
+        $openings = [];
+
+        foreach ($rows as $row) {
+            $row = array_change_key_case((array) $row, CASE_UPPER);
+            $parts = [];
+
+            foreach (array_keys($tokens) as $i) {
+                $parts[] = (string) ($row['GK'.$i] ?? '');
+            }
+
+            $openings[implode('|', $parts)] = (float) ($row['OPEN_QTY'] ?? 0);
+        }
+
+        return $openings;
+    }
+
+    /**
+     * إضافة الرصيد السابق والحالي لكل سطر خلاصة
+     * Attach the opening and closing balance to every summary row.
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @param  array<int, string>  $tokens
+     * @param  array<string, float>  $openings
+     * @return array<int, array<string, mixed>>
+     */
+    private function stampSummary(array $rows, array $tokens, array $openings): array
+    {
+        foreach ($rows as $index => $row) {
+            $parts = [];
+
+            foreach ($tokens as $token) {
+                $parts[] = (string) ($row[self::GROUP_ROW_FIELDS[$token]] ?? '');
+            }
+
+            $opening = (float) ($openings[implode('|', $parts)] ?? 0);
+            $net = (float) ($row['NET_QTY'] ?? 0);
+
+            $rows[$index]['OPENING_QTY'] = round($opening, 4);
+            $rows[$index]['CLOSING_QTY'] = round($opening + $net, 4);
+        }
+
+        return $rows;
+    }
+
+    /**
+     * إحصاءات الخلاصة — السابق والوارد والمنصرف والصافي والحالي كمية وقيمة
+     * The summary statistics: opening, inbound, outbound, net and closing, quantity and value.
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @param  array<int, string>  $tokens
+     * @return array<string, mixed>
+     */
+    private function summaryMeta(
+        array $rows,
+        string $groupBy,
+        array $tokens,
+        string $from,
+        string $to,
+        int $limit
+    ): array {
+        $sum = static fn (string $key): float => array_sum(array_map(
+            static fn (array $r): float => (float) ($r[$key] ?? 0),
+            $rows
+        ));
+
+        $totals = [
+            'rows' => count($rows),
+            'opening_qty' => round($sum('OPENING_QTY'), 4),
+            'qty_in' => round($sum('QTY_IN'), 4),
+            'qty_in_value' => round($sum('IN_VALUE'), 2),
+            'qty_out' => round($sum('QTY_OUT'), 4),
+            'qty_out_value' => round($sum('OUT_VALUE'), 2),
+            'net_qty' => round($sum('NET_QTY'), 4),
+            'net_value' => round($sum('NET_VALUE'), 2),
+            'closing_qty' => round($sum('CLOSING_QTY'), 4),
+            'closing_value' => round($sum('NET_VALUE'), 2),
+        ];
+
+        return [
+            'total' => count($rows),
+            'truncated' => count($rows) >= $limit,
+            'from' => $from,
+            'to' => $to,
+            'kind' => 'summary',
+            'group_by' => $groupBy,
+            'group_tokens' => $tokens,
+            'totals' => $totals,
+            'qty_in' => $totals['qty_in'],
+            'qty_out' => $totals['qty_out'],
+            'value' => $totals['net_value'],
+        ];
     }
 
     /**
