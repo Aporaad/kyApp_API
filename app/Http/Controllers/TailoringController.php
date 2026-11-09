@@ -800,7 +800,7 @@ class TailoringController extends Controller
         $totalValue = (float) ($total ?? 0);
         $discountValue = (float) ($discount ?? 0);
         $netValue = (float) ($net ?? 0);
-        $paidValue = (float) ($paid ?? 0) + (float) ($others ?? 0);
+        $paidValue = (float) ($paid ?? 0) ;
 
         return [
             'total' => $total !== null ? $totalValue : null,

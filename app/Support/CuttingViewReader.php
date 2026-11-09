@@ -183,7 +183,18 @@ final class CuttingViewReader
                 return null;
             }
 
-            return ArabicEncoding::fixMojibake((string) ((array) $row)['ORDSNAME']);
+            // درايفر أوراكل يعيد المفاتيح بحروف صغيرة (ordsname) — القراءة بحروف ثابتة
+            // كانت ترمي «Undefined array key ORDSNAME» فتفشل قائمة الفواتير بالكامل.
+            // The Oracle driver returns lowercase keys (ordsname) — a fixed-case read used to
+            // raise "Undefined array key ORDSNAME" and take the whole bill list down.
+            $data = (array) $row;
+            $name = $data['ORDSNAME'] ?? $data['ordsname'] ?? $data['ORDS_NAME'] ?? $data['ords_name'] ?? null;
+
+            if ($name === null || $name === '') {
+                return null;
+            }
+
+            return ArabicEncoding::fixMojibake((string) $name);
         } catch (\Throwable $e) {
             // اسم الحالة تزييني: فشله لا يُفشل الصف
             // The stage name is decoration: its failure must not fail the row
