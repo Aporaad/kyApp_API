@@ -361,24 +361,43 @@ class StoreReportController extends Controller
                 $binds
             );
 
+            // تطبيع المفاتيح إلى الكبيرة قبل أي معالجة: منتقي OCI8 يعيدها صغيرة، وقراءة
+            // P_QTY/P_CODE من صف كهذا تُرجع null، فيصير الرصيد الجاري صفراً دائماً ويبدو
+            // عمود الرصيد فارغاً على الشاشة رغم أن الحركة موجودة فعلاً.
+            // OCI8 hands back lowercase keys; reading P_QTY/P_CODE off such a row yields null,
+            // so the running balance accumulates nothing and the balance column reads empty
+            // while the movement itself is plainly there.
             $clean = array_map(
-                static fn ($row): array => ArabicEncoding::cleanData((array) $row),
+                static fn ($row): array => ArabicEncoding::cleanData(
+                    array_change_key_case((array) $row, CASE_UPPER)
+                ),
                 $rows
             );
 
-            $openings = $sectionColumn === null
-                ? []
-                : $this->openingBySection(
-                    '('.implode(') AND (', $outerWhere ?: ['1 = 1']).')',
-                    $outerBinds,
-                    $from,
-                    $sectionColumn
-                );
+            // الرصيد السابق يُحسب في كل نطاق: حركة الصنف الفرعي تقرير واحد له رصيد سابق واحد،
+            // وليس استثناءً بلا افتتاح. تركه فارغاً هو سبب بدء عمود الرصيد من الصفر.
+            // The opening is computed in every scope: a branch statement is one report with one
+            // opening balance, never an exception without one. Leaving it out is exactly why
+            // the balance column used to start from zero.
+            $openings = $this->openingBySection(
+                '('.implode(') AND (', $outerWhere ?: ['1 = 1']).')',
+                $outerBinds,
+                $from,
+                $sectionColumn
+            );
+
+            // الوسم يُحفظ في متغيّر قبل بناء الإحصاءات: مصفوفات PHP تُنسخ عند الكتابة، فتمرير
+            // السطور الخام إلى `movementMeta` يجعلها لا ترى `SECTION_KEY` وتنهار كل الأقسام
+            // إلى قسم واحد مفتاحه `__all__` بلا عنوان ولا رصيد سابق.
+            // Stamping is kept in a variable before the meta is built: PHP arrays copy on
+            // write, so handing the RAW rows to `movementMeta` meant it never saw `SECTION_KEY`
+            // and every section collapsed into one `__all__` entry with no label and no opening.
+            $stamped = $this->stampMovement($clean, $scope, $sectionColumn, $openings);
 
             return response()->json([
                 'success' => true,
-                'data' => $this->stampMovement($clean, $scope, $sectionColumn, $openings),
-                'meta' => $this->movementMeta($clean, $scope, $sectionColumn, $openings, $from, $to, $limit),
+                'data' => $stamped,
+                'meta' => $this->movementMeta($stamped, $scope, $sectionColumn, $openings, $from, $to, $limit),
             ]);
         } catch (\Throwable $e) {
             return $this->failure('تعذر جلب حركة المخزون / Failed to retrieve stock movement.', $e);
@@ -422,23 +441,36 @@ class StoreReportController extends Controller
     }
 
     /**
-     * رصيد ما قبل الفترة لكل قسم — مجموعة واحدة لا استعلام لكل صنف
-     * The pre-period balance per section — one grouped query, never one per item.
+     * رصيد ما قبل الفترة لكل قسم — الكمية والقيمة معاً في استعلام واحد
+     * The pre-period balance per section — quantity and value in a single query.
      *
-     * @return array<string, float>
+     * @return array<string, array{qty: float, value: float}>
      */
     private function openingBySection(
         string $scopeSql,
         array $binds,
         string $from,
-        string $sectionColumn
+        ?string $sectionColumn
     ): array {
+        // المفتاح يُختار مرة واحدة: بلا أقسام (حركة صنف فرعي) يصير `__all__` — وهو نفس المفتاح
+        // الذي يوسم به `stampMovement` سطوره — بدل قسم مخترع لا يطابق أي رصيد فيبدأ العمود من الصفر.
+        // The key is resolved once: with no sections (a branch statement) it becomes `__all__` —
+        // the very key `stampMovement` stamps its rows with — instead of an invented section that
+        // matches no balance and opens the running column on zero.
+        $keySql = $sectionColumn === null ? "'__all__' AS SK" : $sectionColumn.' AS SK';
+        $groupSql = $sectionColumn === null ? '' : ' GROUP BY '.$sectionColumn;
+
+        // القيمة تُجمع من تكلفة كل حركة قبل الفترة: قسم قد لا يتحرك إطلاقاً داخل الفترة وله رصيد
+        // سابق قائم، فتصفير قيمة الرصيد الحالي في هذه الحالة كذب على المستند.
+        // The value sums each pre-period movement's own cost: a section may not move at all
+        // inside the period yet still carry stock, and zeroing its closing value would be a lie.
         $rows = DB::connection('oracle')->select(
-            'SELECT '.$sectionColumn.' AS SK, NVL(SUM(m.P_QTY), 0) AS OPEN_QTY
-              FROM ACCOUNTS.ITEM_MOVEMENT_D m
-             WHERE '.$scopeSql.'
-               AND m.I_DATE < TO_DATE(:open_from, \'YYYY-MM-DD\')
-             GROUP BY '.$sectionColumn,
+            'SELECT '.$keySql.',
+                    NVL(SUM(m.P_QTY), 0) AS OPEN_QTY,
+                    NVL(SUM(m.P_QTY * m.STK_COST), 0) AS OPEN_VALUE
+               FROM ACCOUNTS.ITEM_MOVEMENT_D m
+              WHERE '.$scopeSql.'
+                AND m.I_DATE < TO_DATE(:open_from, \'YYYY-MM-DD\')'.$groupSql,
             $binds + ['open_from' => $from]
         );
 
@@ -446,7 +478,10 @@ class StoreReportController extends Controller
 
         foreach ($rows as $row) {
             $row = array_change_key_case((array) $row, CASE_UPPER);
-            $openings[(string) ($row['SK'] ?? '')] = (float) ($row['OPEN_QTY'] ?? 0);
+            $openings[(string) ($row['SK'] ?? '')] = [
+                'qty' => (float) ($row['OPEN_QTY'] ?? 0),
+                'value' => (float) ($row['OPEN_VALUE'] ?? 0),
+            ];
         }
 
         return $openings;
@@ -463,7 +498,7 @@ class StoreReportController extends Controller
      *    2000 rows and 2000 database round-trips is the line between slow and impossible.
      *
      * @param  array<int, array<string, mixed>>  $rows
-     * @param  array<string, float>  $openings
+     * @param  array<string, array{qty: float, value: float}>  $openings
      * @return array<int, array<string, mixed>>
      */
     private function stampMovement(
@@ -499,10 +534,11 @@ class StoreReportController extends Controller
 
             if ($key !== $current) {
                 $current = $key;
-                // الرصيد يبدأ من رصيد افتتاح قسمه، لا من الصفر
-                // A section starts at its own opening balance, never at zero.
-                $balanceQty = (float) ($openings[$key] ?? 0);
-                $balanceValue = 0.0;
+                // الرصيد يبدأ من رصيد افتتاح قسمه كمّاً وقيمةً، لا من الصفر
+                // A section starts at its own opening balance in both quantity and value.
+                $opening = $openings[$key] ?? ['qty' => 0.0, 'value' => 0.0];
+                $balanceQty = (float) ($opening['qty'] ?? 0);
+                $balanceValue = (float) ($opening['value'] ?? 0);
             }
 
             $balanceQty += (float) ($row['P_QTY'] ?? 0);
@@ -524,7 +560,7 @@ class StoreReportController extends Controller
      * Per-section statistics plus the grand total: opening, inbound, outbound, closing.
      *
      * @param  array<int, array<string, mixed>>  $rows
-     * @param  array<string, float>  $openings
+     * @param  array<string, array{qty: float, value: float}>  $openings
      * @return array<string, mixed>
      */
     private function movementMeta(
@@ -546,7 +582,8 @@ class StoreReportController extends Controller
                 $sections[$key] = [
                     'key' => $key,
                     'label' => $label,
-                    'opening_qty' => (float) ($openings[$key] ?? 0),
+                    'opening_qty' => (float) ($openings[$key]['qty'] ?? 0),
+                    'opening_value' => (float) ($openings[$key]['value'] ?? 0),
                     'rows' => 0,
                     'qty_in' => 0.0,
                     'qty_in_value' => 0.0,
@@ -581,10 +618,15 @@ class StoreReportController extends Controller
 
             $sections[$key]['net_qty'] = round($net, 4);
             $sections[$key]['closing_qty'] = round((float) $section['opening_qty'] + $net, 4);
+            // الرصيد الحالي قيمةً = افتتاح + وارد − منصرف، لا حركة الفترة وحدها
+            // The closing value = opening + inbound − outbound, not the period's movement alone.
             $sections[$key]['closing_value'] = round(
-                (float) $section['qty_in_value'] - (float) $section['qty_out_value'],
+                (float) $section['opening_value']
+                    + (float) $section['qty_in_value']
+                    - (float) $section['qty_out_value'],
                 2
             );
+            $sections[$key]['opening_value'] = round((float) $section['opening_value'], 2);
             $sections[$key]['qty_in'] = round((float) $section['qty_in'], 4);
             $sections[$key]['qty_out'] = round((float) $section['qty_out'], 4);
             $sections[$key]['qty_in_value'] = round((float) $section['qty_in_value'], 2);
@@ -596,6 +638,7 @@ class StoreReportController extends Controller
             'sections' => count($sections),
             'rows' => count($rows),
             'opening_qty' => array_sum(array_column($sections, 'opening_qty')),
+            'opening_value' => array_sum(array_column($sections, 'opening_value')),
             'qty_in' => array_sum(array_column($sections, 'qty_in')),
             'qty_in_value' => array_sum(array_column($sections, 'qty_in_value')),
             'qty_out' => array_sum(array_column($sections, 'qty_out')),
@@ -715,8 +758,14 @@ class StoreReportController extends Controller
                 $binds
             );
 
+            // التطبيع نفسه: الرصيدان السابق والحالي يُقرآن NET_QTY ومفاتيح التجميع من الصف،
+            // ومفاتيح صغيرة تعني null فيظهر العمودان صفراً بلا خطأ ظاهر.
+            // The same normalisation: both balances read NET_QTY and the grouping keys off the
+            // row, and lowercase keys would silently turn them into zeros.
             $clean = array_map(
-                static fn ($row): array => ArabicEncoding::cleanData((array) $row),
+                static fn ($row): array => ArabicEncoding::cleanData(
+                    array_change_key_case((array) $row, CASE_UPPER)
+                ),
                 $rows
             );
 

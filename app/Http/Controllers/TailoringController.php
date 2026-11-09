@@ -603,7 +603,7 @@ class TailoringController extends Controller
                        v.CUTTER_PCS_PRICE1, v.TAILOR_PCS_PRICE1,
                        v.CUTTING_DONE, v.CUTTING_DATE, v.TAILOR_DONE, v.TAILOR_DATE,
                        v.HANDING_DONE1, v.HANDING_DATE1, v.TIME1,
-                       v.SANF_PRICE, v.SANF_NO, v.SANF_DNO,
+                       NVL(v.SANFPRICE, v.SANF_PRICE) AS SANF_PRICE, v.SANF_NO, v.SANF_DNO,
                        v.MANUAL_BILL_NO, v.DAT, v.CUST_NO, v.CUST_NAME, v.TEL_NO1,
                        v.ACC_NO, v.GROUP_NO, v.TOTAL, v.DISCOUNT, v.NET,
                        v.HANDING_DONE, v.ORDSDID, v.BILLS_KINDS, v.BATCH_NO_PRINT,
@@ -616,7 +616,7 @@ class TailoringController extends Controller
                        s.QTY AS MODEL_QTY,
                        s.NECK_TYPE, s.TIPPER_TYPE, s.COM_CABAK_TYPE, s.POCKET_OR_WITHOUT,
                        s.GABZOR_TYPE, s.BUTTON_TYPE, s.BUTTON_NO, s.MOBILE_POCKET,
-                       s.PEN_POCKET, s.HEGAZI_TYPE, s.NOTES2,
+                       s.PEN_POCKET, s.HEGAZI_TYPE, v.MODEL_NOTES AS NOTES2,
                        s.NECK_SHAPE_NO, s.SHAPE_GABROZ_NO, s.SHAPE_COM_CABAK_NO,
                        s.SHAPE_POCKET_UP_NO, s.SHAPE_POCKET_DOWN_NO
                   FROM '.self::VIEW_CUTTING_BILL.' v

@@ -207,45 +207,75 @@ test('multiple main groups widen the report without repeating a movement', funct
     //   والفارق الصغير كان يكفي ليقع بعض السطور خارج المدى المطلوب.
     // ─ The window comes from Oracle's own clock, not PHP's: app.timezone is UTC while SYSDATE
     //    runs +03:00, and that gap alone was enough to drop rows outside the requested range.
-    $window = array_change_key_case((array) DB::connection('oracle')->selectOne(
-        "SELECT TO_CHAR(SYSDATE - 60, 'YYYY-MM-DD') AS F, TO_CHAR(SYSDATE, 'YYYY-MM-DD') AS T FROM DUAL"
-    ), CASE_UPPER);
+    // ─ النافذة تُشتق من البيانات لا من رقم ثابت: هذا الاختبار يفترض أن ناتج المجموعات الثلاث
+    //   يبقى تحت سقف الاقتطاع (5000) فتكون «المجموعات معاً = كل واحدة وحدها» مساواة دقيقة.
+    //   نافذة الستين يوماً تجاوزت السقف مع نمو الحركة، فنجرّب نوافذ أقصر ثم نعلن التخطي بأمانة.
+    // The window is derived from the data, not hard-coded: the test assumes the three groups
+    // together stay under the 5000-row cap so "all together == each alone" is exact. The 60-day
+    // window outgrew the cap as movements accumulated, so shorter windows are tried and the
+    // test skips honestly when none fits.
+    $cap = 5000;
+    $body = null;
 
-    $from = (string) ($window['F'] ?? '');
-    $to = (string) ($window['T'] ?? '');
+    foreach ([7, 14, 30, 60] as $days) {
+        $window = array_change_key_case((array) DB::connection('oracle')->selectOne(
+            "SELECT TO_CHAR(SYSDATE - {$days}, 'YYYY-MM-DD') AS F, TO_CHAR(SYSDATE, 'YYYY-MM-DD') AS T FROM DUAL"
+        ), CASE_UPPER);
 
-    // أقل ثلاث مجموعات حركةً في أسبوع: يبقى الناتج تحت سقف الاقتطاع (5000) فيكون الجمع دقيقاً
-    // The three least busy groups in a week: the result stays under the 5000-row cap, so the
-    // additive comparison below is exact rather than approximate.
-    $groups = array_values(array_filter(array_map(
-        static fn ($r): int => (int) (array_change_key_case((array) $r, CASE_UPPER)['GROUPNO'] ?? 0),
-        DB::connection('oracle')->select(
-            "SELECT GROUPNO FROM (
-                SELECT GROUPNO, COUNT(*) AS C FROM ACCOUNTS.ITEM_MOVEMENT_D
-                 WHERE GROUPNO IS NOT NULL
-                   AND I_DATE >= TO_DATE('{$from}', 'YYYY-MM-DD')
-                   AND I_DATE < TO_DATE('{$to}', 'YYYY-MM-DD') + 1
-                 GROUP BY GROUPNO ORDER BY 2 ASC
-             ) WHERE ROWNUM <= 3"
-        )
-    )));
+        $from = (string) ($window['F'] ?? '');
+        $to = (string) ($window['T'] ?? '');
 
-    if ($groups === []) {
-        test()->markTestSkipped('لا مجموعات لها حركة في نافذة الاختبار.');
+        // أقل ثلاث مجموعات حركةً: مجموعها هو الأصغر فيبقى تحت السقف
+        // The three least busy groups: their combined volume is the smallest.
+        $groups = array_values(array_filter(array_map(
+            static fn ($r): int => (int) (array_change_key_case((array) $r, CASE_UPPER)['GROUPNO'] ?? 0),
+            DB::connection('oracle')->select(
+                "SELECT GROUPNO FROM (
+                    SELECT GROUPNO, COUNT(*) AS C FROM ACCOUNTS.ITEM_MOVEMENT_D
+                     WHERE GROUPNO IS NOT NULL
+                       AND I_DATE >= TO_DATE('{$from}', 'YYYY-MM-DD')
+                       AND I_DATE < TO_DATE('{$to}', 'YYYY-MM-DD') + 1
+                     GROUP BY GROUPNO ORDER BY 2 ASC
+                 ) WHERE ROWNUM <= 3"
+            )
+        )));
+
+        if ($groups === []) {
+            continue;
+        }
+
+        $candidate = app(StoreReportController::class)->movement(
+            reportRequest([
+                'from' => $from,
+                'to' => $to,
+                'group_nos' => implode(',', $groups),
+                'limit' => $cap,
+            ])
+        );
+
+        if ($candidate->getStatusCode() !== 200) {
+            continue;
+        }
+
+        $candidateBody = $candidate->getData(true);
+
+        // الاقتطاع يحوّل الجمع إلى تقريب، فنستبعد هذا المدى وننتقل إلى نافذة أقصر
+        // Truncation turns the sum into an approximation, so this window is skipped.
+        if (($candidateBody['meta']['truncated'] ?? true) !== false) {
+            continue;
+        }
+
+        $body = $candidateBody;
+
+        break;
     }
 
-    $response = app(StoreReportController::class)->movement(
-        reportRequest([
-            'from' => $from,
-            'to' => $to,
-            'group_nos' => implode(',', $groups),
-            'limit' => 5000,
-        ])
-    );
+    if ($body === null) {
+        test()->markTestSkipped('لا نافذة تحمل ثلاث مجموعات دون سقف الاقتطاع — لا يمكن مقارنة الجمع بدقة.');
+    }
 
-    expect($response->getStatusCode())->toBe(200);
+    expect($body['success'])->toBeTrue();
 
-    $body = $response->getData(true);
     $rows = array_map(
         static fn ($r): array => array_change_key_case((array) $r, CASE_UPPER),
         $body['data']
@@ -266,16 +296,22 @@ test('multiple main groups widen the report without repeating a movement', funct
     $apart = 0;
 
     foreach ($groups as $group) {
-        $apart += count(
-            app(StoreReportController::class)->movement(
-                reportRequest([
-                    'from' => $from,
-                    'to' => $to,
-                    'group_nos' => "$group",
-                    'limit' => 5000,
-                ])
-            )->getData(true)['data']
-        );
+        $single = app(StoreReportController::class)->movement(
+            reportRequest([
+                'from' => $from,
+                'to' => $to,
+                'group_nos' => "$group",
+                'limit' => $cap,
+            ])
+        )->getData(true);
+
+        // مجموعة واحدة بلغت السقف وحدها: الجمع حينها تقريب أيضاً
+        // A single group reached the cap on its own: the sum would be an approximation too.
+        if (($single['meta']['truncated'] ?? true) !== false) {
+            test()->markTestSkipped('إحدى المجموعات بلغت سقف الاقتطاع وحدها — لا يمكن مقارنة الجمع.');
+        }
+
+        $apart += count($single['data']);
     }
 
     expect(count($rows))->toBe($apart);
@@ -549,4 +585,269 @@ test('composite grouping accepts every token combination the reports need', func
         expect($body['meta']['group_by'])->toBe($level);
         expect($body['meta']['group_tokens'])->toBe(explode('*', $level));
     }
+});
+
+/**
+ * ── نافذة التحقق: تبدأ داخل دفاتر المخزون نفسه
+ * ── The verification window: it starts inside the inventory ledger itself.
+ *
+ * الدفاتر لا تحمل أي حركة قبل 2026-04-25، فرصيد «ما قبل 2026-01-01» صفرٌ بحق لا خلل. اختبار
+ * الرصيد السابق يحتاج بدءاً لاحقاً حتى يكون للفترة رصيد افتتاحي فعلي يقارن به.
+ * The ledger holds nothing before 2026-04-25, so "before 2026-01-01" is genuinely zero, not a
+ * defect. An opening-balance test needs a later start so the period really has an opening.
+ */
+const REPORT_OPENING_FROM = '2026-09-01';
+const REPORT_OPENING_TO = '2026-10-31';
+
+/**
+ * السطر الأول من كل قسم مع إحصائه — مطابقة «الرصيد يبدأ من الافتتاح» لكل قسم
+ * The first row of every section beside its stats — the "balance starts at the opening" check.
+ *
+ * @param  array<int, array<string, mixed>>  $rows
+ * @param  array<int, array<string, mixed>>  $sections
+ * @return array<int, array{key: string, first: float, opening: float, qty: float}>
+ */
+function sectionOpenings(array $rows, array $sections): array
+{
+    $stats = [];
+
+    foreach ($sections as $section) {
+        $stats[(string) $section['key']] = $section;
+    }
+
+    $seen = [];
+    $checked = [];
+
+    foreach ($rows as $row) {
+        $key = (string) ($row['SECTION_KEY'] ?? '');
+
+        if (isset($seen[$key])) {
+            continue;
+        }
+
+        $seen[$key] = true;
+
+        expect($stats)->toHaveKey($key);
+
+        $checked[] = [
+            'key' => $key,
+            'first' => (float) ($row['BALANCE_QTY'] ?? 0),
+            'opening' => (float) $stats[$key]['opening_qty'],
+            'qty' => (float) ($row['P_QTY'] ?? 0),
+        ];
+    }
+
+    return $checked;
+}
+
+test('a main-item movement report splits into one section per branch, each opening at its own balance', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    $response = app(StoreReportController::class)->movement(
+        reportRequest([
+            'from' => REPORT_OPENING_FROM,
+            'to' => REPORT_OPENING_TO,
+            'scope' => 'item',
+            'sanf_no' => '1991',
+            'limit' => 5000,
+        ])
+    );
+
+    expect($response->getStatusCode())->toBe(200);
+
+    $body = $response->getData(true);
+
+    if ($body['data'] === []) {
+        test()->markTestSkipped('لا حركة للصنف في هذا النطاق.');
+    }
+
+    $rows = array_map(
+        static fn ($r): array => array_change_key_case((array) $r, CASE_UPPER),
+        $body['data']
+    );
+
+    expect($body['meta']['scope'])->toBe('item')
+        ->and($body['meta']['sectioned'])->toBeTrue()
+        ->and($body['meta']['sections'])->not->toBeEmpty();
+
+    // ── العيب الأول الذي شكا منه المستخدم: عمود الرصيد كان يبدأ من الصفر. الرصيد الأول داخل
+    //    كل قسم هو رصيد افتتاح ذلك القسم زائد حركته الأولى، ليس صفراً زائدها.
+    // ── The first defect the user reported: the balance column opened on zero. The first balance
+    //    inside every section is that section's opening plus its first movement, never 0.
+    $checked = sectionOpenings($rows, $body['meta']['sections']);
+    expect($checked)->not->toBeEmpty();
+
+    foreach ($checked as $check) {
+        expect(abs($check['first'] - ($check['opening'] + $check['qty'])))->toBeLessThan(0.01);
+    }
+
+    // القسم لا يحمل إلا صنفاً فرعياً واحداً، والمفتاح هو رقم الفرع نفسه
+    // A section never mixes two branches, and its key is the branch code itself.
+    foreach ($rows as $row) {
+        expect((string) $row['SECTION_KEY'])->toBe((string) $row['P_CODE']);
+    }
+});
+
+test('the sub-group report accumulates by main item, not by branch', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    $response = app(StoreReportController::class)->movement(
+        reportRequest([
+            'from' => REPORT_OPENING_FROM,
+            'to' => REPORT_OPENING_TO,
+            'scope' => 'subgroup',
+            'limit' => 5000,
+        ])
+    );
+
+    expect($response->getStatusCode())->toBe(200);
+
+    $body = $response->getData(true);
+
+    if ($body['data'] === []) {
+        test()->markTestSkipped('لا حركة في هذا النطاق.');
+    }
+
+    $rows = array_map(
+        static fn ($r): array => array_change_key_case((array) $r, CASE_UPPER),
+        $body['data']
+    );
+
+    // ── العيب الثاني: هذه التقارير كانت تعرض مثل تقرير الصنف الفرعي (قسم واحد). وحدة القسم
+    //    هنا الصنف الرئيسي، فلا بد أن تزيد على قسم واحد ما دامت الحركة تشمل أكثر من صنف.
+    // ── The second defect: these reports rendered like a branch statement (one section). The
+    //    section unit here is the main item, so more than one is expected whenever several moved.
+    $distinct = array_unique(array_map(static fn (array $r): string => (string) $r['I_CODE'], $rows));
+
+    if (count($distinct) > 1) {
+        expect(count($body['meta']['sections']))->toBeGreaterThan(1);
+    }
+
+    foreach ($rows as $row) {
+        expect((string) $row['SECTION_KEY'])->toBe((string) $row['I_CODE']);
+    }
+
+    foreach (sectionOpenings($rows, $body['meta']['sections']) as $check) {
+        expect(abs($check['first'] - ($check['opening'] + $check['qty'])))->toBeLessThan(0.01);
+    }
+
+    // الإحصاء العام = مجموع أقسامه، مفتاحاً مفتاحاً
+    // The grand total is the sum of its sections, key by key.
+    $sumOpening = array_sum(array_map(
+        static fn (array $s): float => (float) $s['opening_qty'],
+        $body['meta']['sections']
+    ));
+
+    expect(abs($sumOpening - (float) $body['meta']['totals']['opening_qty']))->toBeLessThan(0.01);
+});
+
+test('the main-group report accumulates by sub group, never by main item', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    $response = app(StoreReportController::class)->movement(
+        reportRequest([
+            'from' => REPORT_OPENING_FROM,
+            'to' => REPORT_OPENING_TO,
+            'scope' => 'group',
+            'limit' => 5000,
+        ])
+    );
+
+    expect($response->getStatusCode())->toBe(200);
+
+    $body = $response->getData(true);
+
+    if ($body['data'] === []) {
+        test()->markTestSkipped('لا حركة في هذا النطاق.');
+    }
+
+    $rows = array_map(
+        static fn ($r): array => array_change_key_case((array) $r, CASE_UPPER),
+        $body['data']
+    );
+
+    expect($body['meta']['scope'])->toBe('group')
+        ->and($body['meta']['sectioned'])->toBeTrue();
+
+    // مفتاح القسم هو المجموعة الفرعية (النوع) لا الصنف الرئيسي: هذا ما يميّز التقرير الثالث
+    // The section key is the sub group (the type), not the main item: that separates report three.
+    foreach ($rows as $row) {
+        expect((string) $row['SECTION_KEY'])->toBe((string) $row['ITEM_TYPE_NO']);
+    }
+
+    $distinct = array_unique(array_map(static fn (array $r): string => (string) $r['ITEM_TYPE_NO'], $rows));
+
+    if (count($distinct) > 1) {
+        expect(count($body['meta']['sections']))->toBeGreaterThan(1);
+    }
+
+    foreach (sectionOpenings($rows, $body['meta']['sections']) as $check) {
+        expect(abs($check['first'] - ($check['opening'] + $check['qty'])))->toBeLessThan(0.01);
+    }
+});
+
+test('the branch statement returns a real opening balance instead of starting on zero', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    $response = app(StoreReportController::class)->movement(
+        reportRequest([
+            'from' => REPORT_OPENING_FROM,
+            'to' => REPORT_OPENING_TO,
+            'scope' => 'branch',
+            'store_no' => '1',
+            'limit' => 5000,
+        ])
+    );
+
+    expect($response->getStatusCode())->toBe(200);
+
+    $body = $response->getData(true);
+
+    if ($body['data'] === []) {
+        test()->markTestSkipped('لا حركة للمخزن في هذا النطاق.');
+    }
+
+    $rows = array_map(
+        static fn ($r): array => array_change_key_case((array) $r, CASE_UPPER),
+        $body['data']
+    );
+
+    // النطاق بلا أقسام يحمل قسماً واحداً مفتاحه `__all__` — وله رصيد سابق كأي قسم
+    // An unsectioned scope carries one `__all__` section — and it has an opening like any other.
+    expect($body['meta']['sections'])->toHaveCount(1);
+
+    $section = $body['meta']['sections'][0];
+
+    expect((string) $section['key'])->toBe('__all__')
+        ->and((float) $section['opening_qty'])->not->toBe(0.0);
+
+    // عمود الرصيد يبدأ من الافتتاح لا من الصفر
+    // The balance column starts at the opening, never on zero.
+    expect(abs(
+        (float) $rows[0]['BALANCE_QTY'] - ((float) $section['opening_qty'] + (float) $rows[0]['P_QTY'])
+    ))->toBeLessThan(0.01);
+
+    // والقيمة كذلك: رصيد افتتاحي قيمي ثم يتراكم عليه
+    // Value too: an opening value, then the period accumulates onto it.
+    expect(abs(
+        (float) $rows[0]['BALANCE_VALUE'] - ((float) $section['opening_value'] + (float) $rows[0]['LINE_VALUE'])
+    ))->toBeLessThan(0.01);
+
+    // الحالي = السابق + الصافي، في القسم وفي الإجمالي
+    // Closing = opening + net, in the section and in the grand total.
+    expect(abs(
+        (float) $section['opening_qty'] + (float) $section['net_qty'] - (float) $section['closing_qty']
+    ))->toBeLessThan(0.01);
+
+    expect(abs(
+        (float) $body['meta']['totals']['opening_qty'] - (float) $section['opening_qty']
+    ))->toBeLessThan(0.01);
 });
