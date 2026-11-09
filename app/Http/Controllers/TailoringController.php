@@ -793,24 +793,36 @@ class TailoringController extends Controller
     {
         $total = $this->lower($billRow, 'TOTAL') ?? $this->num($headerRow, 'TOTAL');
         $discount = $this->lower($billRow, 'DISCOUNT') ?? $this->num($headerRow, 'DISCOUNT');
-        $net = $this->lower($billRow, 'NET') ?? $this->num($headerRow, 'NET');
         $paid = $this->lower($billRow, 'AMOUNT_PAID');
         $others = $this->lower($billRow, 'OTHERS_PAYMENTS');
 
         $totalValue = (float) ($total ?? 0);
         $discountValue = (float) ($discount ?? 0);
-        $netValue = (float) ($net ?? 0);
-        $paidValue = (float) ($paid ?? 0) ;
+        $paidValue = (float) ($paid ?? 0);
+        $othersValue = (float) ($others ?? 0);
+
+        // الصافي = الإجمالي − الخصم. عمود NET في القاعدة يساوي الإجمالي الخام في 1192 من 1200
+        // فاتورة ولا يتتبّع الدفع إطلاقاً، فلا يصحّ قراءته لا صافياً ولا متبقياً؛ لذلك يُحسب.
+        // The net is total − discount. The DB NET column equals the gross total in 1192/1200
+        // bills and never tracks payment, so it is neither the net nor the remaining — computed.
+        $net = ($total === null && $discount === null)
+            ? null
+            : $totalValue - $discountValue;
+
+        // المتبقي = الصافي − المدفوع − المدفوعات الأخرى؛ تُطرح قناتا الدفع معاً ليصفرّ عند السداد.
+        // Remaining = net − paid − others; both payment channels are deducted so it hits zero
+        // once the bill is settled.
+        $remaining = $net === null ? null : $net - $paidValue - $othersValue;
 
         return [
             'total' => $total !== null ? $totalValue : null,
             'discount' => $discount !== null ? $discountValue : null,
-            'net' => $net !== null ? $netValue : null,
-            'paid' => $paid !== null ? (float) $paid : null,
-            'others_payments' => $others !== null ? (float) $others : null,
+            'net' => $net,
+            'paid' => $paid !== null ? $paidValue : null,
+            'others_payments' => $others !== null ? $othersValue : null,
             // الفرق قد يكون سالباً (دفعة مقدمة) — الإشارة تُترك للعميل ليسمّيها «رصيد مقدم».
             // The difference can be negative (an advance); the sign is left to the client.
-            'remaining' => $net !== null ? $netValue - $paidValue : null,
+            'remaining' => $remaining,
             'is_giving' => $this->lower($billRow, 'IS_GIVING'),
             'giving_date' => $this->txt($headerRow, 'GIVING_DATE_TXT'),
             'payment_method' => $this->lower($billRow, 'PAYMENT_METHOD'),

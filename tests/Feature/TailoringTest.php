@@ -215,6 +215,36 @@ test('the bill detail folds pieces into models and carries measurements', functi
         ->and(array_keys($response->json('data.payment')))->toContain('total', 'net', 'paid', 'remaining');
 });
 
+test('payment net and remaining follow the deduced formula, not the raw NET column', function () {
+    Sanctum::actingAs(tailoringAdminUser(), ['*']);
+
+    $page = $this->getJson('/api/tailoring/bills?limit=1')->json('data');
+
+    if ($page === []) {
+        test()->markTestSkipped('الواجهة فارغة في هذه البيئة / The view is empty here.');
+    }
+
+    $payment = $this
+        ->getJson("/api/tailoring/bills/{$page[0]['bill_no']}/{$page[0]['year']}")
+        ->json('data.payment');
+
+    if ($payment === null) {
+        test()->markTestSkipped('لا كتلة دفع / No payment block.');
+    }
+
+    $total = (float) ($payment['total'] ?? 0);
+    $discount = (float) ($payment['discount'] ?? 0);
+    $net = (float) ($payment['net'] ?? 0);
+    $paid = (float) ($payment['paid'] ?? 0);
+    $others = (float) ($payment['others_payments'] ?? 0);
+    $remaining = (float) ($payment['remaining'] ?? 0);
+
+    // الصافي = الإجمالي − الخصم، والباقي = الصافي − المدفوع − المدفوعات الأخرى.
+    // Net = total − discount; remaining = net − paid − others. المبالغ صحيحة بلا كسور.
+    expect($net)->toBe($total - $discount)
+        ->and($remaining)->toBe($net - $paid - $others);
+});
+
 test('the money block is withheld from the server when the grant is missing', function () {
     // صلاحية view وحدها بلا payments_view: الفاتورة تُعرض والمال لا يصل.
     // `view` alone without `payments_view`: the bill is shown, the money never arrives.
