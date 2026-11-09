@@ -791,37 +791,27 @@ class TailoringController extends Controller
      */
     private function paymentPayload(array $billRow, array $headerRow): array
     {
+        // قرار صاحب المؤسسة: تُعرض ثلاثة حقول فقط — الإجمالي، العربون، المتبقي.
+        // العربون = المبلغ المدفوع (AMOUNT_PAID) وحده بلا مدفوعات أخرى، والمتبقي = الإجمالي −
+        // العربون فقط، بلا خصم ولا صافي ولا حسابات أخرى.
+        // The owner's call: show three fields only — total, deposit, remaining. The deposit is
+        // AMOUNT_PAID alone (no other payments); remaining = total − deposit, with no discount,
+        // no net and no other maths.
         $total = $this->lower($billRow, 'TOTAL') ?? $this->num($headerRow, 'TOTAL');
-        $discount = $this->lower($billRow, 'DISCOUNT') ?? $this->num($headerRow, 'DISCOUNT');
         $paid = $this->lower($billRow, 'AMOUNT_PAID');
-        $others = $this->lower($billRow, 'OTHERS_PAYMENTS');
 
         $totalValue = (float) ($total ?? 0);
-        $discountValue = (float) ($discount ?? 0);
         $paidValue = (float) ($paid ?? 0);
-        $othersValue = (float) ($others ?? 0);
 
-        // الصافي = الإجمالي − الخصم. عمود NET في القاعدة يساوي الإجمالي الخام في 1192 من 1200
-        // فاتورة ولا يتتبّع الدفع إطلاقاً، فلا يصحّ قراءته لا صافياً ولا متبقياً؛ لذلك يُحسب.
-        // The net is total − discount. The DB NET column equals the gross total in 1192/1200
-        // bills and never tracks payment, so it is neither the net nor the remaining — computed.
-        $net = ($total === null && $discount === null)
+        $remaining = ($total === null && $paid === null)
             ? null
-            : $totalValue - $discountValue;
-
-        // المتبقي = الصافي − المدفوع − المدفوعات الأخرى؛ تُطرح قناتا الدفع معاً ليصفرّ عند السداد.
-        // Remaining = net − paid − others; both payment channels are deducted so it hits zero
-        // once the bill is settled.
-        $remaining = $net === null ? null : $net - $paidValue - $othersValue;
+            : $totalValue - $paidValue;
 
         return [
             'total' => $total !== null ? $totalValue : null,
-            'discount' => $discount !== null ? $discountValue : null,
-            'net' => $net,
+            // العربون هو المدفوع نقداً في الفاتورة — عمود AMOUNT_PAID
+            // The deposit is the amount paid on the bill — the AMOUNT_PAID column.
             'paid' => $paid !== null ? $paidValue : null,
-            'others_payments' => $others !== null ? $othersValue : null,
-            // الفرق قد يكون سالباً (دفعة مقدمة) — الإشارة تُترك للعميل ليسمّيها «رصيد مقدم».
-            // The difference can be negative (an advance); the sign is left to the client.
             'remaining' => $remaining,
             'is_giving' => $this->lower($billRow, 'IS_GIVING'),
             'giving_date' => $this->txt($headerRow, 'GIVING_DATE_TXT'),

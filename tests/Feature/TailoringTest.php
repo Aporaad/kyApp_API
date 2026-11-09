@@ -212,10 +212,10 @@ test('the bill detail folds pieces into models and carries measurements', functi
     // المدير يملك كل الصلاحيات، فخانات المال تصل فعلاً.
     // The admin holds every grant, so the money fields do arrive.
     expect($response->json('data.payment'))->toBeArray()
-        ->and(array_keys($response->json('data.payment')))->toContain('total', 'net', 'paid', 'remaining');
+        ->and(array_keys($response->json('data.payment')))->toContain('total', 'paid', 'remaining');
 });
 
-test('payment net and remaining follow the deduced formula, not the raw NET column', function () {
+test('payment shows total, deposit and remaining = total minus deposit only', function () {
     Sanctum::actingAs(tailoringAdminUser(), ['*']);
 
     $page = $this->getJson('/api/tailoring/bills?limit=1')->json('data');
@@ -232,17 +232,18 @@ test('payment net and remaining follow the deduced formula, not the raw NET colu
         test()->markTestSkipped('لا كتلة دفع / No payment block.');
     }
 
+    // قرار صاحب المؤسسة: المتبقي = الإجمالي − العربون (AMOUNT_PAID) وحده.
+    // The owner's call: remaining = total − deposit (AMOUNT_PAID) alone.
     $total = (float) ($payment['total'] ?? 0);
-    $discount = (float) ($payment['discount'] ?? 0);
-    $net = (float) ($payment['net'] ?? 0);
     $paid = (float) ($payment['paid'] ?? 0);
-    $others = (float) ($payment['others_payments'] ?? 0);
     $remaining = (float) ($payment['remaining'] ?? 0);
 
-    // الصافي = الإجمالي − الخصم، والباقي = الصافي − المدفوع − المدفوعات الأخرى.
-    // Net = total − discount; remaining = net − paid − others. المبالغ صحيحة بلا كسور.
-    expect($net)->toBe($total - $discount)
-        ->and($remaining)->toBe($net - $paid - $others);
+    expect($remaining)->toBe($total - $paid)
+        // لا خصم ولا صافي ولا مدفوعات أخرى في الحمولة الجديدة
+        // No discount, net or other payments in the new payload.
+        ->and($payment)->not->toHaveKey('discount')
+        ->and($payment)->not->toHaveKey('net')
+        ->and($payment)->not->toHaveKey('others_payments');
 });
 
 test('the money block is withheld from the server when the grant is missing', function () {
