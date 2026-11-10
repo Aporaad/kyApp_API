@@ -1033,6 +1033,29 @@ class StoreItemController extends Controller
             $binds['active'] = (int) $active;
         }
 
+        // ── ترتيب الفروع بنفس حماية قائمة الرئيسية: قائمة بيضاء حرفية للأعمدة المستعارة في
+        //    الكتلة المجمّعة، وأي مدخل غير معروف يرجع للاسم الأب — لا شيء من الطلب يصل SQL خاماً.
+        //    الافتراضي (parent/name) يطابق الترتيب القديم حرفياً فلا مفاجأة في الصفحة الأولى.
+        // ── Branch sorting rides the same guard as the main list: a literal whitelist of the
+        //    alias columns inside the grouped block, and any unknown input falls back to the
+        //    parent name — nothing from the request reaches SQL raw. The default (parent/name)
+        //    matches the old hard-coded order exactly, so page one never changes by surprise.
+        $sort = (string) ($request->input('sort') ?? 'parent');
+        $dir = strtolower((string) ($request->input('dir') ?? 'asc')) === 'desc' ? 'desc' : 'asc';
+        $orderBy = match ($sort) {
+            'no' => 'SANF_DNO',
+            'color' => 'COLOR_NAME',
+            'qty' => 'QTY',
+            'value' => 'VALUE',
+            // 'parent' والقيمة المجهولة معاً: الاسم الأب هو الافتراضي الآمن
+            // Both 'parent' and an unknown value: the parent name is the safe default.
+            default => 'SANF_NAME',
+        };
+
+        // تصاعدي: القيم الفارغة آخر القائمة· تنازلي: ترتيب معكول تماماً مع فارغة في الآخر
+        // Ascending puts NULLs last; descending is the exact reverse with NULLs still last.
+        $orderSql = 'ORDER BY '.$orderBy.' '.$dir.' NULLS LAST, SANF_DNO';
+
         $whereSql = implode(' AND ', $where);
 
         try {
@@ -1093,7 +1116,11 @@ class StoreItemController extends Controller
                              -- بـROWNUM يرمي ORDER BY MAX(...) الخطأ ORA-00935
                              -- Order by the aliases: ORDER BY MAX(...) inside a grouped block wrapped
                              -- by ROWNUM raises ORA-00935.
-                             ORDER BY SANF_NAME, LEN, WID, SANF_DNO
+                             -- الطلب: الترتيب الآن اختيار المستخدم (قائمة بيضاء أعلاه)، ورقم الفرع
+                             -- حاسم للتكرار فلا يتبدل ترتيب صفحة بين جلبتين متطابقتين.
+                             -- Requested: the order is now a user choice (whitelist above), and
+                             -- the branch id breaks ties so two identical fetches never reshuffle a page.
+                             '.$orderSql.'
                         ) q WHERE ROWNUM <= :offset2 + :limit
                     ) WHERE RN > :offset';
 
