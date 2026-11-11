@@ -702,7 +702,7 @@ class AccountController extends Controller
                 WHERE es.ACC_NO = :acc_no
                   AND es.ENTRY_NO = em.ENTRY_NO
                   AND em.ENTRY_TYPE_NO = et.ENTRY_TYPE_NO
-                ORDER BY em.ENTRY_DATE, es.ENTRY_NO, es.SEQ
+                ORDER BY em.ENTRY_DATE, es.SEQ
             ';
             $rows = DB::connection('oracle')->select($allSql, ['acc_no' => $accNo]);
 

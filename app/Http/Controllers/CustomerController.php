@@ -342,7 +342,7 @@ class CustomerController extends Controller
                     JOIN ACCOUNTS.ENTRY_TYPE et
                       ON et.ENTRY_TYPE_NO = em.ENTRY_TYPE_NO
                     WHERE c.CUST_NO = :custNo
-                    ORDER BY em.ENTRY_DATE, es.ENTRY_NO, es.SEQ';
+                    ORDER BY em.ENTRY_DATE, es.SEQ';
 
             $rows = DB::connection('oracle')->select($sql, ['custNo' => $custNo]);
 

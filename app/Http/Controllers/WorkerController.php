@@ -449,7 +449,7 @@ class WorkerController extends Controller
      * JOIN ACCOUNTS.ENTRY_MAIN em ON em.ENTRY_NO = es.ENTRY_NO
      * JOIN ACCOUNTS.ENTRY_TYPE et ON et.ENTRY_TYPE_NO = em.ENTRY_TYPE_NO
      * WHERE es.ACC_NO = :acc_no
-     * ORDER BY em.ENTRY_DATE, es.ENTRY_NO, es.SEQ
+     * ORDER BY em.ENTRY_DATE, es.SEQ
      */
     private function fetchStatement(string $type, Request $request, $id): JsonResponse
     {
@@ -512,7 +512,7 @@ class WorkerController extends Controller
                 JOIN ACCOUNTS.ENTRY_MAIN em ON em.ENTRY_NO = es.ENTRY_NO
                 JOIN ACCOUNTS.ENTRY_TYPE et ON et.ENTRY_TYPE_NO = em.ENTRY_TYPE_NO
                 WHERE es.ACC_NO = :acc_no
-                ORDER BY em.ENTRY_DATE, es.ENTRY_NO, es.SEQ
+                ORDER BY em.ENTRY_DATE, es.SEQ
             ";
 
             $rows = DB::connection('oracle')->select($sql, ['acc_no' => $accNo]);
