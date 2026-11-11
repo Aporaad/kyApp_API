@@ -371,7 +371,13 @@ class TailoringController extends Controller
                 $bindings[$key] = $ohdId;
             }
 
-            $sql = 'SELECT ct.TR_INV_D_ID,
+            // جدول CUTING_TRANSD يخزّن كل حركة مرتين بأصفاد متطابقة (18 صفاً ↔ 9 معرّفات فريدة)،
+            // فالتكرار في البيانات لا في الربط (ORDSID و DEPTID فريدان). DISTINCT يُسقط
+            // الصفوف المكرّرة المتطابقة لأن TR_INV_D_ID ضمن الأعمدة المختارة.
+            // CUTING_TRANSD stores every movement twice with identical values (18 rows ↔ 9 distinct
+            // ids); the duplication is in the data, not the join (ORDSID/DEPTID are unique). DISTINCT
+            // drops the identical repeats because TR_INV_D_ID is in the projection.
+            $sql = 'SELECT DISTINCT ct.TR_INV_D_ID,
                            TO_CHAR(ct.DDATE, \'DD/MM/YYYY\') AS DDATE_TXT,
                            TO_CHAR(ct.DDATE, \'YYYY-MM-DD\') AS DDATE_ISO,
                            os.ORDSNAME,
@@ -393,7 +399,7 @@ class TailoringController extends Controller
                        AND ct.YEAR = :year
                        AND NVL(ct.CANCEL, 0) <> 1
                        AND ct.OHDID IN ('.implode(', ', $placeholders).')
-                     ORDER BY ct.DDATE, ct.TR_INV_D_ID';
+                     ORDER BY DDATE_ISO, ct.TR_INV_D_ID';
 
             $rows = DB::connection('oracle')->select($sql, $bindings);
 
