@@ -265,13 +265,17 @@ class TailoringController extends Controller
 
             // قراءة تكميلية (1): صف SALES_BILL الوحيد بهوية الفاتورة لما لا تحمله الواجهة.
             // Supplementary read (1): the single SALES_BILL row for what the view lacks.
-            $bill = DB::connection('oracle')
-                ->table(self::TABLE_SALES_BILL)
-                ->where('BILL_NO', $billNo)
-                ->where('YEAR', $year)
-                ->first();
+            // تاريخ الطباعة يُنسَّق هنا لا في الواجهة، فأوراكل يعيده كائن تاريخ خام.
+            // The print timestamp is formatted here, not in the UI: Oracle returns a raw date.
+            $billRows = DB::connection('oracle')->select(
+                'SELECT s.*, TO_CHAR(s.PRINT_DATE, \'DD/MM/YYYY HH24:MI\') AS PRINT_DATE_TXT
+                   FROM '.self::TABLE_SALES_BILL.' s
+                  WHERE s.BILL_NO = :bill_no
+                    AND s.YEAR = :year',
+                ['bill_no' => $billNo, 'year' => $year]
+            );
 
-            $billRow = $bill ? (array) $bill : [];
+            $billRow = $billRows === [] ? [] : (array) $billRows[0];
 
             // بيانات الطلب من صف الفاتورة — تُدمج في الترويسة بدل حقل منفصل في الواجهة.
             // Order data from the bill row, merged into the header rather than a separate box.
@@ -286,6 +290,18 @@ class TailoringController extends Controller
                 'branch_no' => $this->lower($billRow, 'BRANCH_NO'),
                 'created_by' => $this->lower($billRow, 'CREATED_BY_NAME'),
                 'last_updated_by' => $this->lower($billRow, 'LAST_UPDATED_BY_NAME'),
+                // نوع الفاتورة: كود رقمي في SALES_BILL بلا قاموس أسماء في القاعدة، فيُعرض كما هو
+                // Bill kind: a numeric SALES_BILL code with no name dictionary in the database,
+                // so it is shown exactly as stored rather than invented.
+                'bill_kind' => $this->lower($billRow, 'BILLS_KINDS')
+                    ?? $this->num($headerRow, 'BILLS_KINDS'),
+                // ملاحظة المستعجل: نص GIVING_IN، ولا يُعرض إلا على الفاتورة المستعجلة
+                // The urgent note: the GIVING_IN text, shown only on an urgent bill.
+                'urgent_note' => $this->lower($billRow, 'GIVING_IN'),
+                // بيانات الطبع: متى ومن طبع الفاتورة — تظهر فقط إن طُبعت فعلاً
+                // Print data: when and who printed the bill — present only if it really was.
+                'printed_at' => $this->lower($billRow, 'PRINT_DATE_TXT'),
+                'printed_by' => $this->lower($billRow, 'PRINT_USER'),
             ]);
 
             // الحجب على الخادم لا في الواجهة: بلا `tailoring.payments_view` لا تصل المبالغ أصلاً.
@@ -579,14 +595,20 @@ class TailoringController extends Controller
      */
     private function detailSql(): string
     {
-        // عرض القماش (58/45/38) ليس في الواجهة: يُقرأ من MULTI_CLOTHS بربط على مفتاح القطعة
-        // The cloth width (58/45/38) is not in the view: it is read from MULTI_CLOTHS on the
-        // piece key.
+        // عرض القماش (58/45/38) ليس في الواجهة: يُقرأ من MULTI_CLOTHS بربط على مفتاح القطعة،
+        // ويُقرأ معه «خبنة دبل» و«رقم التطريز» لأنهما ليسا في الواجهة أيضاً.
+        // The cloth width (58/45/38) is not in the view: it is read from MULTI_CLOTHS on the piece
+        // key, together with the double-habna and embroidery number, which the view lacks too.
         $widthColumn = $this->clothWidthColumn();
         $widthSelect = $widthColumn === null
             ? 'CAST(NULL AS VARCHAR2(20)) AS CLOTH_WIDTH'
             : 'm.'.$widthColumn.' AS CLOTH_WIDTH';
-        $widthJoin = $widthColumn === null ? '' : '
+
+        // الربط دائم الآن: القطعة في الواجهة تقابل صفاً واحداً في MULTI_CLOTHS بنفس المفتاح
+        // الرباعي، فالزيادة لا تُضاعف الصفوف.
+        // The join is unconditional now: a view row maps to exactly one MULTI_CLOTHS row on the
+        // same four-column key, so the extra columns cannot duplicate rows.
+        $widthJoin = '
                   LEFT JOIN '.self::TABLE_MULTI_CLOTHS.' m
                          ON m.BILL_NO = v.BILL_NO
                         AND m.YEAR = v.YEAR
@@ -595,6 +617,7 @@ class TailoringController extends Controller
 
         return 'SELECT v.SEQ_NO, v.SEQ_NO1, v.OHDID, v.BENEFICIARY_NAME, v.QTY AS PIECE_QTY,
                        '.$widthSelect.',
+                       v.FIXED_FLEXED, m.HABNA_DUABL, m.TATRYZ_NO,
                        v.SHAPE_STYLE_NO, v.STYLE_NAME, st.STYLE_NAME AS SHAPE_NAME,
                        v.CLOTH_NAME, v.CLOTH_TYPE, v.CLOTHS_COLOR, v.CLOTHS_COLOR2,
                        v.CONSUMED_CLOTH_QTY_HINSH, v.CONSUMED_CLOTH_QTY_YARDS,
@@ -715,6 +738,15 @@ class TailoringController extends Controller
                 // عرض القماش بالأرقام (58/45/38) من MULTI_CLOTHS — فارغ إن غاب العمود
                 // The numeric cloth width (58/45/38) from MULTI_CLOTHS — empty when absent.
                 'cloth_width' => $this->txt($row, 'CLOTH_WIDTH'),
+                // نوع التجهيز: نص محفوظ كما هو في الواجهة (مثل «1-ثابت» / «2-مرن»)
+                // The preparation type: the stored view text as-is (e.g. "1-fixed" / "2-flexed").
+                'fix_type' => $this->txt($row, 'FIXED_FLEXED'),
+                // خبنة دبل: 1 أو 0 — الواجهة تُخفي العمود كلياً عند 0
+                // Double habna: 1 or 0 — the UI hides the whole column when it is 0.
+                'habna_duabl' => $this->num($row, 'HABNA_DUABL'),
+                // رقم التطريز من MULTI_CLOTHS — فارغ غالباً لأن العمود غير معبأ في القاعدة
+                // The embroidery number from MULTI_CLOTHS — usually empty, the column is unused.
+                'embroidery_no' => $this->num($row, 'TATRYZ_NO'),
                 'sanf_no' => $this->num($row, 'SANF_NO'),
                 'sanf_dno' => $this->num($row, 'SANF_DNO'),
                 'cloth_name' => $this->txt($row, 'CLOTH_NAME'),
