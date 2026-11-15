@@ -73,11 +73,40 @@ class TailoringController extends Controller
     private const MAX_MOVEMENT_SEQ_NOS = 200;
 
     /**
-     * قائمة الفواتير: الأحدث أولاً مع البحث والفلترة الزمنية والتصفح
-     * Invoice list: newest first, with search, date range and pagination.
+     * قاموس الفرز المسموح: مفتاح الطلب ⇒ تعبير التجميع على الواجهة.
+     * The allowed sort dictionary: request key ⇒ aggregate expression over the view.
      *
-     * كل التجميع يقع على الواجهة نفسها، فلا يُقرأ جدول آخر في هذا المسار.
-     * All aggregation happens on the view itself, so no other table is read on this route.
+     * قائمة بيضاء مغلقة — لا يصل أي نص من المستخدم إلى SQL، والمفتاح الغريب يعود
+     * إلى الافتراضي (التاريخ). الترتيب بالاسم المستعار SRT لا بالتعبير حفاظاً على
+     * قطع الصفوف (stopkey) المقيس على القاعدة الحيّة.
+     * A closed whitelist — no user text ever reaches SQL, and an unknown key falls back to
+     * the default (date). Ordering uses the SRT alias, not the expression, preserving the
+     * stopkey row-cutting measured on the live database.
+     */
+    private const LIST_SORTS = [
+        'date' => 'MAX(v.DAT)',
+        'bill_no' => 'v.BILL_NO',
+        'manual_no' => 'MAX(v.MANUAL_BILL_NO)',
+        'year' => 'v.YEAR',
+        'customer' => 'MAX(v.CUST_NAME)',
+        'total' => 'MAX(v.TOTAL)',
+        'net' => 'MAX(v.NET)',
+        'models' => 'COUNT(DISTINCT v.SEQ_NO)',
+        'pieces' => 'COUNT(*)',
+        'stage' => 'MAX(v.ORDSDID)',
+    ];
+
+    /**
+     * قائمة الفواتير: بحث وفلاتر (تاريخ، نوع، تسليم، مرحلة، دفع، استعجال، فرع، سنة)
+     * وفرز تصاعدي/تنازلي بأي حقل مدعوم، مع التصفح.
+     * Invoice list: search plus filters (date, kind, delivery, stage, payment, urgency,
+     * branch, year) and ascending/descending sort on any supported field, with paging.
+     *
+     * كل التجميع يقع على الواجهة نفسها؛ فلاتر الدفع والاستعجال والفرع تمرّ عبر EXISTS
+     * على صف SALES_BILL الوحيد (قراءة تكميلية موثّقة) بلا مضاعفة صفوف.
+     * All aggregation happens on the view itself; the payment/urgency/branch filters pass
+     * through EXISTS over the single SALES_BILL row (a documented supplementary read)
+     * without multiplying rows.
      */
     public function index(Request $request): JsonResponse
     {
@@ -88,10 +117,12 @@ class TailoringController extends Controller
         $offset = ($page - 1) * $limit;
 
         try {
-            $filters = $this->listFilters($request, $search);
+            $canPayments = $this->canSeePayments($request);
+            $filters = $this->listFilters($request, $search, $canPayments);
             $where = $filters['where'];
             $having = $filters['having'];
             $bindings = $filters['bindings'];
+            $sort = $this->listSort($request);
 
             // ثلاثة استعلامات بدل استعلام واحد، لأن كل واحد منها قيس على القاعدة الحيّة:
             //  · العدّ على مفتاحين فقط (0.8s) بدل تجميع 14 عموداً لكل الفواتير (4.8s).
@@ -115,11 +146,14 @@ class TailoringController extends Controller
 
             // Oracle 11g بلا OFFSET/FETCH: التصفح بـ ROWNUM داخل غلافين.
             // Oracle 11g has no OFFSET/FETCH: paging is done with ROWNUM in two wrappers.
+            // عمود الفرز SRT يُحسب هنا وحده؛ الاتجاه من القائمة البيضاء لا من نص المستخدم.
+            // The sort column SRT is computed here alone; the direction comes from the
+            // whitelist, never from user text.
             $keyRows = DB::connection('oracle')->select(
                 'SELECT * FROM (
                     SELECT p.BILL_NO, p.YEAR, ROWNUM AS RN FROM (
-                        SELECT v.BILL_NO, v.YEAR, MAX(v.DAT) AS D'.$from.'
-                        ORDER BY D DESC, v.BILL_NO DESC
+                        SELECT v.BILL_NO, v.YEAR, '.$sort['expr'].' AS SRT'.$from.'
+                        ORDER BY SRT '.$sort['dir'].', v.BILL_NO DESC, v.YEAR DESC
                     ) p WHERE ROWNUM <= :row_max
                  ) WHERE RN > :row_min',
                 array_merge($bindings, [
@@ -128,7 +162,7 @@ class TailoringController extends Controller
                 ])
             );
 
-            $items = $this->pageSummaries($keyRows);
+            $items = $this->pageSummaries($keyRows, $canPayments);
 
             return response()->json([
                 'success' => true,
@@ -147,13 +181,59 @@ class TailoringController extends Controller
     }
 
     /**
+     * خيارات الفلترة (facets): القيم المميزة للأنواع والسنوات والفروع.
+     * Filter options (facets): the distinct bill kinds, years and branches.
+     *
+     * مسار منفصل عن البيانات كما في سجل النشاط: القوائم المنسدلة تُملأ من الخادم
+     * لا من تخمين العميل، والأنواع تبقى أكواداً لأن لا قاموس أسماء لها في القاعدة.
+     * A separate endpoint from the data, as with the activity trail: dropdowns are filled
+     * from the server rather than client guesses, and kinds stay codes because the
+     * database holds no name dictionary for them.
+     */
+    public function filterOptions(): JsonResponse
+    {
+        try {
+            $kindRows = DB::connection('oracle')->select(
+                'SELECT DISTINCT BILLS_KINDS FROM '.self::VIEW_CUTTING_BILL.'
+                  WHERE BILLS_KINDS IS NOT NULL ORDER BY BILLS_KINDS'
+            );
+
+            $yearRows = DB::connection('oracle')->select(
+                'SELECT DISTINCT YEAR FROM '.self::VIEW_CUTTING_BILL.' ORDER BY YEAR DESC'
+            );
+
+            $branchRows = DB::connection('oracle')->select(
+                'SELECT DISTINCT BRANCH_NO FROM '.self::TABLE_SALES_BILL.'
+                  WHERE BRANCH_NO IS NOT NULL ORDER BY BRANCH_NO'
+            );
+
+            $ints = static fn (array $rows, string $key): array => array_values(array_filter(
+                array_map(static fn ($row): ?int => (($v = CuttingViewReader::num((array) $row, $key)) === null) ? null : (int) $v, $rows),
+                static fn (?int $n): bool => $n !== null
+            ));
+
+            return response()->json([
+                'success' => true,
+                'message' => 'تم جلب خيارات الفلترة بنجاح / Filter options retrieved',
+                'data' => [
+                    'bill_kinds' => $ints($kindRows, 'BILLS_KINDS'),
+                    'years' => $ints($yearRows, 'YEAR'),
+                    'branches' => $ints($branchRows, 'BRANCH_NO'),
+                ],
+            ], 200);
+        } catch (\Throwable $e) {
+            return $this->errorResponse('خطأ في جلب خيارات الفلترة / Failed to retrieve filter options', $e);
+        }
+    }
+
+    /**
      * تجميع صفحة واحدة من المفاتيح المرتّبة، مع الحفاظ على ترتيب الصفحة
      * Aggregate one page of ordered keys, preserving the page order.
      *
      * @param  array<int, mixed>  $keyRows
      * @return array<int, array<string, mixed>>
      */
-    private function pageSummaries(array $keyRows): array
+    private function pageSummaries(array $keyRows, bool $withPayments): array
     {
         $keys = CuttingViewReader::billKeys($keyRows);
 
@@ -185,7 +265,8 @@ class TailoringController extends Controller
                     MAX(v.DISCOUNT) AS DISCOUNT,
                     MAX(v.NET) AS NET,
                     MAX(v.HANDING_DONE) AS HANDING_DONE,
-                    MAX(v.ORDSDID) AS ORDSDID
+                    MAX(v.ORDSDID) AS ORDSDID,
+                    MAX(v.BILLS_KINDS) AS BILLS_KINDS
                FROM '.self::VIEW_CUTTING_BILL.' v
               WHERE (v.BILL_NO, v.YEAR) IN ('.implode(', ', $pairs).')
               GROUP BY v.BILL_NO, v.YEAR',
@@ -211,7 +292,113 @@ class TailoringController extends Controller
             }
         }
 
-        return $ordered;
+        return $this->enrichWithSalesBill($ordered, $withPayments);
+    }
+
+    /**
+     * إثراء صفوف الصفحة من صف SALES_BILL الوحيد لكل فاتورة: الاستعجال والفرع،
+     * وخانات الدفع (المدفوع/المتبقي/حالة الدفع) فقط لمن يملك `tailoring.payments_view`.
+     * Enrich the page rows from each bill's single SALES_BILL row: urgency and branch,
+     * plus the money fields (paid/remaining/payment status) only for holders of
+     * `tailoring.payments_view`.
+     *
+     * قراءة دفعة واحدة بمفاتيح الصفحة (20 صفاً) لا ربطاً في استعلام التجميع، فيبقى
+     * مسار القائمة السريع كما قيس على القاعدة الحيّة.
+     * One batch read over the page keys (20 rows), not a join inside the aggregation
+     * query, so the measured fast list path stays untouched.
+     *
+     * @param  array<int, array<string, mixed>>  $items
+     * @return array<int, array<string, mixed>>
+     */
+    private function enrichWithSalesBill(array $items, bool $withPayments): array
+    {
+        if ($items === []) {
+            return $items;
+        }
+
+        $pairs = [];
+        $bindings = [];
+
+        foreach ($items as $index => $item) {
+            $pairs[] = '(:b'.$index.', :y'.$index.')';
+            $bindings['b'.$index] = (int) $item['bill_no'];
+            $bindings['y'.$index] = (int) $item['year'];
+        }
+
+        $rows = DB::connection('oracle')->select(
+            'SELECT s.BILL_NO, s.YEAR, s.URGENT, s.BRANCH_NO, s.BILLS_KINDS,
+                    s.TOTAL, s.AMOUNT_PAID
+               FROM '.self::TABLE_SALES_BILL.' s
+              WHERE (s.BILL_NO, s.YEAR) IN ('.implode(', ', $pairs).')',
+            $bindings
+        );
+
+        $byKey = [];
+
+        foreach ($rows as $row) {
+            $record = (array) $row;
+            $key = ((int) $this->num($record, 'BILL_NO')).'/'.((int) $this->num($record, 'YEAR'));
+            $byKey[$key] = $record;
+        }
+
+        foreach ($items as &$item) {
+            $record = $byKey[$item['bill_no'].'/'.$item['year']] ?? [];
+
+            $item['urgent'] = (int) ($this->num($record, 'URGENT') ?? 0);
+            $item['branch_no'] = $this->num($record, 'BRANCH_NO');
+            // النوع من الواجهة أولاً، وصف SALES_BILL احتياط عند غيابه.
+            // The kind comes from the view first, with the SALES_BILL row as fallback.
+            $item['bill_kind'] ??= $this->num($record, 'BILLS_KINDS');
+
+            if ($withPayments) {
+                // قرار صاحب المؤسسة: المدفوع = AMOUNT_PAID وحده، والمتبقي = الإجمالي − المدفوع.
+                // The owner's call: paid = AMOUNT_PAID alone, remaining = total − paid.
+                $total = $this->num($record, 'TOTAL') ?? $item['total'];
+                $paid = $this->num($record, 'AMOUNT_PAID');
+
+                $totalValue = (float) ($total ?? 0);
+                $paidValue = (float) ($paid ?? 0);
+
+                $item['paid'] = $paid !== null ? $paidValue : 0.0;
+                $item['remaining'] = ($total === null && $paid === null) ? null : $totalValue - $paidValue;
+                $item['payment_status'] = $this->paymentStatusOf($totalValue, $paidValue);
+            }
+        }
+        unset($item);
+
+        return $items;
+    }
+
+    /**
+     * حالة الدفع من الإجمالي والمدفوع — مطابقة تماماً لشروط فلتر EXISTS.
+     * The payment status from total and paid — exactly mirroring the EXISTS filter terms.
+     */
+    private function paymentStatusOf(float $total, float $paid): string
+    {
+        if ($paid <= 0) {
+            return 'unpaid';
+        }
+
+        return $paid >= $total ? 'paid' : 'partial';
+    }
+
+    /**
+     * مفتاح الفرز واتجاهه من القائمة البيضاء — أي قيمة غريبة تعود إلى الافتراضي.
+     * The sort key and direction from the whitelist — any odd value falls back to default.
+     *
+     * @return array{expr: string, dir: string}
+     */
+    private function listSort(Request $request): array
+    {
+        $key = (string) ($request->input('sort') ?? 'date');
+
+        if (! isset(self::LIST_SORTS[$key])) {
+            $key = 'date';
+        }
+
+        $dir = strtolower((string) ($request->input('dir') ?? 'desc')) === 'asc' ? 'ASC' : 'DESC';
+
+        return ['expr' => self::LIST_SORTS[$key], 'dir' => $dir];
     }
 
     /**
@@ -531,12 +718,21 @@ class TailoringController extends Controller
      * beneficiary sits on the model row of the same bill. The conditional-aggregate search was
      * measured live at 0.8s against 300s for the correlated EXISTS form.
      *
+     * فلاتر الدفع والاستعجال والفرع تعيش في SALES_BILL لا في الواجهة، فتُقرأ عبر EXISTS
+     * على مفتاح الفاتورة المركّب (صف واحد لكل فاتورة، بلا مضاعفة صفوف). فلتر الدفع
+     * يُتجاهل بلا صلاحية `tailoring.payments_view` — الحجب على الخادم لا في العميل.
+     * The payment/urgency/branch filters live in SALES_BILL, not the view, so they are read
+     * through EXISTS over the composite bill key (one row per bill, no row multiplication).
+     * The payment filter is ignored without `tailoring.payments_view` — the gate is
+     * server-side, never the client.
+     *
      * @return array{where: string, having: string, bindings: array<string, mixed>}
      */
-    private function listFilters(Request $request, string $search): array
+    private function listFilters(Request $request, string $search, bool $canPayments): array
     {
         $clauses = [];
         $conditions = [];
+        $aggregates = [];
         $bindings = [];
 
         $from = $this->parseDateToIso((string) ($request->input('from_date') ?? ''));
@@ -552,6 +748,80 @@ class TailoringController extends Controller
         if ($to !== null) {
             $clauses[] = 'v.DAT < TO_DATE(:to_date, \'YYYY-MM-DD\') + 1';
             $bindings['to_date'] = $to;
+        }
+
+        // نوع الفاتورة: كود رقمي في الواجهة — يُصفّى كما هو بلا ترجمة مخترعة.
+        // Bill kind: a numeric view code — filtered as stored, with no invented translation.
+        $billKind = $request->input('bill_kind');
+
+        if ($billKind !== null && $billKind !== '' && is_numeric($billKind)) {
+            $clauses[] = 'v.BILLS_KINDS = :bill_kind';
+            $bindings['bill_kind'] = (int) $billKind;
+        }
+
+        // حالة التسليم: مسلّمة (HANDING_DONE ≠ 0) أو قيد التنفيذ.
+        // Delivery state: delivered (HANDING_DONE ≠ 0) or still in progress.
+        $delivery = (string) ($request->input('delivery') ?? '');
+
+        if ($delivery === 'delivered') {
+            $clauses[] = 'NVL(v.HANDING_DONE, 0) <> 0';
+        } elseif ($delivery === 'pending') {
+            $clauses[] = 'NVL(v.HANDING_DONE, 0) = 0';
+        }
+
+        // مرحلة السير الحالية من قاموس ORDSTATE — الشرط على تجميع الفاتورة لا على صف القطعة،
+        // لأن قطع الفاتورة الواحدة قد تكون في مراحل مختلفة، والمعروض هو MAX(ORDSDID).
+        // فلتر WHERE على صف واحد كان يعيد فاتورة مرحلتها المعروضة غيرها.
+        // The current workflow stage from ORDSTATE — the term sits on the bill aggregate,
+        // not a piece row, because one bill's pieces can be at different stages and the
+        // displayed value is MAX(ORDSDID). A row-level WHERE term returned bills whose
+        // displayed stage was another one.
+        $stage = $request->input('stage');
+
+        if ($stage !== null && $stage !== '' && is_numeric($stage)) {
+            $aggregates[] = 'MAX(v.ORDSDID) = :stage';
+            $bindings['stage'] = (int) $stage;
+        }
+
+        // سنة الفاتورة — جزء من الهوية المركّبة.
+        // The bill year — part of the composite identity.
+        $year = $request->input('year');
+
+        if ($year !== null && $year !== '' && is_numeric($year)) {
+            $clauses[] = 'v.YEAR = :f_year';
+            $bindings['f_year'] = (int) $year;
+        }
+
+        // حالة الدفع: مدفوعة/جزئية/غير مدفوعة — من AMOUNT_PAID مقابل TOTAL في SALES_BILL.
+        // Payment state: paid/partial/unpaid — from AMOUNT_PAID against TOTAL in SALES_BILL.
+        $payment = (string) ($request->input('payment') ?? '');
+
+        if ($canPayments && in_array($payment, ['paid', 'partial', 'unpaid'], true)) {
+            $term = match ($payment) {
+                'paid' => 'NVL(s.AMOUNT_PAID, 0) > 0 AND NVL(s.AMOUNT_PAID, 0) >= NVL(s.TOTAL, 0)',
+                'partial' => 'NVL(s.AMOUNT_PAID, 0) > 0 AND NVL(s.AMOUNT_PAID, 0) < NVL(s.TOTAL, 0)',
+                default => 'NVL(s.AMOUNT_PAID, 0) <= 0',
+            };
+            $clauses[] = $this->salesBillExists($term);
+        }
+
+        // الاستعجال: علم URGENT في صف الفاتورة.
+        // Urgency: the URGENT flag on the bill row.
+        $urgent = (string) ($request->input('urgent') ?? '');
+
+        if ($urgent === '1') {
+            $clauses[] = $this->salesBillExists('NVL(s.URGENT, 0) = 1');
+        } elseif ($urgent === '0') {
+            $clauses[] = $this->salesBillExists('NVL(s.URGENT, 0) = 0');
+        }
+
+        // الفرع: رقم الفرع في صف الفاتورة.
+        // Branch: the branch number on the bill row.
+        $branch = $request->input('branch');
+
+        if ($branch !== null && $branch !== '' && is_numeric($branch)) {
+            $clauses[] = $this->salesBillExists('s.BRANCH_NO = :branch_no');
+            $bindings['branch_no'] = (int) $branch;
         }
 
         if ($search !== '') {
@@ -586,13 +856,35 @@ class TailoringController extends Controller
             }
         }
 
+        // مجموعة البحث تُربط بـ OR، وشروط التجميع (المرحلة) تُربط بـ AND معها.
+        // بلا شروط تبقى السلسلة فارغة فلا يُضاف `HAVING` أصلاً — `()` ليست SQL صحيحة.
+        // The search group is OR-joined; aggregate terms (stage) AND-join with it.
+        // With no terms the string stays empty so no HAVING is emitted — `()` is not valid SQL.
+        $havingParts = [];
+
+        if ($conditions !== []) {
+            $havingParts[] = '('.implode(' OR ', $conditions).')';
+        }
+
+        foreach ($aggregates as $aggregate) {
+            $havingParts[] = $aggregate;
+        }
+
         return [
             'where' => implode(' AND ', $clauses),
-            // بلا بحث تبقى القائمة فارغة (`''`) فلا يُضاف `HAVING` أصلاً — `()` ليست SQL صحيحة.
-            // With no search the clause stays `''` so no HAVING is emitted — `()` is not valid SQL.
-            'having' => $conditions === [] ? '' : '('.implode(' OR ', $conditions).')',
+            'having' => implode(' AND ', $havingParts),
             'bindings' => $bindings,
         ];
+    }
+
+    /**
+     * غلاف EXISTS موحّد على صف SALES_BILL بمفتاح الفاتورة المركّب.
+     * The shared EXISTS wrapper over the SALES_BILL row by the composite bill key.
+     */
+    private function salesBillExists(string $term): string
+    {
+        return 'EXISTS (SELECT 1 FROM '.self::TABLE_SALES_BILL.' s'
+            .' WHERE s.BILL_NO = v.BILL_NO AND s.YEAR = v.YEAR AND '.$term.')';
     }
 
     /**
@@ -921,6 +1213,7 @@ class TailoringController extends Controller
             'net' => $this->num($row, 'NET'),
             'handing_done' => $this->num($row, 'HANDING_DONE'),
             'ordsdid' => (int) ($this->num($row, 'ORDSDID') ?? 0),
+            'bill_kind' => $this->num($row, 'BILLS_KINDS'),
         ];
     }
 

@@ -310,6 +310,47 @@ test('the activity trail returns repaired arabic and the same meta shape', funct
     }
 });
 
+test('the general activity trail is guarded and answers with the same meta shape', function () {
+    // الحارس أولاً: بلا توكن ⇒ 401، وبلا منح ⇒ 403 باسم الصلاحية
+    $this->getJson('/api/activity')->assertUnauthorized();
+
+    Sanctum::actingAs(ungrantedUser(), ['*']);
+    $this->getJson('/api/activity')->assertForbidden()
+        ->assertJsonPath('errors.permission', ['users.activity_view']);
+
+    Sanctum::actingAs(adminForAdminTests(), ['*']);
+    $response = $this->getJson('/api/activity?limit=5')->assertOk()->assertJsonPath('success', true);
+
+    expect($response->json('meta'))->toHaveKeys(['total', 'page', 'limit', 'pages']);
+});
+
+test('the general trail filters by status without contradicting its own counter', function () {
+    Sanctum::actingAs(adminForAdminTests(), ['*']);
+
+    $failed = $this->getJson('/api/activity?status=failed&limit=200')->assertOk()->json();
+
+    // كل صف مُعاد يجب أن يطابق الحالة المطلوبة، وإلا كان الشرط لا يُطبَّق في الخادم
+    foreach ($failed['data'] as $row) {
+        expect($row['status'])->toBe('failed');
+    }
+
+    expect((int) $failed['meta']['total'])->toBeLessThanOrEqual(
+        (int) $this->getJson('/api/activity?limit=1')->assertOk()->json('meta.total')
+    );
+});
+
+test('the activity filter options endpoint lists facet arrays', function () {
+    Sanctum::actingAs(ungrantedUser(), ['*']);
+    $this->getJson('/api/activity/filters')->assertForbidden();
+
+    Sanctum::actingAs(adminForAdminTests(), ['*']);
+    $data = $this->getJson('/api/activity/filters')->assertOk()->assertJsonPath('success', true)->json('data');
+
+    expect($data)->toHaveKeys(['modules', 'actions', 'entity_types', 'platforms', 'statuses'])
+        ->and($data['modules'])->toBeArray()
+        ->and($data['statuses'])->toBe(['success', 'failed']);
+});
+
 test('my permissions endpoint returns the effective state of the caller', function () {
     $admin = adminForAdminTests();
     Sanctum::actingAs($admin, ['*']);

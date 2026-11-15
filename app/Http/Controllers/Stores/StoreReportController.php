@@ -175,8 +175,20 @@ class StoreReportController extends Controller
     }
 
     /**
-     * الأرصدة الحالية من `AVVG` مع تصفية ومجاميع تذييل
-     * Current balances from AVVG with filters and footer totals.
+     * الأرصدة — الحالية من `AVVG` أو التاريخية حتى تاريخ من `ITEM_MOVEMENT_D`، بتجميع
+     * وترتيب وفئة أرصدة قابلة للاختيار
+     * Balances — current from AVVG, or historical up to a date from ITEM_MOVEMENT_D, with
+     * selectable grouping, sorting and balance class.
+     *
+     * ── «فئة الأرصدة» (موجبة/سالبة) شرطٌ HAVING لا WHERE: الفلتر القديم كان يرشّح سطور
+     *    الـ VIEW الخام قبل الجمع، فصنف صافي رصيده سالب لكن إحدى طبقاته أكبر موجبة كان
+     *    يظهر موجباً. HAVING على الكمية المجمّعة يصنّف الصافي نفسه، ويشاركه استعلام
+     *    الإجماليات فتصبح أرقام التذييل مطابقة للسطور المعروضة حرفياً.
+     * ── The balance class (positive/negative) applies as HAVING, not WHERE: the old filter
+     *    screened raw view rows before aggregation, so an item with a net-negative balance
+     *    but a larger positive layer displayed as positive. HAVING on the aggregated quantity
+     *    classifies the net balance itself, and the totals query shares the very same
+     *    WHERE/GROUP/HAVING, so the footer matches the rows exactly.
      */
     public function balances(Request $request): JsonResponse
     {
@@ -184,85 +196,135 @@ class StoreReportController extends Controller
         $page = max((int) ($request->input('page') ?? 1), 1);
         $offset = ($page - 1) * $limit;
 
-        $where = ['1 = 1'];
-        $binds = [];
+        // رموز التجميع من القائمة البيضاء وحدها: رمز مجهول يُهمل لا يُمرَّر، والافتراضي
+        // الدائم صنف × مخزن حين لا شيء صالح يصل
+        // Grouping tokens from the whitelist only: an unknown token is dropped, never passed
+        // through, and a standing default of item × store applies when nothing valid arrives.
+        $tokens = array_values(array_intersect(
+            array_keys(self::BALANCE_GROUP_COLUMNS),
+            $this->groupTokens((string) ($request->input('group_by') ?? 'item*store'))
+        ));
 
-        $storeNos = $this->scopeList($request, 'store_nos', 'store_no');
-
-        if ($storeNos !== []) {
-            $where[] = $this->inClause('INV_ID', $storeNos, $binds, 'st');
+        if ($tokens === []) {
+            $tokens = ['item', 'store'];
         }
 
-        $search = trim((string) ($request->input('search') ?? ''));
+        $sort = strtolower(trim((string) ($request->input('sort') ?? 'item')));
 
-        if ($search !== '') {
-            $oracle = ArabicEncoding::toOracleSearchChars($search);
-            $where[] = '(ITEM_NAME LIKE :name_ar OR ITEM_NAME LIKE :name_utf OR PART_NO LIKE :part)';
-            $binds['name_ar'] = '%'.$oracle.'%';
-            $binds['name_utf'] = '%'.$search.'%';
-            $binds['part'] = '%'.$search.'%';
+        if (! isset(self::BALANCE_SORT_COLUMNS[$sort])) {
+            $sort = 'item';
         }
 
-        // الأرصدة تتبع نفس قوائم التصفية التي يستعملها التقرير، فلا يختلف «نفس الاختيار»
-        // بين شاشتين
-        // Balances accept the same multi-selection as the reports, so one choice cannot mean
-        // two different things on two screens.
-        $groupNos = $this->scopeList($request, 'group_nos', 'group_no');
+        $dir = strtolower(trim((string) ($request->input('dir') ?? 'asc'))) === 'desc' ? 'DESC' : 'ASC';
 
-        if ($groupNos !== []) {
-            $where[] = $this->inClause('GROUPNO', $groupNos, $binds, 'gr');
+        $only = strtolower(trim((string) ($request->input('only') ?? 'all')));
+
+        if (! in_array($only, ['all', 'positive', 'negative'], true)) {
+            $only = 'all';
         }
-
-        $itemTypeNos = $this->scopeList($request, 'item_type_nos', 'type_no');
-
-        if ($itemTypeNos !== []) {
-            $where[] = $this->inClause('TYPE_NO', $itemTypeNos, $binds, 'it');
-        }
-
-        $only = (string) ($request->input('only') ?? 'all');
-
-        if ($only === 'positive') {
-            $where[] = 'SUM_TP > 0';
-        } elseif ($only === 'negative') {
-            $where[] = 'SUM_TP < 0';
-        }
-
-        $whereSql = implode(' AND ', $where);
 
         try {
-            $aggregate = array_change_key_case((array) DB::connection('oracle')->selectOne(
-                'SELECT COUNT(*) AS TOTAL, NVL(SUM(QTY), 0) AS QTY, NVL(SUM(VALUE), 0) AS VALUE,
+            // التاريخ المرجعي: غيابه أو اليوم أو بعده يعني الرصيد الحالي من AVVG (المصدر الذي
+            // تعتمده أوامر الصرف)، وتاريخ ماضٍ يعني رصيداً تراكمياً حتى ذلك اليوم من سجل
+            // الحركة. ساعة أوراكل هي المرجع لا ساعة PHP: التطبيق UTC والـ SYSDATE بفرق ثلاث
+            // ساعات، وكان فارق منتصف الليل وحده يقلب «اليوم» تاريخاً ماضياً.
+            // The as-of date: absent, today or later means the current AVVG balance (the source
+            // issue orders validate against); a past date means a cumulative balance up to that
+            // day from the movement log. Oracle's clock is the authority, not PHP's: the app
+            // runs UTC while SYSDATE runs +03:00, and midnight alone could flip "today" into a
+            // past date.
+            $asOf = $this->dateOrNull($request->input('as_of'));
+
+            if ($asOf !== null) {
+                $today = (string) (array_change_key_case((array) DB::connection('oracle')->selectOne(
+                    "SELECT TO_CHAR(SYSDATE, 'YYYY-MM-DD') AS TODAY FROM DUAL"
+                ), CASE_UPPER)['TODAY'] ?? '');
+
+                if ($today !== '' && $asOf >= $today) {
+                    $asOf = null;
+                }
+            }
+
+            $historical = $asOf !== null;
+
+            // شروط التصفية المشتركة بين المسارين: البادئة وعمود اسم الصنف وحدهما يتغيران
+            // (AVVG يسميه ITEM_NAME وسجل الحركة IT_NAME)
+            // The filters shared by both paths: only the table prefix and the item-name column
+            // change (AVVG calls it ITEM_NAME, the movement log IT_NAME).
+            // بذرة 1 = 1 تُبقي WHERE صحيحة حين لا يصل أي مرشّح: الرصيد الحالي بلا تصفية هو
+            // الاستدعاء الاعتيادي للشاشة، وأوراكل ترفض WHERE المجرّدة (ORA-00936)
+            // The 1 = 1 seed keeps WHERE valid when no filter arrives: the unfiltered current
+            // balance is the screen's routine call, and Oracle rejects a bare WHERE (ORA-00936).
+            $where = ['1 = 1'];
+            $binds = [];
+
+            if ($historical) {
+                // الرصيد التراكمي يشمل يوم التاريخ نفسه: حركة قبل نهاية ذلك اليوم
+                // The cumulative balance includes the as-of day itself: movement before its end.
+                $where[] = 'm.I_DATE < TO_DATE(:as_of, \'YYYY-MM-DD\') + 1';
+                $binds['as_of'] = $asOf;
+                $this->balanceScope($request, 'm.', 'IT_NAME', $where, $binds);
+            } else {
+                $this->balanceScope($request, '', 'ITEM_NAME', $where, $binds);
+            }
+
+            $whereSql = implode(' AND ', $where);
+
+            // فئة الأرصدة على الكمية المجمّعة — HAVING لا WHERE، وبالتعبير لا بالاسم المستعار
+            // لأن أوراكل ترفض الاسم المستعار داخل HAVING
+            // The balance class on the aggregated quantity — HAVING, not WHERE, and by the
+            // expression itself because Oracle rejects select aliases inside HAVING.
+            $qtyExpr = $historical ? 'SUM(m.P_QTY)' : 'SUM(SUM_TP)';
+            $having = [];
+
+            if ($only === 'positive') {
+                $having[] = $qtyExpr.' > 0';
+            } elseif ($only === 'negative') {
+                $having[] = $qtyExpr.' < 0';
+            }
+
+            $havingSql = $having === [] ? '' : ' HAVING '.implode(' AND ', $having);
+
+            [$selectSql, $groupSql] = $this->balanceGroupList($tokens, $historical);
+            $table = $historical ? 'ACCOUNTS.ITEM_MOVEMENT_D m' : 'ACCOUNTS.AVVG';
+            // الإجماليات من الكتلة المجمّعة نفسها: WHERE/GROUP/HAVING مشتركة مع السطور
+            // فلا يظهر في التذييل رقم لا يمثله الكشف
+            // The totals come from the very same aggregated block: WHERE/GROUP/HAVING are shared
+            // with the rows, so the footer never shows a figure the statement does not carry.
+            $aggregateSql = 'SELECT COUNT(*) AS TOTAL, NVL(SUM(QTY), 0) AS QTY, NVL(SUM(VALUE), 0) AS VALUE,
                         SUM(CASE WHEN QTY < 0 THEN 1 ELSE 0 END) AS NEGATIVE
                    FROM (
-                        SELECT I_CODE, INV_ID, SUM(SUM_TP) AS QTY, SUM(SUM_PRICE) AS VALUE
-                          FROM ACCOUNTS.AVVG WHERE '.$whereSql.'
-                         GROUP BY I_CODE, INV_ID
-                   )',
-                $binds
-            ), CASE_UPPER);
+                        SELECT '.$selectSql.'
+                          FROM '.$table.'
+                         WHERE '.$whereSql.'
+                         GROUP BY '.$groupSql.$havingSql.'
+                   )';
+
+            $aggregate = array_change_key_case(
+                (array) DB::connection('oracle')->selectOne($aggregateSql, $binds),
+                CASE_UPPER
+            );
 
             $pagedBinds = $binds;
             $pagedBinds['offset'] = $offset;
             $pagedBinds['offset2'] = $offset;
             $pagedBinds['limit'] = $limit;
 
+            // الترتيب بالأسماء المستعارة لا بتعبيرات مكررة: أوراكل تدمج الكتلة المجمّعة داخل
+            // الغلاف فيتداخل التجميع (ORA-00935) حين يُكرَّر MAX أو SUM في ORDER BY، وكسر
+            // التعادل الثابت يبقي ترتيب السطور متطابقاً عبر التنقّل بين الصفحات
+            // Order by the aliases, never repeated expressions: Oracle merges the grouped block
+            // into the ROWNUM wrapper and nests the aggregates (ORA-00935) when MAX/SUM repeats
+            // in ORDER BY. A stable tie-break keeps the row order identical across pages.
+            $orderSql = self::BALANCE_SORT_COLUMNS[$sort].' '.$dir.', ITEM_NAME '.$dir.', INV_ID '.$dir;
+
             $sql = 'SELECT * FROM (
                         SELECT q.*, ROWNUM AS RN FROM (
-                            SELECT I_CODE, MAX(PART_NO) AS PART_NO, MAX(ITEM_NAME) AS ITEM_NAME,
-                                   MAX(UOM_CODE) AS UOM_CODE, INV_ID, MAX(INVNAME) AS INVNAME,
-                                   SUM(SUM_TP) AS QTY, MAX(STK_COST) AS COST,
-                                   SUM(SUM_PRICE) AS VALUE, MAX(GROUPNO) AS GROUPNO,
-                                   MAX(GROUP_NAME) AS GROUP_NAME, MAX(TYPE_NO) AS TYPE_NO,
-                                   MAX(TYPE_NAME) AS TYPE_NAME, MAX(CAT) AS CAT
-                              FROM ACCOUNTS.AVVG
+                            SELECT '.$selectSql.'
+                              FROM '.$table.'
                              WHERE '.$whereSql.'
-                             GROUP BY I_CODE, INV_ID
-                             -- الترتيب بالأسماء المستعارة لا بـ MAX(...) مكرراً: أوراكل تدمج الكتلة
-                             -- المجمّعة داخل الغلاف فيتداخل التجميع (ORA-00935) حين يُكرَّر MAX
-                             -- في ORDER BY.
-                             -- Order by the aliases, never by a repeated MAX(...): Oracle merges the
-                             -- grouped block into the wrapper and nests the aggregates (ORA-00935).
-                             ORDER BY ITEM_NAME, INV_ID
+                             GROUP BY '.$groupSql.$havingSql.'
+                             ORDER BY '.$orderSql.'
                         ) q WHERE ROWNUM <= :offset2 + :limit
                     ) WHERE RN > :offset';
 
@@ -282,10 +344,151 @@ class StoreReportController extends Controller
                     'qty' => (float) ($aggregate['QTY'] ?? 0),
                     'value' => (float) ($aggregate['VALUE'] ?? 0),
                     'negative' => (int) ($aggregate['NEGATIVE'] ?? 0),
+                    // شكل الكشف الصادر: التاريخ المرجعي وعلمه التاريخي والتجميع والترتيب والفئة
+                    // The statement's own shape: the as-of date and its historical flag, the
+                    // grouping, the sort and the balance class.
+                    'as_of' => $asOf,
+                    'historical' => $historical,
+                    'group_by' => implode('*', $tokens),
+                    'sort' => $sort,
+                    'dir' => strtolower($dir),
+                    'only' => $only,
                 ],
             ]);
         } catch (\Throwable $e) {
             return $this->failure('تعذر جلب الأرصدة / Failed to retrieve balances.', $e);
+        }
+    }
+
+    /**
+     * أعمدة تجميع الأرصدة في `AVVG` — بُعد: [عمود، اسم مستعار]
+     * The AVVG balance grouping columns — dimension: [column, alias].
+     */
+    private const BALANCE_GROUP_COLUMNS = [
+        'item' => ['I_CODE', 'I_CODE'],
+        'store' => ['INV_ID', 'INV_ID'],
+        'subgroup' => ['TYPE_NO', 'TYPE_NO'],
+        'group' => ['GROUPNO', 'GROUPNO'],
+        'category' => ['CAT', 'CAT'],
+    ];
+
+    /**
+     * الأبعاد نفسها على `ITEM_MOVEMENT_D` للمسار التاريخي — الفئة اسمٌ هناك (CAT_NAME)
+     * يُستعار CAT ليتطابق شكل الصف بين المسارين
+     * The same dimensions on ITEM_MOVEMENT_D for the historical path — the category is a name
+     * there (CAT_NAME) aliased to CAT so both paths share one row shape.
+     */
+    private const BALANCE_HISTORICAL_GROUP_COLUMNS = [
+        'item' => ['m.I_CODE', 'I_CODE'],
+        'store' => ['m.INV_ID', 'INV_ID'],
+        'subgroup' => ['m.TYPE_NO', 'TYPE_NO'],
+        'group' => ['m.GROUPNO', 'GROUPNO'],
+        'category' => ['m.CAT_NAME', 'CAT'],
+    ];
+
+    /**
+     * حقول ترتيب الأرصدة — أسماء مستعارة من قائمة انتقاء واحدة مشتركة بين المسارين
+     * The balance sort fields — aliases from one select list shared by both paths.
+     */
+    private const BALANCE_SORT_COLUMNS = [
+        'item' => 'ITEM_NAME',
+        'qty' => 'QTY',
+        'value' => 'VALUE',
+        'store' => 'INVNAME',
+        'group' => 'GROUP_NAME',
+        'subgroup' => 'TYPE_NAME',
+        'category' => 'CAT',
+    ];
+
+    /**
+     * قائمة الانتقاء وGROUP BY للتجميع المطلوب — البُعد المجمَّع خاماً وبقية الأبعاد MAX
+     * The select list and GROUP BY for the requested grouping — grouped dims raw, the rest MAX.
+     *
+     * @param  array<int, string>  $tokens
+     * @return array{0: string, 1: string}
+     */
+    private function balanceGroupList(array $tokens, bool $historical): array
+    {
+        $map = $historical ? self::BALANCE_HISTORICAL_GROUP_COLUMNS : self::BALANCE_GROUP_COLUMNS;
+
+        $select = [];
+
+        foreach ($map as $token => [$column, $alias]) {
+            $select[] = in_array($token, $tokens, true)
+                ? $column.' AS '.$alias
+                : 'MAX('.$column.') AS '.$alias;
+        }
+
+        // أوصاف الصنف والمخزن تبقى MAX دائماً: إن كانت أبعادها مجمَّعة فقيمتها ثابتة داخل
+        // المجموعة، وإن لم تكن فـ MAX يعيد قيمتها الوحيدة دون أن يكسر التجميع
+        // Item and store descriptions stay MAX: for grouped dims the value is constant inside
+        // the group, and for the rest MAX returns the single value without breaking grouping.
+        $select[] = $historical
+            ? 'MAX(m.PART_NO) AS PART_NO, MAX(m.IT_NAME) AS ITEM_NAME, MAX(m.UOM_CODE) AS UOM_CODE,
+               MAX(m.INV_NAME) AS INVNAME, MAX(m.GROUP_NAME) AS GROUP_NAME, MAX(m.TYPE_NAME) AS TYPE_NAME,
+               SUM(m.P_QTY) AS QTY, MAX(m.STK_COST) AS COST, ROUND(SUM(m.P_QTY * m.STK_COST), 2) AS VALUE'
+            : 'MAX(PART_NO) AS PART_NO, MAX(ITEM_NAME) AS ITEM_NAME, MAX(UOM_CODE) AS UOM_CODE,
+               MAX(INVNAME) AS INVNAME, MAX(GROUP_NAME) AS GROUP_NAME, MAX(TYPE_NAME) AS TYPE_NAME,
+               SUM(SUM_TP) AS QTY, MAX(STK_COST) AS COST, SUM(SUM_PRICE) AS VALUE';
+
+        $group = implode(', ', array_map(
+            static fn (string $token): string => $map[$token][0],
+            array_values(array_filter(
+                array_keys($map),
+                static fn (string $token): bool => in_array($token, $tokens, true)
+            ))
+        ));
+
+        return [implode(', ', $select), $group];
+    }
+
+    /**
+     * شروط تصفية الأرصدة المشتركة بين المسارين — البادئة وعمود اسم الصنف وحدهما يتغيران
+     * The balance filters shared by both paths — only the table prefix and item-name column change.
+     *
+     * @param  array<int, string>  $where
+     * @param  array<string, mixed>  $binds
+     */
+    private function balanceScope(Request $request, string $prefix, string $itemColumn, array &$where, array &$binds): void
+    {
+        $storeNos = $this->scopeList($request, 'store_nos', 'store_no');
+
+        if ($storeNos !== []) {
+            $where[] = $this->inClause($prefix.'INV_ID', $storeNos, $binds, 'st');
+        }
+
+        // الأرصدة تتبع نفس قوائم التصفية التي يستعملها التقرير، فلا يختلف «نفس الاختيار»
+        // بين شاشتين
+        // Balances accept the same multi-selection as the reports, so one choice cannot mean
+        // two different things on two screens.
+        $groupNos = $this->scopeList($request, 'group_nos', 'group_no');
+
+        if ($groupNos !== []) {
+            $where[] = $this->inClause($prefix.'GROUPNO', $groupNos, $binds, 'gr');
+        }
+
+        $itemTypeNos = $this->scopeList($request, 'item_type_nos', 'type_no');
+
+        if ($itemTypeNos !== []) {
+            $where[] = $this->inClause($prefix.'TYPE_NO', $itemTypeNos, $binds, 'it');
+        }
+
+        if (($catNo = $this->intOrNull($request->input('cat_no'))) !== null) {
+            // الفئة تُقرأ من جدول الأصناف لأن الـ VIEW تحمل اسم الفئة نصاً لا رقمها
+            // The category is resolved through SANFS because the view carries its name only.
+            $where[] = $prefix.'I_CODE IN (SELECT SANF_NO FROM ACCOUNTS.SANFS WHERE CAT_NO = :cat_no)';
+            $binds['cat_no'] = $catNo;
+        }
+
+        $search = trim((string) ($request->input('search') ?? ''));
+
+        if ($search !== '') {
+            $oracle = ArabicEncoding::toOracleSearchChars($search);
+            $where[] = '('.$itemColumn.' LIKE :name_ar OR '.$itemColumn.' LIKE :name_utf OR '
+                .$prefix.'PART_NO LIKE :part)';
+            $binds['name_ar'] = '%'.$oracle.'%';
+            $binds['name_utf'] = '%'.$search.'%';
+            $binds['part'] = '%'.$search.'%';
         }
     }
 

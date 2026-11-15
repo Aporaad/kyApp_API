@@ -56,6 +56,7 @@ test('the tailoring permissions are part of the catalog and nowhere near the old
 test('the tailoring reads demand a session', function () {
     $samples = [
         ['get', '/api/tailoring/bills'],
+        ['get', '/api/tailoring/bills/filters'],
         ['get', '/api/tailoring/bills/21394/2026'],
         ['get', '/api/tailoring/bills/21394/2026/movements?ohd_ids=262133'],
         ['get', '/api/tailoring/reference'],
@@ -72,6 +73,7 @@ test('an ungranted caller is refused on every tailoring route', function () {
 
     $cases = [
         ['get', '/api/tailoring/bills', ['tailoring.view']],
+        ['get', '/api/tailoring/bills/filters', ['tailoring.view']],
         ['get', '/api/tailoring/bills/21394/2026', ['tailoring.view']],
         ['get', '/api/tailoring/bills/21394/2026/movements?ohd_ids=262133', ['tailoring.view']],
         ['get', '/api/tailoring/reference', ['tailoring.view', 'tailoring.create']],
@@ -418,4 +420,217 @@ test('print and export leave one activity row and never touch a legacy table', f
     $this->postJson("/api/tailoring/bills/{$billNo}/{$year}/activity", ['action' => 'delete'])
         ->assertStatus(422)
         ->assertJsonPath('success', false);
+});
+
+// ================================================================
+// الفلترة الموسّعة والفرز — القائمة المطوّرة
+// Extended filtering and sorting — the upgraded list.
+// ================================================================
+
+test('the bill list sorts ascending and descending by the whitelisted fields', function () {
+    Sanctum::actingAs(tailoringAdminUser(), ['*']);
+
+    // كل حقل رقمي/زمني يُفحص اتجاهه فعلياً؛ اسم العميل يُفحص وجوده فقط لأن ترتيب
+    // أوراكل على بايتات CP1256 لا يقارن كنصوص UTF-8 في PHP.
+    // Every numeric/date field has its direction actually checked; the customer name is
+    // only checked for presence because Oracle orders CP1256 bytes, not PHP UTF-8 text.
+    $cases = [
+        ['bill_no', static fn (array $r): int => (int) $r['bill_no']],
+        ['net', static fn (array $r): ?float => isset($r['net']) ? (float) $r['net'] : null],
+        ['date', static fn (array $r): string => (string) ($r['raw_date'] ?? '')],
+        ['year', static fn (array $r): int => (int) $r['year']],
+    ];
+
+    foreach ($cases as [$field, $read]) {
+        foreach (['asc', 'desc'] as $dir) {
+            $rows = $this->getJson("/api/tailoring/bills?sort={$field}&dir={$dir}&limit=8")
+                ->assertOk()
+                ->assertJsonPath('success', true)
+                ->json('data');
+
+            $values = array_values(array_filter(array_map($read, $rows), static fn ($v): bool => $v !== null && $v !== ''));
+            $sorted = $values;
+            $dir === 'asc' ? sort($sorted) : rsort($sorted);
+            expect($values)->toBe($sorted);
+        }
+    }
+
+    // الفرز بالاسم يعيد قائمة صالحة بالأسماء نفسها.
+    // Sorting by name returns a valid list carrying the same names.
+    $this->getJson('/api/tailoring/bills?sort=customer&dir=asc&limit=3')
+        ->assertOk()
+        ->assertJsonPath('success', true);
+});
+
+test('an unknown sort key or direction falls back to the default instead of reaching SQL', function () {
+    Sanctum::actingAs(tailoringAdminUser(), ['*']);
+
+    // قيم غريبة (ومحاولة حقن) تعود إلى الافتراضي: الأحدث أولاً، بلا خطأ SQL.
+    // Odd values (and an injection attempt) fall back to the default: newest first, no SQL error.
+    $rows = $this->getJson('/api/tailoring/bills?sort=1;DROP TABLE x&dir=sideways&limit=3')
+        ->assertOk()
+        ->json('data');
+
+    $dates = array_map(static fn (array $row): string => (string) ($row['raw_date'] ?? ''), $rows);
+    $sorted = $dates;
+    rsort($sorted);
+    expect($dates)->toBe($sorted);
+});
+
+test('the bill list filters by delivery state, stage, year and bill kind', function () {
+    Sanctum::actingAs(tailoringAdminUser(), ['*']);
+
+    $page = $this->getJson('/api/tailoring/bills?limit=1')->json('data');
+
+    if ($page === []) {
+        test()->markTestSkipped('الواجهة فارغة في هذه البيئة / The view is empty here.');
+    }
+
+    $bill = $page[0];
+    $key = $bill['bill_no'].'/'.$bill['year'];
+    $delivery = ((int) ($bill['handing_done'] ?? 0)) !== 0 ? 'delivered' : 'pending';
+
+    // فلتر التسليم يعيد الفاتورة نفسها وكل الصفوف مطابقة للحالة المطلوبة.
+    // The delivery filter returns the same bill and every row matches the requested state.
+    $rows = $this->getJson("/api/tailoring/bills?delivery={$delivery}&limit=50")
+        ->assertOk()->json('data');
+
+    $keys = array_map(static fn (array $r): string => $r['bill_no'].'/'.$r['year'], $rows);
+    expect($keys)->toContain($key);
+
+    foreach ($rows as $row) {
+        $done = ((int) ($row['handing_done'] ?? 0)) !== 0;
+        expect($done)->toBe($delivery === 'delivered');
+    }
+
+    // السنة والمرحلة والنوع: كل فلتر يعيد الفاتورة المطابقة ويحصر الصفوف فيها.
+    // Year, stage and kind: each filter returns the matching bill and confines rows to it.
+    $stage = (int) ($bill['ordsdid'] ?? 0);
+    $yearRows = $this->getJson('/api/tailoring/bills?year='.$bill['year'].'&stage='.$stage.'&limit=50')
+        ->assertOk()->json('data');
+
+    foreach ($yearRows as $row) {
+        expect((int) $row['year'])->toBe((int) $bill['year'])
+            ->and((int) $row['ordsdid'])->toBe($stage);
+    }
+
+    if (($bill['bill_kind'] ?? null) !== null) {
+        $kindRows = $this->getJson('/api/tailoring/bills?bill_kind='.$bill['bill_kind'].'&limit=50')
+            ->assertOk()->json('data');
+
+        foreach ($kindRows as $row) {
+            expect((int) $row['bill_kind'])->toBe((int) $bill['bill_kind']);
+        }
+    }
+});
+
+test('the payment filter splits paid, partial and unpaid and the parts sum to the whole', function () {
+    Sanctum::actingAs(tailoringAdminUser(), ['*']);
+
+    $total = (int) $this->getJson('/api/tailoring/bills?limit=1')->assertOk()->json('meta.total');
+
+    if ($total === 0) {
+        test()->markTestSkipped('الواجهة فارغة في هذه البيئة / The view is empty here.');
+    }
+
+    $sum = 0;
+
+    foreach (['paid', 'partial', 'unpaid'] as $status) {
+        $response = $this->getJson("/api/tailoring/bills?payment={$status}&limit=5")->assertOk();
+        $sum += (int) $response->json('meta.total');
+
+        // كل صف في النتيجة يحمل الحالة المطلوبة فعلاً — الفلتر والحمولة متطابقان.
+        // Every returned row really carries the requested state — filter and payload agree.
+        foreach ($response->json('data') as $row) {
+            expect($row['payment_status'])->toBe($status);
+        }
+    }
+
+    expect($sum)->toBe($total);
+});
+
+test('the list money fields and the payment filter are withheld without the grant', function () {
+    $user = User::query()->where('IS_ADMIN', 1)->where('IS_ACTIVATED', 1)->first();
+
+    if (! $user) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية: لا يوجد مستخدم مدير.');
+    }
+
+    Sanctum::actingAs($user, ['*']);
+
+    $resolver = Mockery::mock(PermissionResolver::class);
+    $resolver->shouldReceive('canAny')->andReturnTrue();
+    $resolver->shouldReceive('can')->andReturnUsing(
+        static fn ($user, string $code): bool => $code !== 'tailoring.payments_view'
+    );
+    app()->instance(PermissionResolver::class, $resolver);
+
+    $response = $this->getJson('/api/tailoring/bills?limit=3')->assertOk();
+
+    foreach ($response->json('data') as $row) {
+        // المال لا يصل: لا مدفوع ولا متبقٍ ولا حالة دفع، والاستعجال/الفرع يبقيان.
+        // No money arrives: no paid, remaining or payment status; urgency/branch stay.
+        expect($row)->not->toHaveKey('paid')
+            ->and($row)->not->toHaveKey('remaining')
+            ->and($row)->not->toHaveKey('payment_status')
+            ->and($row)->toHaveKey('urgent')
+            ->and($row)->toHaveKey('branch_no');
+    }
+
+    // فلتر الدفع يُتجاهل بلا صلاحية: العدد الكلي لا يتغير.
+    // The payment filter is ignored without the grant: the total stays unchanged.
+    $plain = (int) $this->getJson('/api/tailoring/bills?limit=1')->json('meta.total');
+    $filtered = (int) $this->getJson('/api/tailoring/bills?payment=paid&limit=1')->json('meta.total');
+    expect($filtered)->toBe($plain);
+});
+
+test('the urgent and branch filters read the single bill row', function () {
+    Sanctum::actingAs(tailoringAdminUser(), ['*']);
+
+    $urgentRows = $this->getJson('/api/tailoring/bills?urgent=1&limit=10')
+        ->assertOk()->json('data');
+
+    foreach ($urgentRows as $row) {
+        expect((int) $row['urgent'])->toBe(1);
+    }
+
+    $facets = $this->getJson('/api/tailoring/bills/filters')->assertOk()->json('data');
+    $branches = $facets['branches'] ?? [];
+
+    if ($branches === []) {
+        return; // لا فروع معبأة في هذه البيئة / no branches populated here
+    }
+
+    $branchRows = $this->getJson('/api/tailoring/bills?branch='.$branches[0].'&limit=10')
+        ->assertOk()->json('data');
+
+    foreach ($branchRows as $row) {
+        expect((int) $row['branch_no'])->toBe((int) $branches[0]);
+    }
+});
+
+test('the filter options endpoint serves distinct kinds, years and branches', function () {
+    Sanctum::actingAs(tailoringAdminUser(), ['*']);
+
+    $response = $this->getJson('/api/tailoring/bills/filters');
+
+    $response->assertOk()
+        ->assertJsonPath('success', true)
+        ->assertJsonStructure([
+            'data' => ['bill_kinds', 'years', 'branches'],
+        ]);
+
+    $data = $response->json('data');
+
+    // السنوات تنازلية ومميزة، والأنواع أكواد رقمية كما هي في القاعدة.
+    // Years are descending and distinct; kinds are numeric codes exactly as stored.
+    $years = $data['years'];
+    $sorted = $years;
+    rsort($sorted);
+    expect($years)->toBe($sorted)
+        ->and($years)->toBe(array_values(array_unique($years)));
+
+    foreach ($data['bill_kinds'] as $kind) {
+        expect($kind)->toBeInt();
+    }
 });

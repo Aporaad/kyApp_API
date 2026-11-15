@@ -630,34 +630,76 @@ class UserAdminController extends Controller
     }
 
     /**
-     * سجل نشاط مستخدم (ما نفذه وما نُفِّذ عليه)
-     * Activity trail for a user (what it did and what was done to it)
+     * عمود سجل النشاط الذي يُسمح بإيراد قيمه كخيارات فلترة — قائمة بيضاء صارمة
+     * Whitelisted activity columns whose distinct values may be offered as filter options.
      */
-    public function activity(Request $request, int $userId): JsonResponse
+    private const ACTIVITY_FACET_COLUMNS = [
+        'modules' => 'MODULE_CODE',
+        'actions' => 'ACTION_CODE',
+        'entity_types' => 'ENTITY_TYPE',
+        'platforms' => 'PLATFORM',
+    ];
+
+    /**
+     * الأعمدة التي يقرأها استعلام السجل من الجدول نفسه
+     * The columns the trail query reads straight from the activity table.
+     */
+    private const ACTIVITY_COLUMNS = <<<'SQL'
+        a.ACTIVITY_ID, a.USER_ID, a.TARGET_USER_ID, a.ACTION_CODE, a.MODULE_CODE,
+        a.ENTITY_TYPE, a.ENTITY_ID, a.DESCRIPTION_AR, a.STATUS, a.IP_ADDRESS,
+        a.USER_AGENT, a.PLATFORM, a.CREATED_ON
+        SQL;
+
+    /**
+     * سجل نشاط مستخدم — «ما نفذه وما نُفِّذ عليه»
+     * Activity trail for one user (what it did and what was done to it).
+     *
+     * المسار القديم الذي يأخذ `userId` في المقطع يبقى كما هو، وتمريره يثبّت الفلتر
+     * The legacy path still carries the user id in the segment; passing it pins that filter.
+     */
+    public function activity(Request $request, ?int $userId = null): JsonResponse
     {
         $limit = min(max((int) $request->input('limit', 50), 1), self::MAX_LIMIT);
         $page = max((int) $request->input('page', 1), 1);
 
-        $bindings = ['user_id' => $userId, 'rn_from' => ($page - 1) * $limit, 'rn_to' => $page * $limit];
-
         try {
+            [$scope, $scopeBindings] = $this->trailScope($request, $userId);
+            [$conditions, $filterBindings] = $this->activityConditions($request);
+
+            $where = $scope.' AND ('.implode(') AND (', $conditions).')';
+            $bindings = $scopeBindings + $filterBindings;
+
+            // العدّ على نفس شروط الصفحات: عدّاد يختلف عن القائمة يخدع المراجع
+            // The count uses the identical predicate, so the counter cannot disagree with the rows.
             $total = (int) $this->scalar(
-                'SELECT COUNT(*) AS TOTAL FROM ACCOUNTS.APP_USER_ACTIVITY
-                  WHERE USER_ID = :user_id OR TARGET_USER_ID = :user_id',
-                ['user_id' => $userId],
+                'SELECT COUNT(*) AS TOTAL
+                   FROM ACCOUNTS.APP_USER_ACTIVITY a
+                  WHERE '.$where,
+                $bindings,
                 'TOTAL'
             );
 
+            // 11g لا تعرف OFFSET/FETCH، فالتقطيع بـ ROW_NUMBER كما تفعله قائمة المستخدمين
+            // 11g has no OFFSET/FETCH, so the trail slices by ROW_NUMBER exactly like the user list.
             $rows = DB::connection('oracle')->select(
                 'SELECT *
                    FROM (
-                         SELECT a.*, ROW_NUMBER() OVER (ORDER BY a.CREATED_ON DESC, a.ACTIVITY_ID DESC) AS RN
-                           FROM ACCOUNTS.APP_USER_ACTIVITY a
-                          WHERE a.USER_ID = :user_id OR a.TARGET_USER_ID = :user_id
-                        )
+                         SELECT /*+ NO_MERGE */ x.*, ROW_NUMBER() OVER (ORDER BY x.CREATED_ON DESC, x.ACTIVITY_ID DESC) AS RN
+                           FROM (
+                                 SELECT '.self::ACTIVITY_COLUMNS.',
+                                        au.USER_NAME_EN AS ACTOR_NAME_EN,
+                                        au.USER_NAME_AR AS ACTOR_NAME_AR,
+                                        tu.USER_NAME_EN AS TARGET_NAME_EN,
+                                        tu.USER_NAME_AR AS TARGET_NAME_AR
+                                   FROM ACCOUNTS.APP_USER_ACTIVITY a
+                                   LEFT JOIN ACCOUNTS.APP_USERS au ON au.USER_ID = a.USER_ID
+                                   LEFT JOIN ACCOUNTS.APP_USERS tu ON tu.USER_ID = a.TARGET_USER_ID
+                                  WHERE '.$where.
+                                ') x
+                       )
                   WHERE RN > :rn_from AND RN <= :rn_to
                   ORDER BY RN',
-                $bindings
+                $bindings + ['rn_from' => ($page - 1) * $limit, 'rn_to' => $page * $limit]
             );
 
             $data = array_map(
@@ -680,6 +722,182 @@ class UserAdminController extends Controller
         } catch (Throwable $e) {
             return $this->errorResponse('خطأ في جلب سجل النشاط', $e);
         }
+    }
+
+    /**
+     * قيم الفلاتر الموجودة فعلاً في السجل — تُملى من الجدول لا من قائمة ثابتة في العميل
+     * Filter values that actually occur in the trail — read from the table, not hardcoded client-side.
+     *
+     * العمود يُختار من ثابت أبيض لا من المدخل، فلا نص خام يصل إلى `ORDER BY` ولا إلى `SELECT`
+     * Each column comes from a whitelist, so raw input never reaches SELECT or ORDER BY.
+     */
+    public function activityFilters(): JsonResponse
+    {
+        $facets = [];
+
+        try {
+            foreach (self::ACTIVITY_FACET_COLUMNS as $key => $column) {
+                $rows = DB::connection('oracle')->select(
+                    "SELECT DISTINCT {$column} AS VAL FROM ACCOUNTS.APP_USER_ACTIVITY
+                      WHERE {$column} IS NOT NULL ORDER BY {$column}"
+                );
+
+                // القيم تُقرأ بحالة عمود غير مستقرة في أوراكل، فتُوحَّد هنا
+                // Oracle casing is unstable, so the values are normalised here once.
+                $values = [];
+
+                foreach ($rows as $row) {
+                    $value = $this->stringOf((array) $row, 'VAL');
+
+                    if ($value !== null && trim($value) !== '') {
+                        $values[] = trim($value);
+                    }
+                }
+
+                sort($values, SORT_STRING);
+                $facets[$key] = array_values(array_unique($values));
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => $facets + ['statuses' => ['success', 'failed']],
+            ]);
+        } catch (Throwable $e) {
+            return $this->errorResponse('خطأ في جلب خيارات الفلاتر', $e);
+        }
+    }
+
+    /**
+     * نطاق السجل: مستخدم بعينه (فاعل أو مستهدف) أم كل السجل
+     * Trail scope: one user as actor or target, or the whole log.
+     *
+     * @return array{0: string, 1: array<string, mixed>}
+     */
+    private function trailScope(Request $request, ?int $userId): array
+    {
+        // المسار `/users/{id}/activity` يثبّت الفلتر؛ العام يقرأ `user` وقد يقرأ `me`
+        // The per-user route pins the id; the general trail reads `user`, which may be the text `me`.
+        $filter = $userId ?? trim((string) $request->input('user', ''));
+
+        if ($filter === '' || $filter === 'all') {
+            return ['1 = 1', []];
+        }
+
+        $resolved = $filter === 'me' ? optional($request->user())->getKey() : (int) $filter;
+        $resolved = $resolved === null ? null : (int) $resolved;
+
+        if ($resolved === null || $resolved <= 0) {
+            // معرّف غير موجود بدل أن ينقلب الطلب إلى سجل عام بلا فلتر
+            // An unknown id must yield an empty trail, not silently widen to the whole log.
+            return ['1 = 0', []];
+        }
+
+        return ['(a.USER_ID = :trail_user OR a.TARGET_USER_ID = :trail_user)', ['trail_user' => $resolved]];
+    }
+
+    /**
+     * شروط الفلترة المتقدمة على السجل — كل فلتر绑 binding نصّي مُجهَّز مسبقاً
+     * Advanced trail filters; every predicate is a prepared text bind.
+     *
+     * @return array{0: list<string>, 1: array<string, mixed>}
+     */
+    private function activityConditions(Request $request): array
+    {
+        $conditions = ['1 = 1'];
+        $bindings = [];
+
+        // الحالة: CHECK في الجدول يقصرها على success/failed، فلا حاجة لقبول قيمة ثالثة
+        // The table constraint already limits status to success/failed.
+        $status = strtolower(trim((string) $request->input('status', '')));
+
+        if (in_array($status, ['success', 'failed'], true)) {
+            $bindings['act_status'] = $status;
+            $conditions[] = 'a.STATUS = :act_status';
+        }
+
+        // القسم: مطابقة كاملة للكود المُرسل أو بادئة «كل ما يبدأ بـ» لفلتر أوسع
+        // Module: an exact code, or a prefix match when the caller sends a bare module family.
+        $module = strtolower(trim((string) $request->input('module', '')));
+
+        if ($module !== '') {
+            $bindings['act_module'] = $module;
+            $conditions[] = 'LOWER(a.MODULE_CODE) = :act_module';
+        }
+
+        $moduleLike = strtolower(trim((string) $request->input('module_like', '')));
+
+        if ($moduleLike !== '') {
+            $bindings['act_module_like'] = $moduleLike.'%';
+            $conditions[] = 'LOWER(a.MODULE_CODE) LIKE :act_module_like';
+        }
+
+        // العملية: كود كامل بمطابقة تامة، أو فعل منعزل («create») يُلحق بآخر الكود
+        // Action: a full code matches exactly; a bare verb («create») matches the code's tail.
+        $action = strtolower(trim((string) $request->input('action', '')));
+
+        if ($action !== '') {
+            if (str_contains($action, '.')) {
+                $bindings['act_action'] = $action;
+                $conditions[] = 'LOWER(a.ACTION_CODE) = :act_action';
+            } else {
+                $bindings['act_action_tail'] = '%.'.$action;
+                $bindings['act_action_raw'] = $action;
+                $conditions[] = '(LOWER(a.ACTION_CODE) = :act_action_raw OR LOWER(a.ACTION_CODE) LIKE :act_action_tail)';
+            }
+        }
+
+        // النوع والمنصة وعنوان IP: قيم قصيرة مخزّنة كما كُتبت
+        // Entity type, platform and IP address are short stored values.
+        foreach (['entity_type' => 'ENTITY_TYPE', 'platform' => 'PLATFORM'] as $param => $column) {
+            $value = strtolower(trim((string) $request->input($param, '')));
+
+            if ($value !== '') {
+                $bindings['act_'.$param] = $value;
+                $conditions[] = 'LOWER('.$column.') = :act_'.$param;
+            }
+        }
+
+        $ip = trim((string) $request->input('ip', ''));
+
+        if ($ip !== '') {
+            $bindings['act_ip'] = '%'.$ip.'%';
+            $conditions[] = 'a.IP_ADDRESS LIKE :act_ip';
+        }
+
+        // النافذة الزمنية: من أول الثانية صفر إلى آخر ثوانى اليوم، بـ bind نصّي لا بكتابة تاريخ
+        // Date window: midnight to end of day, bound as text so no client date format reaches Oracle.
+        $fromDate = trim((string) $request->input('from_date', ''));
+
+        if ($fromDate !== '') {
+            $bindings['act_from'] = $fromDate.' 00:00:00';
+            $conditions[] = "a.CREATED_ON >= TO_DATE(:act_from, 'YYYY-MM-DD HH24:MI:SS')";
+        }
+
+        $toDate = trim((string) $request->input('to_date', ''));
+
+        if ($toDate !== '') {
+            $bindings['act_to'] = $toDate.' 23:59:59';
+            $conditions[] = "a.CREATED_ON <= TO_DATE(:act_to, 'YYYY-MM-DD HH24:MI:SS')";
+        }
+
+        $search = trim((string) $request->input('search', ''));
+
+        if ($search !== '') {
+            // البحث يغطي الوصف العربي بوجهيه (الخام المخزّن والمُصلَّح) وكود العملية والكيان
+            // Search covers the Arabic description in both its stored and repaired forms, the code,
+            // and the entity reference — which is often the only handle on a specific record.
+            $bindings['search_desc'] = '%'.$search.'%';
+            $bindings['search_desc_ar'] = '%'.ArabicEncoding::toOracleSearchChars($search).'%';
+            $bindings['search_code'] = '%'.strtoupper($search).'%';
+            $conditions[] = "(UPPER(a.ACTION_CODE) LIKE :search_code
+                          OR UPPER(NVL(a.MODULE_CODE, ' ')) LIKE :search_code
+                          OR UPPER(NVL(a.ENTITY_TYPE, ' ')) LIKE :search_code
+                          OR UPPER(NVL(a.ENTITY_ID, ' ')) LIKE :search_code
+                          OR a.DESCRIPTION_AR LIKE :search_desc
+                          OR a.DESCRIPTION_AR LIKE :search_desc_ar)";
+        }
+
+        return [$conditions, $bindings];
     }
 
     // ---------------------------------------------------------------------
@@ -982,8 +1200,17 @@ class UserAdminController extends Controller
             'description_ar' => $this->fix($row['description_ar'] ?? null),
             'status' => $row['status'] ?? null,
             'ip_address' => $row['ip_address'] ?? null,
+            'user_agent' => $row['user_agent'] ?? null,
             'platform' => $row['platform'] ?? null,
             'created_on' => $row['created_on'] ?? null,
+            // أسماء الفاعل والمستهدف جاءت بمسارين فرعيين في السجل العام؛ السجل لكل مستخدم
+            // يظل يقرأهما لكن الشاشة لا تعرضهما لأن القارئ يعرف صاحب السجل
+            // The actor/target names only matter on the general trail; a per-user screen already
+            // knows whose log it is, so it simply ignores these keys.
+            'user_name_en' => $this->fix($row['actor_name_en'] ?? null),
+            'user_name_ar' => $this->fix($row['actor_name_ar'] ?? null),
+            'target_user_name_en' => $this->fix($row['target_name_en'] ?? null),
+            'target_user_name_ar' => $this->fix($row['target_name_ar'] ?? null),
         ];
     }
 

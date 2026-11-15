@@ -109,6 +109,14 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/users', [UserAdminController::class, 'index'])
         ->middleware('permission:users.view');
 
+    // سجل النشاط العام وخيارات الفلترة: مساران ثابتان، يُسجَّلان قبل `/users/{userId}`
+    // General audit trail and its filter options. Literal segments, registered ahead of /users/{id}.
+    Route::get('/activity', [UserAdminController::class, 'activity'])
+        ->middleware('permission:users.activity_view');
+
+    Route::get('/activity/filters', [UserAdminController::class, 'activityFilters'])
+        ->middleware('permission:users.activity_view');
+
     Route::get('/users/{userId}', [UserAdminController::class, 'show'])
         ->middleware('permission:users.view')
         ->where('userId', '[0-9]+');
@@ -233,6 +241,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/tailoring/reference', [TailoringController::class, 'reference'])
         ->middleware('permission:tailoring.view,tailoring.create');
     Route::get('/tailoring/bills', [TailoringController::class, 'index'])
+        ->middleware('permission:tailoring.view');
+    // خيارات الفلترة (facets): الأنواع والسنوات والفروع المميزة — تُملأ منها القوائم المنسدلة.
+    // Filter options (facets): distinct kinds, years and branches — they fill the dropdowns.
+    Route::get('/tailoring/bills/filters', [TailoringController::class, 'filterOptions'])
         ->middleware('permission:tailoring.view');
     Route::get('/tailoring/bills/{billNo}/{year}/movements', [TailoringController::class, 'movements'])
         ->middleware('permission:tailoring.view')

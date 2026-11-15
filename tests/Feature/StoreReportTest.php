@@ -851,3 +851,219 @@ test('the branch statement returns a real opening balance instead of starting on
         (float) $body['meta']['totals']['opening_qty'] - (float) $section['opening_qty']
     ))->toBeLessThan(0.01);
 });
+
+/**
+ * ── كشف الأرصدة المطوَّر: تجميع وترتيب وفئة أرصدة ومرجع زمني
+ * ── The reworked balances statement: grouping, ordering, balance class and an as-of date.
+ */
+test('the balances default to item × store and echo their own meta', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    $response = app(StoreReportController::class)->balances(
+        reportRequest(['limit' => 10])
+    );
+
+    expect($response->getStatusCode())->toBe(200);
+
+    $body = $response->getData(true);
+
+    expect($body['meta']['group_by'])->toBe('item*store')
+        ->and($body['meta']['sort'])->toBe('item')
+        ->and($body['meta']['dir'])->toBe('asc')
+        ->and($body['meta']['only'])->toBe('all')
+        ->and($body['meta']['historical'])->toBeFalse()
+        ->and($body['meta']['as_of'])->toBeNull();
+
+    // الافتراضي صنف × مخزن: الصنف والمخزن أساس كل سطر
+    // The default is item × store: item and store ground every row.
+    $row = array_change_key_case((array) ($body['data'][0] ?? []), CASE_UPPER);
+
+    expect($row)->toHaveKey('I_CODE')->toHaveKey('ITEM_NAME')->toHaveKey('INVNAME');
+});
+
+test('an unknown balance grouping token falls back to the default, never injected', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    $response = app(StoreReportController::class)->balances(
+        reportRequest(['group_by' => 'DROP TABLE avvg', 'limit' => 5])
+    );
+
+    expect($response->getStatusCode())->toBe(200)
+        ->and($response->getData(true)['meta']['group_by'])->toBe('item*store');
+});
+
+test('the balance class filters on the aggregated quantity, not on raw rows', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    $response = app(StoreReportController::class)->balances(
+        reportRequest(['only' => 'negative', 'limit' => 50])
+    );
+
+    expect($response->getStatusCode())->toBe(200);
+
+    $body = $response->getData(true);
+
+    expect($body['meta']['only'])->toBe('negative');
+
+    if ($body['data'] === []) {
+        test()->markTestSkipped('لا أرصدة سالبة في القاعدة حالياً.');
+    }
+
+    // ── العيب الذي أُصلح: كان الشرط يُطبَّق على سطور الـ VIEW الخام فتختفي الأصناف التي
+    //    تجاوزت سالباً إحدى طبقاتها بينما صافيها موجب، فتظهر في كشف «السالبة» وأصلاً ليست منه.
+    //    الشرط على الكمية المجمّعة لا يُظهر سطراً موجباً هنا أبداً.
+    // ── The fixed defect: the condition used to hit the view's raw rows, so an item whose
+    //    one layer went negative while its net stayed positive appeared inside a
+    //    negative-only statement. On the aggregated quantity a positive row can never appear.
+    foreach ($body['data'] as $row) {
+        $normalized = array_change_key_case((array) $row, CASE_UPPER);
+
+        expect((float) ($normalized['QTY'] ?? 0))->toBeLessThan(0);
+    }
+});
+
+test('an unknown balance class and sort degrade to their whitelisted defaults', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    $response = app(StoreReportController::class)->balances(
+        reportRequest([
+            'only' => 'BETWEEN',
+            'sort' => 'QTY; DROP',
+            'dir' => 'DESC;',
+            'limit' => 5,
+        ])
+    );
+
+    expect($response->getStatusCode())->toBe(200);
+
+    $meta = $response->getData(true)['meta'];
+
+    expect($meta['only'])->toBe('all')
+        ->and($meta['sort'])->toBe('item')
+        ->and($meta['dir'])->toBe('asc');
+});
+
+test('a past as-of date builds a historical statement and a future one stays current', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    $past = app(StoreReportController::class)->balances(
+        reportRequest(['as_of' => '2026-10-31', 'store_nos' => '1', 'limit' => 100])
+    );
+
+    expect($past->getStatusCode())->toBe(200);
+
+    $pastBody = $past->getData(true);
+
+    expect($pastBody['meta']['historical'])->toBeTrue()
+        ->and($pastBody['meta']['as_of'])->toBe('2026-10-31');
+
+    if ($pastBody['data'] === []) {
+        test()->markTestSkipped('لا حركة للمخزن قبل هذا التاريخ.');
+    }
+
+    // الكشف التاريخي يُبنى من دفتر الحركة: سطره يحمل اسم الصنف من `IT_NAME` مستعاراً
+    // The historical statement is rebuilt from the ledger: its rows carry the item name.
+    foreach ($pastBody['data'] as $row) {
+        $normalized = array_change_key_case((array) $row, CASE_UPPER);
+
+        expect($normalized)->toHaveKey('I_CODE')->toHaveKey('ITEM_NAME');
+    }
+
+    // ── ساعة أوراكل هي الحَكَم: اليوم وما بعده يعود للرصيد الحالي لا مساراً تاريخياً يسبق
+    //    لحظته — ساعة التطبيق UTC و`SYSDATE` +03:00، والفارق يقلب «اليوم» قرب منتصف الليل.
+    // ── Oracle's clock decides: today and later fall back to the current balance, never a
+    //    historical path ahead of its own moment — the app runs UTC while SYSDATE runs +03:00,
+    //    and that gap flips "today" near midnight.
+    $tomorrow = array_change_key_case((array) DB::connection('oracle')->selectOne(
+        "SELECT TO_CHAR(SYSDATE + 1, 'YYYY-MM-DD') AS D FROM DUAL"
+    ), CASE_UPPER);
+
+    $future = app(StoreReportController::class)->balances(
+        reportRequest(['as_of' => (string) ($tomorrow['D'] ?? '2027-01-01'), 'limit' => 5])
+    );
+
+    expect($future->getStatusCode())->toBe(200)
+        ->and($future->getData(true)['meta']['historical'])->toBeFalse()
+        ->and($future->getData(true)['meta']['as_of'])->toBeNull();
+});
+
+test('a one-page historical statement totals the sum of its rows', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    // نافذة داخل دفاتر المخزون نفسه: قبل 2026-04-25 لا حركة أصلاً فيكون الرصيد صفراً
+    // A window inside the ledger itself: nothing moved before 2026-04-25.
+    $window = array_change_key_case((array) DB::connection('oracle')->selectOne(
+        "SELECT TO_CHAR(SYSDATE - 30, 'YYYY-MM-DD') AS D FROM DUAL"
+    ), CASE_UPPER);
+
+    $response = app(StoreReportController::class)->balances(
+        reportRequest([
+            'as_of' => (string) ($window['D'] ?? '2026-10-31'),
+            'store_nos' => '1',
+            'limit' => 200,
+        ])
+    );
+
+    expect($response->getStatusCode())->toBe(200);
+
+    $body = $response->getData(true);
+
+    // صفحة واحدة فقط: أي اقتطاع يجعل المقارنة تقريباً فتُتخطى بأمانة
+    // One page only: truncation would turn the comparison into an approximation.
+    if ((int) ($body['meta']['pages'] ?? 2) > 1) {
+        test()->markTestSkipped('الرصيد حتى التاريخ يتجاوز صفحة واحدة — لا يمكن مقارنة الجمع.');
+    }
+
+    $sum = 0.0;
+
+    foreach ($body['data'] as $row) {
+        $normalized = array_change_key_case((array) $row, CASE_UPPER);
+        $sum += (float) ($normalized['QTY'] ?? 0);
+    }
+
+    expect(abs($sum - (float) ($body['meta']['qty'] ?? -1)))->toBeLessThan(0.01);
+});
+
+test('the balance sort orders rows by the whitelisted field', function () {
+    if (reportUser() === null) {
+        test()->markTestSkipped('اختبار يتطلب قاعدة oracle الحية.');
+    }
+
+    $response = app(StoreReportController::class)->balances(
+        reportRequest(['sort' => 'qty', 'dir' => 'desc', 'limit' => 100])
+    );
+
+    expect($response->getStatusCode())->toBe(200);
+
+    $body = $response->getData(true);
+
+    expect($body['meta']['sort'])->toBe('qty')->and($body['meta']['dir'])->toBe('desc');
+
+    $rows = array_map(
+        static fn ($r): array => array_change_key_case((array) $r, CASE_UPPER),
+        $body['data']
+    );
+
+    if (count($rows) < 2) {
+        test()->markTestSkipped('لا صفوف كافية للتحقق من الترتيب.');
+    }
+
+    // ترتيب تنازلي حقيقي: كل كمية تقود ما بعدها
+    // A real descending order: each quantity leads the next.
+    for ($i = 1; $i < count($rows); $i++) {
+        expect((float) $rows[$i - 1]['QTY'])
+            ->toBeGreaterThanOrEqual((float) $rows[$i]['QTY']);
+    }
+});
