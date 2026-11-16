@@ -919,6 +919,35 @@ class StoreReportController extends Controller
             $tokens
         ));
 
+        // ── الترتيب حق المستخدم في «تخصيص الخلاصة» — عمود من الأعمدة المعروضة plus
+        //    اتجاه asc/desc. القائمة البيضاء هي `SUMMARY_SORT_FIELDS` وحدها؛ أي اسم
+        //    غير معروف يعود إلى «الرصيد تنازلياً» (الافتراضي الرسمي للتقرير).
+        //    لا يصل أي نص مستخدم إلى SQL — الترتيب يجري PHPياً بعد وسم الرصيد
+        //    السابق/الحالي، لأن الرصيد نفسه يُحسب في PHP ولا وجود له في SELECT.
+        // ── Ordering is the user's right in the summary's customiser — any visible field and
+        //    a direction. The whitelist is SUMMARY_SORT_FIELDS only; an unknown name falls
+        //    back to the official default "balance, descending". Nothing user-typed reaches
+        //    SQL: the sort runs PHP-side, after the opening/closing balances are stamped,
+        //    because CLOSING_QTY itself has no SQL column to sort by.
+        $sort = (string) ($request->input('sort') ?? 'balance');
+
+        if (! isset(self::SUMMARY_SORT_FIELDS[$sort])) {
+            $sort = 'balance';
+        }
+
+        $dir = strtolower(trim((string) ($request->input('dir') ?? 'desc'))) === 'asc' ? 'asc' : 'desc';
+
+        // ── «منصرف المبيعات» و«منصرف آخر»: تفصيل المنصرف (صادر) إلى ما خرج بمستند بيع
+        //    (BILL_DOC_TYPE = 2 كما في `StorePolicy::SALES_MOVEMENT_TYPE`) وبقية المخارج
+        //    (صرف مخزني · تحويل · مردودات · تسويات مدينة...). الصفر لا يُدخل في أيٍّهما
+        //    لأن الوارد (P_QTY > 0) لا منصرف أصلاً، وBILL_DOC_TYPE null يُحسب «آخر».
+        // ── Sales vs other issues: outbound (P_QTY < 0) split by document type. A sale
+        //    carries BILL_DOC_TYPE = 2 (StorePolicy::SALES_MOVEMENT_TYPE); every other
+        //    outbound — store issue, transfer-out, cutter/supplier returns, debit
+        //    settlements, or a legacy NULL type — falls into "other". Inbound rows are
+        //    excluded from both, since they are not an issue.
+        $salesType = StorePolicy::SALES_MOVEMENT_TYPE;
+
         $outerWhere = [];
         $outerBinds = [];
         $this->applyScope($request, $outerWhere, $outerBinds);
@@ -942,6 +971,10 @@ class StoreReportController extends Controller
                            MAX(m.P_CODE) AS P_CODE,
                            SUM(CASE WHEN m.P_QTY > 0 THEN m.P_QTY ELSE 0 END) AS QTY_IN,
                            SUM(CASE WHEN m.P_QTY < 0 THEN -m.P_QTY ELSE 0 END) AS QTY_OUT,
+                           SUM(CASE WHEN m.P_QTY < 0 AND m.BILL_DOC_TYPE = '.$salesType.'
+                                    THEN -m.P_QTY ELSE 0 END) AS SALES_OUT,
+                           SUM(CASE WHEN m.P_QTY < 0 AND NVL(m.BILL_DOC_TYPE, -1) <> '.$salesType.'
+                                    THEN -m.P_QTY ELSE 0 END) AS OTHER_OUT,
                            SUM(m.P_QTY) AS NET_QTY,
                            ROUND(SUM(CASE WHEN m.P_QTY > 0 THEN m.P_QTY * m.STK_COST ELSE 0 END), 2) AS IN_VALUE,
                            ROUND(SUM(CASE WHEN m.P_QTY < 0 THEN -m.P_QTY * m.STK_COST ELSE 0 END), 2) AS OUT_VALUE,
@@ -981,14 +1014,151 @@ class StoreReportController extends Controller
 
             $clean = $this->stampSummary($clean, $tokens, $openings);
 
+            // ── الترتيب النهائي بعد وسم الرصيد: الرصيد السابق/الحالي لا وجود لهما في
+            //    SELECT (يُحسبان PHP من `openingByGroups`)، فأي فرز عليهما يجب أن يكون
+            //    بعد الوسم وإلا فرَزنا على عمود غير موجود. الفرز PHP شاملّ لكل الحقول
+            //    لثبات المسار: حدّ `limit` مطبَّق سلفاً في SQL على `ORDER BY ITEM_NAME`،
+            //    والتنبيه بالقتع يظهر على الشاشة حين يصل التقرير هذا الحد.
+            // ── Final ordering after stamping: opening/closing have no SELECT column
+            //    (they are computed PHP-side by `openingByGroups`), so any balance sort must
+            //    run after the stamp. The sort is unified PHP-side for every field to keep
+            //    one path — the `limit` was already applied in SQL by `ORDER BY ITEM_NAME`,
+            //    and the truncation warning surfaces on screen when that cap is hit.
+            $clean = $this->sortSummaryRows($clean, $sort, $dir, $tokens);
+
             return response()->json([
                 'success' => true,
                 'data' => $clean,
-                'meta' => $this->summaryMeta($clean, $groupBy, $tokens, $from, $to, $limit),
+                'meta' => $this->summaryMeta($clean, $groupBy, $tokens, $from, $to, $limit, $sort, $dir),
             ]);
         } catch (\Throwable $e) {
             return $this->failure('تعذر جلب خلاصة الحركة / Failed to retrieve the movement summary.', $e);
         }
+    }
+
+    /**
+     * حقول ترتيب الخلاصة المسموح بها — «عمود المعروض» لا عمود الـ VIEW حرفياً
+     * The whitelisted summary sort fields — the *displayed* column, not a raw VIEW column.
+     *
+     * ── «عمود» = معرّف أعمدة الخلاصة على الشاشة (`label`, `part`, `store`, …) حتى يكون
+     *    ما يراه المستخدم هو ما يفرز عليه، لا اسم عمود SQL قد لا يكون ظاهراً أصلاً.
+     *    «numeric = true» يعني مقارنة رقمية؛ البقية تقارن نصياً (arabe-friendly).
+     *    «label» تُحال ديناميكياً حسب أول رمز تجميع (الصنف·المخزن·المجموعة…). الرصيدان
+     *    السابق/الحالي يقرآن من `OPENING_QTY`/`CLOSING_QTY` بعد وسم PHP لهما.
+     * ── A field is one of the summary's *visible* column ids (`label`, `part`, `store`, …),
+     *    so the user sorts by what they actually see, not by a hidden SQL name. `numeric`
+     *    picks a numeric vs textual comparison. `label` resolves dynamically to the first
+     *    grouping token's display name. The two balances read `OPENING_QTY`/`CLOSING_QTY`
+     *    after the PHP stamp.
+     *
+     * @var array<string, array{0: string|null, 1: bool}>
+     */
+    private const SUMMARY_SORT_FIELDS = [
+        'label' => [null, false],
+        'part' => ['PART_NO', false],
+        'store' => ['INV_NAME', false],
+        'group' => ['GROUP_NAME', false],
+        'sub' => ['TYPE_NAME', false],
+        'category' => ['CAT_NAME', false],
+        'unit' => ['UOM_CODE', false],
+        'cost' => ['COST', true],
+        'in' => ['QTY_IN', true],
+        'out' => ['QTY_OUT', true],
+        'salesOut' => ['SALES_OUT', true],
+        'otherOut' => ['OTHER_OUT', true],
+        'net' => ['NET_QTY', true],
+        'opening' => ['OPENING_QTY', true],
+        'balance' => ['CLOSING_QTY', true],
+        'inValue' => ['IN_VALUE', true],
+        'outValue' => ['OUT_VALUE', true],
+        'value' => ['NET_VALUE', true],
+        'balanceValue' => ['NET_VALUE', true],
+        'lines' => ['ROWS_COUNT', true],
+    ];
+
+    /**
+     * الاسم المستعار في صف الخلاصة الذي يقابل «أول رمز تجميع» — لعرض عمود «label»
+     * The row alias behind the label column for the first grouping token — used to sort by
+     * the report's leading column, whose caption already changes with the aggregation level.
+     */
+    private const LABEL_ALIAS_BY_TOKEN = [
+        'item' => 'ITEM_NAME',
+        'sub' => 'SUB_NAME',
+        'store' => 'INV_NAME',
+        'subgroup' => 'TYPE_NAME',
+        'group' => 'GROUP_NAME',
+        'category' => 'CAT_NAME',
+    ];
+
+    /**
+     * فرز سطور الخلاصة PHPياً بعد الوسم، بأمان المقارنة المختلطة (رقم/نص/null)
+     * Sort the stamped summary rows PHP-side, safely handling numeric/text/NULL mixes.
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @param  array<int, string>  $tokens
+     * @return array<int, array<string, mixed>>
+     */
+    private function sortSummaryRows(array $rows, string $sort, string $dir, array $tokens): array
+    {
+        [$rawKey, $isNumeric] = self::SUMMARY_SORT_FIELDS[$sort];
+
+        // «label» تُحال لأول رمز تجميع فعلي؛ لا شيء في الصف اسمه `label` حرفياً
+        // "label" resolves to the first grouping token — no row carries a literal "label".
+        $key = $rawKey ?? (self::LABEL_ALIAS_BY_TOKEN[$tokens[0]] ?? 'ITEM_NAME');
+
+        $factor = $dir === 'desc' ? -1 : 1;
+
+        usort($rows, static function (array $a, array $b) use ($key, $isNumeric, $factor): int {
+            if ($isNumeric) {
+                $av = (float) ($a[$key] ?? 0);
+                $bv = (float) ($b[$key] ?? 0);
+
+                if (abs($av - $bv) < 1e-9) {
+                    // كسر التعادل بالرصيد تنازلياً ثم باسم الصنف حتى يبقى الترتيب ثابتاً
+                    // بين تشغيلين متتاليين لنفس المعطيات
+                    // Tie-break on closing balance desc, then item name — so two runs of
+                    // the same parameters always show the same order.
+                    $aClose = (float) ($a['CLOSING_QTY'] ?? 0);
+                    $bClose = (float) ($b['CLOSING_QTY'] ?? 0);
+
+                    if (abs($aClose - $bClose) >= 1e-9) {
+                        return $aClose > $bClose ? -1 : 1;
+                    }
+
+                    return strcmp(
+                        (string) ($a['ITEM_NAME'] ?? ''),
+                        (string) ($b['ITEM_NAME'] ?? '')
+                    );
+                }
+
+                return $factor * ($av <=> $bv);
+            }
+
+            $cmp = strcasecmp(
+                (string) ($a[$key] ?? ''),
+                (string) ($b[$key] ?? '')
+            );
+
+            if ($cmp !== 0) {
+                return $factor * $cmp;
+            }
+
+            // كسر تعادل النص بنفس منطق الأرقام: رصيد ثم اسم، حتى يبقى الترتيب ثابتاً
+            // Text ties use the same rule as numeric ones: balance then name.
+            $aClose = (float) ($a['CLOSING_QTY'] ?? 0);
+            $bClose = (float) ($b['CLOSING_QTY'] ?? 0);
+
+            if (abs($aClose - $bClose) >= 1e-9) {
+                return $aClose > $bClose ? -1 : 1;
+            }
+
+            return strcmp(
+                (string) ($a['ITEM_NAME'] ?? ''),
+                (string) ($b['ITEM_NAME'] ?? '')
+            );
+        });
+
+        return $rows;
     }
 
     /**
@@ -1128,7 +1298,9 @@ class StoreReportController extends Controller
         array $tokens,
         string $from,
         string $to,
-        int $limit
+        int $limit,
+        string $sort = 'balance',
+        string $dir = 'desc'
     ): array {
         $sum = static fn (string $key): float => array_sum(array_map(
             static fn (array $r): float => (float) ($r[$key] ?? 0),
@@ -1141,6 +1313,12 @@ class StoreReportController extends Controller
             'qty_in' => round($sum('QTY_IN'), 4),
             'qty_in_value' => round($sum('IN_VALUE'), 2),
             'qty_out' => round($sum('QTY_OUT'), 4),
+            // تفصيل المنصرف كمياً — القيمة تبقى مجملة في `qty_out_value` كما في السابق؛
+            // القيمة المفصلة ليست مطلوبة في شريط الإحصاء الآن
+            // Outbound split by document type — quantity only for now; the outbound
+            // *value* stays aggregated in `qty_out_value` as before.
+            'sales_out' => round($sum('SALES_OUT'), 4),
+            'other_out' => round($sum('OTHER_OUT'), 4),
             'qty_out_value' => round($sum('OUT_VALUE'), 2),
             'net_qty' => round($sum('NET_QTY'), 4),
             'net_value' => round($sum('NET_VALUE'), 2),
@@ -1156,6 +1334,12 @@ class StoreReportController extends Controller
             'kind' => 'summary',
             'group_by' => $groupBy,
             'group_tokens' => $tokens,
+            // شكل الخلاصة الصادر: الفرز والاتجاه — بهما تعيد الشاشة رسم شريط «المعطيات»
+            // وتطابق الطباعةُ الشاشةَ في أي جلسة تالية
+            // The summary's own shape: the sort and its direction — the meta band and the
+            // print header both read them back so a later session reproduces the same view.
+            'sort' => $sort,
+            'dir' => $dir,
             'totals' => $totals,
             'qty_in' => $totals['qty_in'],
             'qty_out' => $totals['qty_out'],

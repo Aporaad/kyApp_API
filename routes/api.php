@@ -9,6 +9,9 @@ use App\Http\Controllers\CustomerMeasurementController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\MyStatementController;
 use App\Http\Controllers\PermissionController;
+use App\Http\Controllers\Sales\SalesInvoiceController;
+use App\Http\Controllers\Sales\SalesReportController;
+use App\Http\Controllers\Sales\SalesReturnController;
 use App\Http\Controllers\Services\JobController;
 use App\Http\Controllers\Services\ProviderController;
 use App\Http\Controllers\Services\ServiceConfigController;
@@ -255,6 +258,75 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/tailoring/bills/{billNo}/{year}', [TailoringController::class, 'show'])
         ->middleware('permission:tailoring.view')
         ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+});
+
+// ============================================================
+// مسارات المبيعات - Sales Routes (المرحلة أ: قراءة + تقارير + نشاط)
+// Read-only surface: invoices, returns and reports. Writes land in a later phase.
+//
+// هوية الفاتورة والمردود مركّبة: (رقم، سنة). المسارات الحرفية (filters) تُسجَّل قبل {param}.
+// The invoice/return identity is composite (number, year); literal paths precede {param} ones.
+// ============================================================
+Route::middleware('auth:sanctum')->group(function () {
+    // مراجع النموذجين: الأنواع والحسابات الافتراضية والمخازن والعملات (قراءة قبل الكتابة)
+    // Form references for both documents (read before writing)
+    Route::get('/sales/reference', [SalesInvoiceController::class, 'reference'])
+        ->middleware('permission:sales.view,sales.create,sales.returns_create');
+
+    // بحث الأصناف والعملاء لنموذجَي الإنشاء — بصلاحيات المبيعات لا صلاحيات المخازن/العملاء
+    // Item and customer lookups for the two forms — gated by sales grants, not stores/customers.
+    Route::get('/sales/items', [SalesInvoiceController::class, 'items'])
+        ->middleware('permission:sales.view,sales.create,sales.returns_create');
+    Route::get('/sales/customers', [SalesInvoiceController::class, 'customers'])
+        ->middleware('permission:sales.view,sales.create,sales.returns_create');
+
+    // فواتير المبيعات / sales invoices
+    Route::get('/sales/invoices/filters', [SalesInvoiceController::class, 'filterOptions'])
+        ->middleware('permission:sales.view');
+    Route::get('/sales/invoices', [SalesInvoiceController::class, 'index'])
+        ->middleware('permission:sales.view');
+    // الكتابة: إنشاء/تعديل/حذف — المرحلة ب
+    // Writes: create / update / delete — phase B
+    Route::post('/sales/invoices', [SalesInvoiceController::class, 'store'])
+        ->middleware('permission:sales.create');
+    Route::put('/sales/invoices/{billNo}/{year}', [SalesInvoiceController::class, 'update'])
+        ->middleware('permission:sales.update')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::delete('/sales/invoices/{billNo}/{year}', [SalesInvoiceController::class, 'destroy'])
+        ->middleware('permission:sales.delete')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::post('/sales/invoices/{billNo}/{year}/activity', [SalesInvoiceController::class, 'activity'])
+        ->middleware('permission:sales.print,sales.export')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::get('/sales/invoices/{billNo}/{year}', [SalesInvoiceController::class, 'show'])
+        ->middleware('permission:sales.view')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+
+    // مردودات المبيعات / sales returns
+    Route::get('/sales/returns/filters', [SalesReturnController::class, 'filterOptions'])
+        ->middleware('permission:sales.returns_view');
+    Route::get('/sales/returns', [SalesReturnController::class, 'index'])
+        ->middleware('permission:sales.returns_view');
+    Route::post('/sales/returns', [SalesReturnController::class, 'store'])
+        ->middleware('permission:sales.returns_create');
+    Route::put('/sales/returns/{returnNo}/{year}', [SalesReturnController::class, 'update'])
+        ->middleware('permission:sales.returns_update')
+        ->where(['returnNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::delete('/sales/returns/{returnNo}/{year}', [SalesReturnController::class, 'destroy'])
+        ->middleware('permission:sales.returns_delete')
+        ->where(['returnNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::post('/sales/returns/{returnNo}/{year}/activity', [SalesReturnController::class, 'activity'])
+        ->middleware('permission:sales.returns_print,sales.returns_export')
+        ->where(['returnNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::get('/sales/returns/{returnNo}/{year}', [SalesReturnController::class, 'show'])
+        ->middleware('permission:sales.returns_view')
+        ->where(['returnNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+
+    // تقارير المبيعات / sales reports
+    Route::get('/sales/reports', [SalesReportController::class, 'report'])
+        ->middleware('permission:sales.reports_view');
+    Route::post('/sales/reports/activity', [SalesReportController::class, 'activity'])
+        ->middleware('permission:sales.reports_print,sales.reports_export');
 });
 
 // ============================================================

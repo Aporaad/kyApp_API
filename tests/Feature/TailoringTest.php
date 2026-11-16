@@ -43,10 +43,10 @@ function tailoringUngrantedUser(): User
 }
 
 test('the tailoring permissions are part of the catalog and nowhere near the old count', function () {
-    // ثلاث صلاحيات للتفصيل + ثلاث لمقاسات العملاء + 26 لقسم المخازن رفعت الكتالوج إلى 173.
-    // Three tailoring grants, three for customer measurements and 26 for the stores module
-    // bring the catalog to 173.
-    expect(PermissionCatalog::count())->toBe(173)
+    // ثلاث صلاحيات للتفصيل + ثلاث لمقاسات العملاء + 26 للمخازن + 9 للمبيعات رفعت الكتالوج إلى 182.
+    // Three tailoring grants, three for customer measurements, 26 for stores and 9 for sales
+    // bring the catalog to 182.
+    expect(PermissionCatalog::count())->toBe(182)
         ->and(PermissionCatalog::knows('tailoring.payments_view'))->toBeTrue()
         ->and(PermissionCatalog::knows('tailoring.export'))->toBeTrue()
         ->and(PermissionCatalog::knows('tailoring.progress'))->toBeTrue()

@@ -49,11 +49,11 @@ function ibacAdminUser(): User
 }
 
 test('catalog gives every module its core actions in fixed order', function () {
-    // 173 = 147 السابقة + 26 لقسم المخازن: أوامر التوريد والصرف والتحويل والأصناف والمرجعيات
-    // والأمناء والتقارير والجرد — كل نوع مستند بأفعاله الأربعة، وكل مجموعة مرجعية بصلاحيتها.
-    // 173 = the prior 147 plus 26 for the stores module: receive/issue/transfer orders, items,
-    // reference data, keepers, reports and the counting sheet.
-    expect(PermissionCatalog::count())->toBe(173);
+    // 182 = 173 السابقة + 9 لقسم المبيعات: مردودات المبيعات (عرض/إنشاء/تعديل/حذف/طباعة/تصدير)
+    // وتقارير المبيعات (عرض/طباعة/تصدير) — عمليات مستقلة داخل القسم بصلاحيات مستقلة.
+    // 182 = the prior 173 plus 9 for sales: sales returns (view/create/update/delete/print/export)
+    // and sales reports (view/print/export) — separate operations with their own grants.
+    expect(PermissionCatalog::count())->toBe(182);
 
     foreach (PermissionCatalog::grouped() as $module) {
         $coreCodes = array_map(

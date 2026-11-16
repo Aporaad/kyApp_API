@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Services;
 
 use App\Support\ActivityLogger;
 use App\Support\ArabicEncoding;
+use App\Support\MessageQueueWriter;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -399,14 +400,20 @@ abstract class MessageChannelController extends ServiceBaseController
     }
 
     /**
-     * المعرّف التالي في الطابور: NVL(MAX(ID),0)+1
-     * Next queue id (no sequence): NVL(MAX(ID),0)+1
+     * المعرّف التالي في الطابور — القاعدة الموحّدة عبر `MessageQueueWriter`:
+     * أكبر تسلسل بين جدول الطابور وجدول الأرشيف + 1، لا MAX للطابور وحده؛ الطابور يُفرَّغ بعد
+     * الأرشفة فكان الحساب القديم يعيد معرّفاً موجوداً في الأرشيف فيتكرر بين جدولين تعاملهما
+     * الشاشات كسجل واحد.
+     * Next queue id — unified rule via MessageQueueWriter: the highest sequence across the queue
+     * and archive tables, + 1, never MAX of the queue alone; the queue is drained after
+     * archiving, so the old computation could return an id that already exists in the archive,
+     * duplicated across two tables the screens treat as one log.
      */
     private function nextQueueId(): int
     {
-        $max = DB::connection('oracle')->table($this->queueTable())->max('ID');
-
-        return (int) ($max ?? 0) + 1;
+        // module() يعيد `sms` أو `whatsapp` — نفس مفاتيح قنوات `MessageQueueWriter` بالضبط
+        // module() returns `sms` or `whatsapp` — exactly MessageQueueWriter's channel keys.
+        return MessageQueueWriter::nextId($this->module());
     }
 
     private function activity(Request $request, string $code, string $desc): void

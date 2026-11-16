@@ -45,6 +45,13 @@ class WorkerController extends Controller
             // إعدادات كشف العمل (نسخة من تقرير أوراكل FOR_CUTTER_TAILOR - جدول CUTTER_FROM_CALC فقط)
             // Work-report source config (mirror of Oracle FOR_CUTTER_TAILOR's work table only)
             'work_table' => 'ACCOUNTS.CUTTER_FROM_CALC',
+            // الكشف غير المرحل (سطور لم تُرحَّل للحساب بعد) — نسخة من تقرير أوراكل FOR_CUTTER_UNCALC
+            // بنفس أعمدة جدول CALC تماماً؛ الفلترة على NVL(CUTTING_DATE, DDATE) لأن غير المرحل
+            // كثيراً ما يأتي بلا تاريخ عمل بينما تاريخ المستند DDATE موجود دائماً.
+            // Unposted work report source (rows not yet posted) — mirrors FOR_CUTTER_UNCALC
+            // with identical columns; date filtering uses NVL(CUTTING_DATE, DDATE) because
+            // unposted rows often lack the work date while the document date is always set.
+            'work_uncalc_table' => 'ACCOUNTS.CUTTER_FROM_UNCALC',
             'work_join_col' => 'CUTTER_NO',
             'work_date_col' => 'CUTTING_DATE',
             'work_style_col' => 'STYLE_NAME',
@@ -65,6 +72,11 @@ class WorkerController extends Controller
             // إعدادات كشف العمل (نسخة من تقرير أوراكل FOR_TAILOR - جدول TAILOR_FROM_CALC فقط)
             // الإجمالي هنا AMT_ALL لأنه يشمل تكاليف إضافية (ADDCOST2/3) بخلاف AMT الأساسي
             'work_table' => 'ACCOUNTS.TAILOR_FROM_CALC',
+            // الكشف غير المرحل — نسخة من تقرير أوراكل FOR_TAILOR_UNCALC (بنفس الأعمدة بما فيها AMT_ALL)
+            // وفلترة NVL(TAILOR_DATE, DDATE) لنفس سبب جدول القصاص أعلاه.
+            // Unposted work report source — mirrors FOR_TAILOR_UNCALC (same columns incl. AMT_ALL);
+            // date filtering uses NVL(TAILOR_DATE, DDATE) for the same reason as the cutter table.
+            'work_uncalc_table' => 'ACCOUNTS.TAILOR_FROM_UNCALC',
             'work_join_col' => 'TAILOR_NO',
             'work_date_col' => 'TAILOR_DATE',
             'work_style_col' => 'STYLE_NAME',
@@ -625,9 +637,14 @@ class WorkerController extends Controller
      * كشف العمل - يطابق جدول "كشف العمل" في تقرير أوراكل (التاريخ | الموديل | العدد | السعر | الإجمالي)
      * لا يمس جدول الكشف المالي (ENTRY_MAIN/ENTRY_SUB) إطلاقاً - فقط جدول CALC الخاص بالعامل.
      *
+     * نوع التقرير (`report_type`):
+     * - `calc`   (الافتراضي): الكشف المرحل من `*_FROM_CALC` — الوضع الحالي كما هو.
+     * - `uncalc` : الكشف الغير مرحل من `*_FROM_UNCALC` — سطور العمل قبل ترحيلها للحساب.
+     *
      * Work report - mirrors ONLY the "work" table of the legacy Oracle report
      * (date | style | count | unit price | total). It never touches the financial
-     * statement tables; it reads the worker's *_FROM_CALC registry directly.
+     * statement tables; it reads the worker's *_FROM_CALC / *_FROM_UNCALC registry
+     * directly depending on `report_type` (calc = posted, default; uncalc = unposted).
      */
     private function fetchWorkReport(string $type, Request $request, $id): JsonResponse
     {
@@ -644,6 +661,18 @@ class WorkerController extends Controller
 
         $fromDateParam = trim((string) ($request->input('from_date') ?? ''));
         $toDateParam = trim((string) ($request->input('to_date') ?? ''));
+
+        // ── نوع التقرير: المرحل (calc) أو الغير مرحل (uncalc) ──
+        // القيمة الحالية والافتراضية هي calc (المرحل فقط كما كان سابقاً)؛ أي قيمة غير
+        // معروفة تعود إلى calc حصانةً من أي تلاعب بالاختيار قبل تمريره للاستعلام.
+        // Report type: posted (calc) or unposted (uncalc). Default stays calc —
+        // exactly the previous behaviour; unknown values fall back to calc, so the
+        // choice is whitelisted before it ever reaches the query builder.
+        $reportType = strtolower(trim((string) ($request->input('report_type') ?? 'calc')));
+        if (! in_array($reportType, ['calc', 'uncalc'], true)) {
+            $reportType = 'calc';
+        }
+        $reportTypeLabel = $reportType === 'uncalc' ? 'الغير مرحل' : 'المرحل';
 
         try {
             // جلب صف العامل والتحقق من الحساب المرتبط
@@ -667,15 +696,28 @@ class WorkerController extends Controller
                 ], 422);
             }
 
-            // أعمدة وجدول كشف العمل (تختلف بين القصاص والخياط)
-            // Work-report columns/tables differ between cutters (AMT) and tailors (AMT_ALL).
+            // أعمدة وجدول كشف العمل (تختلف بين القصاص والخياط وبين المرحل وغير المرحل)
+            // Work-report columns/tables differ between cutters (AMT) and tailors (AMT_ALL),
+            // and between posted (CALC) and unposted (UNCALC) sources.
             $dateCol = $cfg['work_date_col'];
             $totalCol = $cfg['work_total_col'];
             $styleCol = $cfg['work_style_col'];
             $qtyCol = $cfg['work_qty_col'];
-            $calcTable = $cfg['work_table'];
+            // المرحل يقرأ جدول CALC، وغير المرحل يقرأ جدول UNCALC (نفس الأعمدة تماماً).
+            // Posted reads the CALC table; unposted reads the UNCALC one (identical columns).
+            $calcTable = $reportType === 'uncalc' && ! empty($cfg['work_uncalc_table'])
+                ? $cfg['work_uncalc_table']
+                : $cfg['work_table'];
             $regTable = $cfg['table'];
             $joinCol = $cfg['work_join_col'];
+
+            // تعبير التاريخ: في غير المرحل كثير من السطور تأتي بلا تاريخ عمل بينما
+            // تاريخ المستند DDATE موجود دائماً ويساوي تاريخ العمل عندما يوجد، فلذا
+            // نفلتر ونرتّب على NVL(تاريخ العمل, DDATE) حتى لا تختفي سطور غيْر المرحلة.
+            // Date expression: unposted rows often lack the work date while DDATE is
+            // always set (and equals it when present) — filter/order on the NVL form
+            // so unposted rows never silently disappear from any date window.
+            $dateSql = $reportType === 'uncalc' ? "NVL(w.$dateCol, w.DDATE)" : "w.$dateCol";
 
             // تحديد نطاق التواريخ:
             // - عند إرسال تاريخ(ين) صريح(ين) نستخدم المتاح منهما (الأحادي يُطابَق للطرفين).
@@ -686,8 +728,9 @@ class WorkerController extends Controller
 
             if ($fromIso === null && $toIso === null) {
                 // جلب تاريخ آخر سجل عمل (MAX) للعامل عبر نفس الربط و ACC_NO المعتمدين في التقرير
+                // (عبر نفس تعبير التاريخ — NVL في حالة غير المرحل)
                 $lastRows = DB::connection('oracle')->select(
-                    "SELECT TO_CHAR(MAX(w.$dateCol), 'YYYY-MM-DD') AS LAST_DATE
+                    "SELECT TO_CHAR(MAX($dateSql), 'YYYY-MM-DD') AS LAST_DATE
                        FROM $calcTable w, $regTable r
                       WHERE w.$joinCol = r.$joinCol
                         AND r.ACC_NO = :acc_no",
@@ -713,16 +756,16 @@ class WorkerController extends Controller
             }
 
             $sql = "
-                SELECT TO_CHAR(w.$dateCol, 'DD/MM/YYYY') AS WORK_DATE,
-                       TO_CHAR(w.$dateCol, 'YYYY-MM-DD') AS RAW_DATE,
+                SELECT TO_CHAR($dateSql, 'DD/MM/YYYY') AS WORK_DATE,
+                       TO_CHAR($dateSql, 'YYYY-MM-DD') AS RAW_DATE,
                        w.$styleCol AS STYLE_NAME,
                        NVL(w.$qtyCol, 0)   AS QTY,
                        NVL(w.$totalCol, 0) AS TOTAL
                 FROM $calcTable w, $regTable r
                 WHERE w.$joinCol = r.$joinCol
                   AND r.ACC_NO = :acc_no
-                  AND w.$dateCol BETWEEN TO_DATE(:from_date,'YYYY-MM-DD') AND TO_DATE(:to_date,'YYYY-MM-DD') + 1 - 1/86400
-                ORDER BY w.$dateCol, w.$styleCol
+                  AND $dateSql BETWEEN TO_DATE(:from_date,'YYYY-MM-DD') AND TO_DATE(:to_date,'YYYY-MM-DD') + 1 - 1/86400
+                ORDER BY $dateSql, w.$styleCol
             ";
 
             $raw = DB::connection('oracle')->select($sql, [
@@ -792,6 +835,10 @@ class WorkerController extends Controller
                     'to_date' => $toIso ? Carbon::parse($toIso)->format('d/m/Y') : '',
                     'currency' => $currency,
                     'account_title' => "$accNo - $workerName",
+                    // نوع الكشف المُستخدم: calc = المرحل (الافتراضي) / uncalc = الغير مرحل
+                    // Which source answered: calc = posted (default) / uncalc = unposted.
+                    'report_type' => $reportType,
+                    'report_type_label' => $reportTypeLabel,
                 ],
             ]);
         } catch (\Throwable $e) {
@@ -803,6 +850,11 @@ class WorkerController extends Controller
      * كشف عمل المجموعة — يجلب عمليات ALL العمال في مجموعة محددة بفترة زمنية
      * Group work report — fetches work rows for ALL workers of a group in a date range.
      * Mirrors Oracle FOR_CUTTER_CALC (multi-worker, includes worker name as first column).
+     *
+     * نوع التقرير (`report_type`): المرحل من `*_FROM_CALC` (الافتراضي) أو الغير مرحل
+     * من `*_FROM_UNCALC` — نفس أسلوب كشف العمل الفردي.
+     * Report type: posted from `*_FROM_CALC` (default) or unposted from `*_FROM_UNCALC`,
+     * mirroring the single-worker report behaviour.
      */
     private function fetchGroupWorkReport(string $type, Request $request): JsonResponse
     {
@@ -819,6 +871,17 @@ class WorkerController extends Controller
         // التواريخ: من الطلب أو الافتراضي (آخر 7 أيام)
         $fromDateParam = trim((string) ($request->input('from_date') ?? ''));
         $toDateParam = trim((string) ($request->input('to_date') ?? ''));
+
+        // ── نوع التقرير: المرحل (calc) أو الغير مرحل (uncalc) ──
+        // القيمة الافتراضية calc (المرحل) كما كان الوضع السابق؛ أي قيمة غير معروفة
+        // تعود إلى calc (قائمة بيضاء قبل وصولها للاستعلام).
+        // Report type: posted (calc, default — previous behaviour) or unposted (uncalc);
+        // unknown values fall back to calc (whitelisted before the query is built).
+        $reportType = strtolower(trim((string) ($request->input('report_type') ?? 'calc')));
+        if (! in_array($reportType, ['calc', 'uncalc'], true)) {
+            $reportType = 'calc';
+        }
+        $reportTypeLabel = $reportType === 'uncalc' ? 'الغير مرحل' : 'المرحل';
 
         $fromIso = $fromDateParam !== '' ? $this->parseDateToIso($fromDateParam) : null;
         $toIso = $toDateParam !== '' ? $this->parseDateToIso($toDateParam) : null;
@@ -837,15 +900,24 @@ class WorkerController extends Controller
             $fromIso = $toIso;
         }
 
-        // أعمدة وجدول كشف العمل
+        // أعمدة وجدول كشف العمل (المرحل CALC / غير المرحل UNCALC — نفس الأعمدة)
+        // Columns and work table: posted CALC / unposted UNCALC (identical columns).
         $dateCol = $cfg['work_date_col'];
         $totalCol = $cfg['work_total_col'];
         $styleCol = $cfg['work_style_col'];
         $qtyCol = $cfg['work_qty_col'];
-        $calcTable = $cfg['work_table'];
+        $calcTable = $reportType === 'uncalc' && ! empty($cfg['work_uncalc_table'])
+            ? $cfg['work_uncalc_table']
+            : $cfg['work_table'];
         $regTable = $cfg['table'];
         $joinCol = $cfg['work_join_col'];
         $nameCol = $cfg['name_col'];
+
+        // تعبير التاريخ: غير المرحل كثيراً ما يحمل تاريخ عمل فارغاً بينما DDATE (تاريخ
+        // المستند) موجود دائماً — فلترة/ترتيب على NVL حتى لا تختفي سطور غير المرحلة.
+        // Date expression: unposted rows often lack the work date while DDATE (the
+        // document date) is always set — filter/order on NVL so unposted rows survive.
+        $dateSql = $reportType === 'uncalc' ? "NVL(w.{$dateCol}, w.DDATE)" : "w.{$dateCol}";
 
         try {
             // التجميع: سطر واحد لكل (عامل + موديل) يجمع العدد والمبلغ عبر كل سجلات الفترة.
@@ -859,7 +931,7 @@ class WorkerController extends Controller
                        SUM(NVL(w.{$totalCol}, 0)) AS TOTAL
                 FROM {$calcTable} w, {$regTable} r
                 WHERE w.{$joinCol} = r.{$joinCol}
-                  AND w.{$dateCol} BETWEEN TO_DATE(:from_date,'YYYY-MM-DD') AND TO_DATE(:to_date,'YYYY-MM-DD') + 1 - 1/86400
+                  AND {$dateSql} BETWEEN TO_DATE(:from_date,'YYYY-MM-DD') AND TO_DATE(:to_date,'YYYY-MM-DD') + 1 - 1/86400
                 GROUP BY r.{$nameCol}, w.{$styleCol}
                 ORDER BY r.{$nameCol}, w.{$styleCol}
             ";
@@ -907,6 +979,10 @@ class WorkerController extends Controller
                     'from_date' => Carbon::parse($fromIso)->format('d/m/Y'),
                     'to_date' => Carbon::parse($toIso)->format('d/m/Y'),
                     'worker_count' => count($workerNames),
+                    // نوع الكشف المُستخدم: calc = المرحل (الافتراضي) / uncalc = الغير مرحل
+                    // Which source answered: calc = posted (default) / uncalc = unposted.
+                    'report_type' => $reportType,
+                    'report_type_label' => $reportTypeLabel,
                 ],
             ]);
         } catch (\Throwable $e) {

@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Support\ActivityLogger;
 use App\Support\ArabicEncoding;
+use App\Support\MessageQueueWriter;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -24,6 +25,18 @@ use Throwable;
  *     وإلا ظهرت التذاكر مشوّهة كما كان يحدث قبل هذا المسار الموحّد.
  *     Arabic travels through `toOracleSearchChars()` on write and `fixMojibake()` on read, the same
  *     path `SettingsStore` uses; anything else stores mojibake.
+ *  3) الرد المطلوب إرساله لا يُحفظ إلا مع إدراجه في طابور القناة المختارة داخل معاملة واحدة،
+ *     والإدراج نفسه يمرّ عبر `MessageQueueWriter` بقاعدة معرّف موحّدة (أكبر تسلسل بين الطابور
+ *     والأرشيف + 1) كي لا يتصادم معرّف الرد مع صف أرشيف موجود.
+ *     A reply marked for delivery saves only together with its queue insert inside one
+ *     transaction; the insert itself goes through `MessageQueueWriter` with the unified id rule
+ *     (highest sequence across queue and archive, + 1) so a reply's id never collides with an
+ *     existing archive row.
+ *  4) الإدراج يحمل `SERVICE_ID/PROVIDER_ID` من الاشتراك النشط لخدمة القناة (`resolveDestination`)
+ *     — مهمة الإرسال تطابق الصف بهذين المفتاحين، وبلا اشتراك نشط يُرفض الطلب 422 قبل أي حفظ.
+ *     The insert carries SERVICE_ID/PROVIDER_ID from the channel's active subscription
+ *     (`resolveDestination`) — the send job matches the row by these two keys, and with no active
+ *     subscription the request is refused 422 before any save.
  */
 class SupportInquiryController extends Controller
 {
@@ -227,8 +240,9 @@ class SupportInquiryController extends Controller
     }
 
     /**
-     * الرد على استفسار أو إغلاقه
-     * Answer an inquiry or close it
+     * الرد على استفسار أو إغلاقه — والرد اختيارياً يُرسَل لهاتف صاحب الاستفسار عبر طابور الرسائل
+     * Answer an inquiry or close it — the reply may optionally be delivered to the inquirer's
+     * phone through the message queue (`send_via` = sms | whatsapp).
      */
     public function reply(Request $request, int $ticketId): JsonResponse
     {
@@ -238,12 +252,19 @@ class SupportInquiryController extends Controller
             'status' => ['required', 'string', 'in:answered,closed'],
             // الرد يلزم فقط عند اختيار «تم الرد» — الإغلاق قد يقع بلا نص
             // A reply text is required only for "answered"; closing may carry none.
-            'reply' => ['nullable', 'string', 'max:1000', 'required_if:status,answered'],
+            'reply' => ['nullable', 'string', 'max:1000', 'required_if:status,answered', 'required_with:send_via'],
+            // قناة الإرسال اختيارية: وجودها يعني «أضِف نص الرد إلى طابور هذه القناة» ليصل
+            // هاتف صاحب الاستفسار عبر مهمة الإرسال الزمنية
+            // The send channel is optional: its presence means "enqueue the reply text on that
+            // channel" so the inquirer's phone gets it via the scheduler job.
+            'send_via' => ['nullable', 'string', 'in:sms,whatsapp'],
         ], [
             'status.required' => 'حالة التذكرة مطلوبة / Status is required.',
             'status.in' => 'الحالة يجب أن تكون «تم الرد» أو «مغلق» / Status must be answered or closed.',
             'reply.required_if' => 'نص الرد مطلوب عند اختيار «تم الرد» / A reply text is required when answering.',
+            'reply.required_with' => 'نص الرد مطلوب عند اختيار قناة الإرسال / A reply text is required when a send channel is chosen.',
             'reply.max' => 'نص الرد أطول من 1000 محرف / Reply is too long.',
+            'send_via.in' => 'قناة الإرسال يجب أن تكون «نصية» أو «واتساب» / Send channel must be sms or whatsapp.',
         ]);
 
         if ($validator->fails()) {
@@ -254,63 +275,169 @@ class SupportInquiryController extends Controller
             ], 422);
         }
 
-        $exists = $this->columnOf(
-            (array) DB::connection('oracle')->selectOne(
-                'SELECT COUNT(*) AS TOTAL FROM ACCOUNTS.APP_SUPPORT_TICKETS WHERE TICKET_ID = :ticket_id',
-                ['ticket_id' => $ticketId]
-            ),
-            'TOTAL'
-        );
-
-        if ((int) $exists === 0) {
-            return response()->json([
-                'success' => false,
-                'message' => 'الاستفسار غير موجود / Inquiry not found',
-            ], 404);
-        }
-
         $status = (string) $request->input('status');
         $reply = trim((string) $request->input('reply', ''));
+        $sendVia = $request->input('send_via');
 
         try {
-            DB::connection('oracle')->update(
-                'UPDATE ACCOUNTS.APP_SUPPORT_TICKETS
-                    SET STATUS = :status,
-                        ADMIN_REPLY = :admin_reply,
-                        REPLIED_BY = :replied_by,
-                        REPLIED_ON = SYSDATE,
-                        UPDATED_ON = SYSDATE
-                  WHERE TICKET_ID = :ticket_id',
-                [
-                    'status' => $status,
-                    'admin_reply' => $reply === '' ? null : $this->toOracle($this->limitText($reply, 1000)),
-                    'replied_by' => $actor === null ? null : (int) $actor->getAuthIdentifier(),
-                    'ticket_id' => $ticketId,
-                ]
+            // صف التذكرة يُجلب مباشرةً بدل عدّ وجوده: الإرسال يحتاج الاسم والهاتف أصلاً،
+            // فالجلب الواحد يجيب عن السؤالين (الوجود وبيانات الإرسال) معاً
+            // The ticket row is fetched outright instead of counting it: delivery needs the name
+            // and phone anyway, so one fetch answers both (existence + delivery data).
+            $ticketRow = DB::connection('oracle')->selectOne(
+                'SELECT t.CONTACT_NAME, t.CONTACT_PHONE, u.USER_NAME_AR AS USER_NAME
+                   FROM ACCOUNTS.APP_SUPPORT_TICKETS t
+                   LEFT JOIN ACCOUNTS.APP_USERS u ON u.USER_ID = t.USER_ID
+                  WHERE t.TICKET_ID = :ticket_id',
+                ['ticket_id' => $ticketId]
             );
 
+            if ($ticketRow === null) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'الاستفسار غير موجود / Inquiry not found',
+                ], 404);
+            }
+
+            $ticket = $this->lowercaseKeys((array) $ticketRow);
+
+            $queuedId = null;
+            $queueChannel = null;
+            $phone = null;
+            $destination = null;
+
+            if ($sendVia !== null) {
+                // الهاتف إلى أرقام فقط — العمود يُخزَّن مطبَّعاً، لكن الصفوف القديمة لا تُترك للحظّ
+                // Phone reduced to digits — the column is stored normalised, yet old rows are not
+                // left to chance.
+                $phone = preg_replace('/\D/', '', (string) ($ticket['contact_phone'] ?? ''));
+
+                // الإرسال بلا رقم صالح رفضٌ مبكر لا حفظ جزئي: ردٌّ ظنّ الموظف أنه سينتقل كان سيبقى
+                // حبراً على الورق. الرفض يُبقي التذكرة كما هي فيُعاد المحاولة بوعي.
+                // Sending with no usable phone is an early refusal, not a partial save: a reply the
+                // employee believed delivered would have stayed ink on paper. The refusal keeps the
+                // ticket untouched so the retry is a conscious choice.
+                if ($phone === '' || strlen($phone) < 6 || strlen($phone) > 15) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'لا يوجد رقم هاتف صالح مرفق بالاستفسار لإرسال الرد — احفظ الرد دون اختيار قناة أو أكمل رقم الهاتف أولاً'
+                            .' / This inquiry carries no usable phone number for delivery — save the reply without a send channel or fix the phone first.',
+                    ], 422);
+                }
+
+                // وجهة الإرسال الصحيحة: اشتراك نشط في PROVIDERS_DTL لخدمة القناة — مهمة
+                // `SEND_MSG` تطابق الصف بهذين المفتاحين، وبلا اشتراك يعلق الصف في الطابور بلا
+                // إرسال أبداً. الرفض مبكر بلا أي حفظ، كرفض الهاتف تماماً.
+                // The correct send destination: an active PROVIDERS_DTL subscription for the
+                // channel's service — SEND_MSG matches the row by these two keys, and with no
+                // subscription the row would hang in the queue forever. Early refusal, no save,
+                // exactly like the phone guard.
+                $destination = MessageQueueWriter::resolveDestination($sendVia);
+
+                if ($destination === null) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'لا يوجد اشتراك إرسال نشط لهذه القناة — فعّل اشتراك القناة من شاشة المزودين أو احفظ الرد دون اختيار قناة'
+                            .' / No active send subscription exists for this channel — activate the channel subscription or save the reply without a send channel.',
+                    ], 422);
+                }
+            }
+
+            // اسم العميل في الطابور: الاسم الذي كتبه الزائر، وإلا اسم حساب صاحب التذكرة —
+            // كلاهما يُنسخ خاماً من عمود أوراكل (بايتات CP1256 صحيحة أصلاً) فلا تحويل مضاعف
+            // The queue's customer name: the guest's typed name, else the owner's account name —
+            // both copied raw from Oracle columns (already valid CP1256), never re-encoded.
+            $customerName = trim((string) ($ticket['contact_name'] ?? '')) !== ''
+                ? (string) $ticket['contact_name']
+                : trim((string) ($ticket['user_name'] ?? ''));
+
+            $actorId = $actor === null ? null : (int) $actor->getAuthIdentifier();
+
+            // CREATED_BY نص اسم الفاعل كما يكتبه قسم الرسائل — لا معرّف رقمي هنا
+            // CREATED_BY is the actor's name string, as the messaging section writes it — no numeric id.
+            $actorName = null;
+            if ($actor !== null) {
+                $name = $actor->getAttribute('USER_NAME_EN') ?? $actor->getAttribute('USER_NAME_AR');
+                $actorName = $name !== null ? (string) $name : null;
+            }
+
+            // التحديث والإدراج في الطابور داخل معاملة واحدة: فشل الإدراج يلغي حفظ الرد كله،
+            // فلا تبقى تذكرة «تم الرد» نصها لم يذهب إلى أي مكان
+            // The update and the queue insert share one transaction: a failed insert cancels the
+            // whole save, leaving no "answered" ticket whose text went nowhere.
+            DB::connection('oracle')->transaction(
+                function () use ($ticketId, $status, $reply, $sendVia, $phone, $customerName, $destination, $actorId, $actorName, &$queuedId, &$queueChannel): void {
+                    DB::connection('oracle')->update(
+                        'UPDATE ACCOUNTS.APP_SUPPORT_TICKETS
+                            SET STATUS = :status,
+                                ADMIN_REPLY = :admin_reply,
+                                REPLIED_BY = :replied_by,
+                                REPLIED_ON = SYSDATE,
+                                UPDATED_ON = SYSDATE
+                          WHERE TICKET_ID = :ticket_id',
+                        [
+                            'status' => $status,
+                            'admin_reply' => $reply === '' ? null : $this->toOracle($this->limitText($reply, 1000)),
+                            'replied_by' => $actorId,
+                            'ticket_id' => $ticketId,
+                        ]
+                    );
+
+                    // الإرسال مرتبط بوجود نص فعلي لا بالحالة: قناة مع نص تعني إدراجاً في الطابور
+                    // Sending is tied to an actual text, not to the status: a channel plus text enqueues.
+                    if ($sendVia !== null && $reply !== '') {
+                        $queuedId = MessageQueueWriter::enqueue(
+                            $sendVia,
+                            $reply,
+                            (int) $phone,
+                            $customerName === '' ? null : $customerName,
+                            $actorName,
+                            $destination
+                        );
+                        $queueChannel = $sendVia;
+                    }
+                }
+            );
+
+            $channelLabel = $queueChannel === MessageQueueWriter::CHANNEL_SMS
+                ? 'الرسائل النصية'
+                : 'رسائل واتساب';
+
+            // وصف التدقيق يذكر الإضافة إلى الطابور حين وقعت — أثر الرد والإرسال في سطر واحد
+            // The audit description names the enqueue when it happened — reply and delivery in one line.
+            $description = ($status === 'closed' ? 'إغلاق' : 'الرد على').' استفسار دعم رقم '.$ticketId;
+
+            if ($queuedId !== null) {
+                $description .= ' وإضافة الرد إلى طابور '.$channelLabel.' برقم رسالة '.$queuedId;
+            }
+
             $this->activity->success('support.reply', [
-                'user_id' => $actor === null ? null : (int) $actor->getAuthIdentifier(),
+                'user_id' => $actorId,
                 'module_code' => 'support',
                 'entity_type' => 'APP_SUPPORT_TICKETS',
                 'entity_id' => (string) $ticketId,
-                'description_ar' => $status === 'closed'
-                    ? 'إغلاق استفسار دعم رقم '.$ticketId
-                    : 'الرد على استفسار دعم رقم '.$ticketId,
+                'description_ar' => $description,
             ], $request);
 
             return response()->json([
                 'success' => true,
-                'message' => $status === 'closed'
-                    ? 'تم إغلاق الاستفسار / Inquiry closed.'
-                    : 'تم حفظ الرد / Reply saved.',
+                'message' => $queuedId !== null
+                    ? 'تم حفظ الرد وإضافته إلى طابور '.$channelLabel.' (رقم الرسالة '.$queuedId.') — سيرسل من مهمة الإرسال الزمنية'
+                        .' / Reply saved and queued for '.($queueChannel === MessageQueueWriter::CHANNEL_SMS ? 'SMS' : 'WhatsApp').' delivery (message #'.$queuedId.').'
+                    : ($status === 'closed'
+                        ? 'تم إغلاق الاستفسار / Inquiry closed.'
+                        : 'تم حفظ الرد / Reply saved.'),
                 'data' => [
                     'ticket_id' => $ticketId,
                     'status' => $status,
+                    // حقولا الإرسال يظهران فقط عند إدراج فعلي في الطابور، وإلا null
+                    // The send fields appear only on an actual enqueue; null otherwise.
+                    'send_via' => $queueChannel,
+                    'queue_id' => $queuedId,
                 ],
             ]);
         } catch (Throwable $e) {
-            return $this->errorResponse('خطأ في حفظ الرد', $e);
+            return $this->errorResponse('خطأ في حفظ الرد أو إضافته إلى طابور الإرسال', $e);
         }
     }
 

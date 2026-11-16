@@ -66,6 +66,20 @@ final class PermissionCatalog
             'extra' => [
                 'print' => 'طباعة فواتير المبيعات',
                 'export' => 'تصدير بيانات المبيعات',
+                // مردودات المبيعات عمليات مستقلة داخل القسم: من يرى الفواتير لا يرى بالضرورة
+                // المردودات، وكل منها له طباعته وتصديره.
+                // Sales returns are their own operation: seeing invoices is not seeing returns.
+                'returns_view' => 'عرض مردودات المبيعات',
+                'returns_create' => 'إضافة مردود مبيعات',
+                'returns_update' => 'تعديل مردود مبيعات',
+                'returns_delete' => 'حذف مردود مبيعات',
+                'returns_print' => 'طباعة مردودات المبيعات',
+                'returns_export' => 'تصدير مردودات المبيعات',
+                // تقارير المبيعات لوحة إحصائية مستقلة: عرضها وطباعتها وتصديرها ثلاثة منح.
+                // Sales reports are their own dashboard — view/print/export are three grants.
+                'reports_view' => 'عرض تقارير المبيعات',
+                'reports_print' => 'طباعة تقارير المبيعات',
+                'reports_export' => 'تصدير تقارير المبيعات',
             ],
         ],
         'tailoring' => [
@@ -571,6 +585,17 @@ final class PermissionCatalog
             'stocktake_view' => 'View stocktake sheet',
             'stocktake_print' => 'Print stocktake sheet',
             'stocktake_export' => 'Export stocktake sheet',
+            // أفعال المبيعات المركّبة (مردودات + تقارير) — بلا تسمية يظهر الاسم الخام.
+            // Compound sales actions (returns + reports); without a label the raw token shows.
+            'returns_view' => 'View sales returns',
+            'returns_create' => 'Create sales return',
+            'returns_update' => 'Update sales return',
+            'returns_delete' => 'Delete sales return',
+            'returns_print' => 'Print sales returns',
+            'returns_export' => 'Export sales returns',
+            'reports_view' => 'View sales reports',
+            'reports_print' => 'Print sales reports',
+            'reports_export' => 'Export sales reports',
         ];
 
         return ($labels[$actionCode] ?? ucfirst($actionCode)).' — '.ucfirst($moduleCode);

@@ -38,6 +38,19 @@ final class StorePolicy
     public const KIND_TRANSFER = 'transfer';
 
     /**
+     * رقم نوع الحركة «مبيعات» في `TRANS_TYPE` — كما في قائمة `movementTypeLabels()` أدناه.
+     * يُستخدم لتفريق «منصرف المبيعات» عن «منصرف آخر» في خلاصة المخازن؛ المنصرف من نوع
+     * مبيعات له معنى مالي مباشر (بضاعة خرجت بفاتورة بيع)، وبقية أنواع الصرف (صرف مخزني،
+     * تحويل منصرف، مردودات للقص/للموردين، تسويات مدينة...) «أخرى» من منظور المحاسب.
+     *
+     * The TRANS_TYPE number for the "sales" movement — mirrored by the label list below.
+     * Used to split the summary's outbound into «sales issues» vs «other issues»: a sale
+     * leaves the warehouse against a sales invoice, while every other outbound (store
+     * issue, transfer-out, returns to cutter/supplier, settlement debits) groups as «other».
+     */
+    public const SALES_MOVEMENT_TYPE = 2;
+
+    /**
      * أقصى مدى زمني لتقرير واحد بالأيام — التقارير بلا مدى تفتح مسحاً كاملاً للـ VIEW.
      * Maximum span of a single report in days; an unbounded report scans the whole view.
      */
