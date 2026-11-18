@@ -149,3 +149,43 @@ test('work statement auto-detects tailor or cutter for a linked worker', functio
         $response->assertStatus(422)->assertJsonPath('success', false);
     }
 });
+
+test('work statement reports the requested kind and its Arabic label', function (string $reportType, string $expectedType, string $expectedLabel) {
+    // الأنواع الثلاثة تمرّ عبر القائمة البيضاء نفسها: calc / uncalc / undone، وأي قيمة
+    // أخرى تعود إلى calc. النوع يعود في summary ليتحقّق العميل من مطابقة ما طلبه.
+    // All three kinds share the same whitelist: calc / uncalc / undone; anything else
+    // falls back to calc. The kind comes back in `summary` so the client can verify it.
+    $withAcc = User::query()
+        ->whereNotNull('ACC_NO')
+        ->where('IS_ADMIN', 1)
+        ->first();
+
+    if (! $withAcc) {
+        test()->markTestSkipped('لا مستخدم مرتبط بـ ACC_NO — لا يمكن التحقق من نوع كشف العمل.');
+
+        return;
+    }
+
+    Sanctum::actingAs($withAcc, ['*']);
+
+    $response = $this->getJson('/api/my-statement/work?report_type='.$reportType);
+
+    // قد لا يملك المستخدم أي سطر عمل → 422، وهو ردّ صحيح حسب البيانات الحيّة.
+    // The user may hold no work row at all → 422, a legitimate live-data answer.
+    if ($response->getStatusCode() !== 200) {
+        $response->assertStatus(422)->assertJsonPath('success', false);
+
+        return;
+    }
+
+    $response
+        ->assertOk()
+        ->assertJsonPath('success', true)
+        ->assertJsonPath('summary.report_type', $expectedType)
+        ->assertJsonPath('summary.report_type_label', $expectedLabel);
+})->with([
+    'posted' => ['calc', 'calc', 'المرحل'],
+    'unposted' => ['uncalc', 'uncalc', 'الغير مرحل'],
+    'not done' => ['undone', 'undone', 'الغير منجز'],
+    'unknown falls back' => ['bogus', 'calc', 'المرحل'],
+]);
