@@ -53,7 +53,9 @@ test('catalog gives every module its core actions in fixed order', function () {
     // وتقارير المبيعات (عرض/طباعة/تصدير) — عمليات مستقلة داخل القسم بصلاحيات مستقلة.
     // 182 = the prior 173 plus 9 for sales: sales returns (view/create/update/delete/print/export)
     // and sales reports (view/print/export) — separate operations with their own grants.
-    expect(PermissionCatalog::count())->toBe(182);
+    // 217 = 182 + 35 للقيود والسندات: ست وحدات (journal/journal_temp/receipts/payments/fin_search/wages)
+    // بـ 29 فعلاً + 6 صفوف منح عام. / 217 = 182 + 35 for entries & vouchers (29 actions + 6 wildcards).
+    expect(PermissionCatalog::count())->toBe(217);
 
     foreach (PermissionCatalog::grouped() as $module) {
         $coreCodes = array_map(

@@ -6,9 +6,18 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CurrencyController;
 use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\CustomerMeasurementController;
+use App\Http\Controllers\Finance\FinanceReferenceController;
+use App\Http\Controllers\Finance\FinancialSearchController;
+use App\Http\Controllers\Finance\JournalEntryController;
+use App\Http\Controllers\Finance\TempEntryController;
+use App\Http\Controllers\Finance\VoucherController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\MyStatementController;
 use App\Http\Controllers\PermissionController;
+use App\Http\Controllers\Purchases\PurchaseInvoiceController;
+use App\Http\Controllers\Purchases\PurchaseReportController;
+use App\Http\Controllers\Purchases\PurchaseReturnController;
+use App\Http\Controllers\Purchases\SupplierController;
 use App\Http\Controllers\Sales\SalesInvoiceController;
 use App\Http\Controllers\Sales\SalesReportController;
 use App\Http\Controllers\Sales\SalesReturnController;
@@ -330,6 +339,75 @@ Route::middleware('auth:sanctum')->group(function () {
 });
 
 // ============================================================
+// مسارات القيود والسندات - Entries & Vouchers Routes
+// القيود المرحلة (journal) والمؤقتة (journal_temp) وحدتان منفصلتان، والقبض (receipts) غير الصرف (payments).
+// Posted and temporary entries are separate modules; receipts and payments are separate too.
+// المسارات الحرفية تُسجَّل قبل {param}. / Literal paths precede {param} ones.
+// ============================================================
+Route::middleware('auth:sanctum')->group(function () {
+    $financeView = 'permission:journal.view,journal_temp.view,receipts.view,payments.view,fin_search.view,'
+        .'journal.create,journal.closing_create,journal_temp.create,receipts.create,payments.create';
+    $financeWrite = 'permission:journal.create,journal.update,journal.closing_create,journal_temp.create,'
+        .'journal_temp.update,receipts.create,receipts.update,payments.create,payments.update';
+
+    // المراجع والبحث عن حساب/عميل للنماذج / references and form lookups
+    Route::get('/finance/reference', [FinanceReferenceController::class, 'reference'])->middleware($financeView);
+    Route::get('/finance/accounts', [FinanceReferenceController::class, 'accounts'])->middleware($financeWrite);
+    Route::get('/finance/customers', [FinanceReferenceController::class, 'customers'])->middleware($financeWrite);
+    Route::post('/finance/activity', [FinanceReferenceController::class, 'listActivity'])
+        ->middleware('permission:journal.print,journal.export,journal_temp.print,journal_temp.export,receipts.print,receipts.export,payments.print,payments.export');
+
+    // البحث عن عملية مالية / financial-transaction search
+    Route::get('/finance/search', [FinancialSearchController::class, 'search'])->middleware('permission:fin_search.view');
+
+    // القيود المرحلة / posted entries
+    Route::get('/finance/entries', [JournalEntryController::class, 'index'])->middleware('permission:journal.view');
+    Route::post('/finance/entries', [JournalEntryController::class, 'store'])
+        ->middleware('permission:journal.create,journal.closing_create');
+    Route::post('/finance/entries/{entryNo}/activity', [JournalEntryController::class, 'activity'])
+        ->middleware('permission:journal.print,journal.export')->where('entryNo', '[0-9]+');
+    Route::get('/finance/entries/{entryNo}', [JournalEntryController::class, 'show'])
+        ->middleware('permission:journal.view')->where('entryNo', '[0-9]+');
+    Route::put('/finance/entries/{entryNo}', [JournalEntryController::class, 'update'])
+        ->middleware('permission:journal.update')->where('entryNo', '[0-9]+');
+    Route::delete('/finance/entries/{entryNo}', [JournalEntryController::class, 'destroy'])
+        ->middleware('permission:journal.delete')->where('entryNo', '[0-9]+');
+
+    // القيود المؤقتة / temporary entries
+    Route::get('/finance/temp-entries', [TempEntryController::class, 'index'])->middleware('permission:journal_temp.view');
+    Route::post('/finance/temp-entries', [TempEntryController::class, 'store'])->middleware('permission:journal_temp.create');
+    Route::post('/finance/temp-entries/{entryNo}/post', [TempEntryController::class, 'post'])
+        ->middleware('permission:journal_temp.post')->where('entryNo', '[0-9]+');
+    Route::post('/finance/temp-entries/{entryNo}/activity', [TempEntryController::class, 'activity'])
+        ->middleware('permission:journal_temp.print,journal_temp.export')->where('entryNo', '[0-9]+');
+    Route::get('/finance/temp-entries/{entryNo}', [TempEntryController::class, 'show'])
+        ->middleware('permission:journal_temp.view')->where('entryNo', '[0-9]+');
+    Route::put('/finance/temp-entries/{entryNo}', [TempEntryController::class, 'update'])
+        ->middleware('permission:journal_temp.update')->where('entryNo', '[0-9]+');
+    Route::delete('/finance/temp-entries/{entryNo}', [TempEntryController::class, 'destroy'])
+        ->middleware('permission:journal_temp.delete')->where('entryNo', '[0-9]+');
+
+    // سندات القبض والصرف — الاتجاه من الـ defaults والمصدر (cash/bank) من المسار
+    // Receipt and payment vouchers — direction from route defaults, source from the path.
+    foreach (['receipts' => 'receipt', 'payments' => 'payment'] as $module => $direction) {
+        $voucher = ['source' => 'cash|bank', 'no' => '[0-9]+', 'year' => '[0-9]{4}'];
+
+        Route::get("/finance/{$module}", [VoucherController::class, 'index'])
+            ->middleware("permission:{$module}.view")->defaults('direction', $direction);
+        Route::post("/finance/{$module}", [VoucherController::class, 'store'])
+            ->middleware("permission:{$module}.create")->defaults('direction', $direction);
+        Route::post("/finance/{$module}/{source}/{no}/{year}/activity", [VoucherController::class, 'activity'])
+            ->middleware("permission:{$module}.print,{$module}.export")->defaults('direction', $direction)->where($voucher);
+        Route::get("/finance/{$module}/{source}/{no}/{year}", [VoucherController::class, 'show'])
+            ->middleware("permission:{$module}.view")->defaults('direction', $direction)->where($voucher);
+        Route::put("/finance/{$module}/{source}/{no}/{year}", [VoucherController::class, 'update'])
+            ->middleware("permission:{$module}.update")->defaults('direction', $direction)->where($voucher);
+        Route::delete("/finance/{$module}/{source}/{no}/{year}", [VoucherController::class, 'destroy'])
+            ->middleware("permission:{$module}.delete")->defaults('direction', $direction)->where($voucher);
+    }
+});
+
+// ============================================================
 // المسار التشخيصي العام — مقيد بصلاحية النظام الكاملة + قائمة رفض جداول
 // The diagnostic query route — gated by the system-wide wildcard plus a table deny list
 //
@@ -419,8 +497,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/workers/cutters/{id}/work-report', [WorkerController::class, 'workReportCutter'])
         ->middleware('permission:cutters.statement_work')
         ->where('id', '[0-9]+');
+    // احتساب الأجور (wages.view) يعرض الكشف نفسه / wage calculation reuses this report
     Route::get('/workers/cutters/group-work-report', [WorkerController::class, 'groupWorkReportCutter'])
-        ->middleware('permission:cutters.group_work_report');
+        ->middleware('permission:cutters.group_work_report,wages.view');
     Route::put('/workers/cutters/{id}', [WorkerController::class, 'updateCutter'])
         ->middleware('permission:cutters.update')
         ->where('id', '[0-9]+');
@@ -443,7 +522,7 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:tailors.statement_work')
         ->where('id', '[0-9]+');
     Route::get('/workers/tailors/group-work-report', [WorkerController::class, 'groupWorkReportTailor'])
-        ->middleware('permission:tailors.group_work_report');
+        ->middleware('permission:tailors.group_work_report,wages.view');
     Route::put('/workers/tailors/{id}', [WorkerController::class, 'updateTailor'])
         ->middleware('permission:tailors.update')
         ->where('id', '[0-9]+');
@@ -841,4 +920,99 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:stores.transfer_update')->where('billNo', '[0-9]+');
     Route::delete('/stores/transfer/{billNo}', [TransferOrderController::class, 'destroy'])
         ->middleware('permission:stores.transfer_delete')->where('billNo', '[0-9]+');
+});
+
+// ============================================================
+// مسارات المشتريات - Purchases Routes
+//
+// هوية الفاتورة والمردود مركّبة: (رقم، سنة)، والمورد رقمه مفرد (PROV_NO).
+// المسارات الحرفية (reference/items/filters/next-number) تُسجَّل قبل {param} وإلا التقطها الموجّه.
+// The invoice/return identity is composite (number, year); the supplier key is a single PROV_NO.
+// Literal paths are registered before {param} ones or the router would swallow them.
+// ============================================================
+Route::middleware('auth:sanctum')->group(function () {
+    // مراجع النماذج: الأنواع والحدود وحسابات المخزون + الأصناف + حسابات الدفع النقدي + المخازن
+    // Form references: types/limits/stock accounts, items, cash accounts and stores.
+    Route::get('/purchases/reference', [PurchaseInvoiceController::class, 'reference'])
+        ->middleware('permission:purchases.view,purchases.create,purchases.returns_create,purchases.suppliers_create,purchases.suppliers_view');
+    Route::get('/purchases/items', [PurchaseInvoiceController::class, 'items'])
+        ->middleware('permission:purchases.view,purchases.create,purchases.returns_create,purchases.returns_update');
+    Route::get('/purchases/cash-accounts', [PurchaseInvoiceController::class, 'cashAccounts'])
+        ->middleware('permission:purchases.view,purchases.create,purchases.returns_create');
+    Route::get('/purchases/suppliers/options', [SupplierController::class, 'options'])
+        ->middleware('permission:purchases.view,purchases.create,purchases.returns_create,purchases.suppliers_create,purchases.suppliers_view');
+
+    // فواتير المشتريات / purchase invoices
+    Route::get('/purchases/invoices/filters', [PurchaseInvoiceController::class, 'filterOptions'])
+        ->middleware('permission:purchases.view');
+    Route::get('/purchases/invoices', [PurchaseInvoiceController::class, 'index'])
+        ->middleware('permission:purchases.view');
+    Route::post('/purchases/invoices', [PurchaseInvoiceController::class, 'store'])
+        ->middleware('permission:purchases.create');
+    Route::put('/purchases/invoices/{billNo}/{year}', [PurchaseInvoiceController::class, 'update'])
+        ->middleware('permission:purchases.update')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::delete('/purchases/invoices/{billNo}/{year}', [PurchaseInvoiceController::class, 'destroy'])
+        ->middleware('permission:purchases.delete')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::post('/purchases/invoices/{billNo}/{year}/activity', [PurchaseInvoiceController::class, 'activity'])
+        ->middleware('permission:purchases.print,purchases.export')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::get('/purchases/invoices/{billNo}/{year}/returnable', [PurchaseInvoiceController::class, 'returnable'])
+        ->middleware('permission:purchases.returns_create,purchases.returns_update')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::get('/purchases/invoices/{billNo}/{year}', [PurchaseInvoiceController::class, 'show'])
+        ->middleware('permission:purchases.view')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+
+    // مردودات المشتريات / purchase returns
+    Route::get('/purchases/returns/filters', [PurchaseReturnController::class, 'filterOptions'])
+        ->middleware('permission:purchases.returns_view');
+    Route::get('/purchases/returns', [PurchaseReturnController::class, 'index'])
+        ->middleware('permission:purchases.returns_view');
+    Route::post('/purchases/returns', [PurchaseReturnController::class, 'store'])
+        ->middleware('permission:purchases.returns_create');
+    Route::put('/purchases/returns/{returnNo}/{year}', [PurchaseReturnController::class, 'update'])
+        ->middleware('permission:purchases.returns_update')
+        ->where(['returnNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::delete('/purchases/returns/{returnNo}/{year}', [PurchaseReturnController::class, 'destroy'])
+        ->middleware('permission:purchases.returns_delete')
+        ->where(['returnNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::post('/purchases/returns/{returnNo}/{year}/activity', [PurchaseReturnController::class, 'activity'])
+        ->middleware('permission:purchases.returns_print,purchases.returns_export')
+        ->where(['returnNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::get('/purchases/returns/{returnNo}/{year}', [PurchaseReturnController::class, 'show'])
+        ->middleware('permission:purchases.returns_view')
+        ->where(['returnNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+
+    // تقارير المشتريات / purchase reports
+    Route::get('/purchases/reports', [PurchaseReportController::class, 'report'])
+        ->middleware('permission:purchases.reports_view');
+    Route::post('/purchases/reports/activity', [PurchaseReportController::class, 'activity'])
+        ->middleware('permission:purchases.reports_print,purchases.reports_export');
+
+    // الموردون وكشوفهم / suppliers and their statements
+    Route::get('/purchases/suppliers/filters', [SupplierController::class, 'filterOptions'])
+        ->middleware('permission:purchases.suppliers_view');
+    Route::get('/purchases/suppliers/next-number', [SupplierController::class, 'nextNumber'])
+        ->middleware('permission:purchases.suppliers_create');
+    Route::get('/purchases/suppliers', [SupplierController::class, 'index'])
+        ->middleware('permission:purchases.suppliers_view');
+    Route::post('/purchases/suppliers', [SupplierController::class, 'store'])
+        ->middleware('permission:purchases.suppliers_create');
+    Route::put('/purchases/suppliers/{provNo}', [SupplierController::class, 'update'])
+        ->middleware('permission:purchases.suppliers_update')
+        ->where('provNo', '[0-9]+');
+    Route::delete('/purchases/suppliers/{provNo}', [SupplierController::class, 'destroy'])
+        ->middleware('permission:purchases.suppliers_delete')
+        ->where('provNo', '[0-9]+');
+    Route::post('/purchases/suppliers/{provNo}/activity', [SupplierController::class, 'activity'])
+        ->middleware('permission:purchases.suppliers_print,purchases.suppliers_export')
+        ->where('provNo', '[0-9]+');
+    Route::get('/purchases/suppliers/{provNo}/statement', [SupplierController::class, 'statement'])
+        ->middleware('permission:purchases.suppliers_statement')
+        ->where('provNo', '[0-9]+');
+    Route::get('/purchases/suppliers/{provNo}', [SupplierController::class, 'show'])
+        ->middleware('permission:purchases.suppliers_view')
+        ->where('provNo', '[0-9]+');
 });

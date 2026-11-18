@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Support\ArabicEncoding;
+use App\Support\ChartAccountNumbering;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -278,13 +279,9 @@ class AccountController extends Controller
      */
     private function currencyOfChartNumber(int $accNo): ?int
     {
-        $digits = (string) $accNo;
-        if (strlen($digits) < 4) {
-            return null; // رقم أقصر من أن يحمل خانة عملة — لا يُختلق له عملة
-        }
-        $curNo = (int) $digits[3];
-
-        return $curNo > 0 ? $curNo : null;
+        // القاعدة نفسها في مكان واحد الآن — يشترك فيها إنشاء الموردين
+        // The rule now lives in one place, shared with supplier creation.
+        return ChartAccountNumbering::currencyOf($accNo);
     }
 
     /**
@@ -301,26 +298,9 @@ class AccountController extends Controller
      */
     private function nextChartAccountNumber(int $accPart, int $curNo): array
     {
-        $lo = $accPart * 100000 + $curNo * 10000;
-        $hi = $lo + 10000;
-
-        $row = (array) DB::connection('oracle')->selectOne(
-            'SELECT MAX(ACC_NO) AS MAX_NO FROM CHART_ACC WHERE ACC_NO >= :lo AND ACC_NO < :hi',
-            ['lo' => $lo, 'hi' => $hi]
-        );
-        $max = $row['MAX_NO'] ?? $row['max_no'] ?? null;
-        // أول رقم في النطاق = تسلسل 0001، مطابق لأول حساب في كل جزء قديم (11010001)
-        $next = $max !== null ? (int) $max + 1 : $lo + 1;
-
-        if ($next >= $hi) {
-            return [
-                'number' => null,
-                'error' => 'نفدت أرقام العملة '.$curNo.' داخل الحساب الجزئي '.$accPart
-                    .' (عشرة آلاف حساب لكل عملة) — لن يُمنح رقم يخرق قاعدته',
-            ];
-        }
-
-        return ['number' => $next, 'error' => null];
+        // مُفصَّل في ChartAccountNumbering::next — يمنح رقماً داخل نطاق (جزء, عملة) واحد
+        // Documented in ChartAccountNumbering::next — numbers inside a single (part, currency) band.
+        return ChartAccountNumbering::next($accPart, $curNo);
     }
 
     /**

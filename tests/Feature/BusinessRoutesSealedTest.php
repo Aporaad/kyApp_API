@@ -159,6 +159,10 @@ test('sealed business verbs refuse an unauthenticated caller', function () {
         ['get', '/api/my-statement/work'],
         ['get', '/api/support/inquiries'],
         ['put', '/api/support/inquiries/1'],
+        ['get', '/api/purchases/invoices'],
+        ['post', '/api/purchases/invoices'],
+        ['get', '/api/purchases/reports'],
+        ['get', '/api/purchases/suppliers/1/statement'],
         ['get', '/api/selectFromTable?table_name=CURRENCY&limit=1'],
     ];
 
@@ -210,6 +214,11 @@ test('an ungranted caller is refused per module with the named permission', func
         ['get', '/api/my-statement/work', 'my_statement.work'],
         ['get', '/api/support/inquiries', 'support.view'],
         ['put', '/api/support/inquiries/1', 'support.update'],
+        ['get', '/api/purchases/invoices', 'purchases.view'],
+        ['post', '/api/purchases/invoices', 'purchases.create'],
+        ['get', '/api/purchases/returns', 'purchases.returns_view'],
+        ['post', '/api/purchases/returns', 'purchases.returns_create'],
+        ['get', '/api/purchases/suppliers/1/statement', 'purchases.suppliers_statement'],
         ['get', '/api/selectFromTable?table_name=CURRENCY&limit=1', 'system.*'],
     ];
 
@@ -232,6 +241,7 @@ test('the system administrator still reaches the sealed reads', function () {
     $this->getJson('/api/accounts/chart?limit=1')->assertOk()->assertJsonPath('success', true);
     $this->getJson('/api/currencies')->assertOk()->assertJsonPath('success', true);
     $this->getJson('/api/invoices?limit=1')->assertOk()->assertJsonPath('success', true);
+    $this->getJson('/api/purchases/invoices?limit=1')->assertOk()->assertJsonPath('success', true);
     $this->getJson('/api/selectFromTable?table_name=CURRENCY&limit=1')->assertOk();
 });
 

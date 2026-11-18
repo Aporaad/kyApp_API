@@ -36,7 +36,8 @@ function salesUngrantedUser(): User
 }
 
 test('the sales permissions are part of the catalog', function () {
-    expect(PermissionCatalog::count())->toBe(182)
+    // 240 = 217 + 23 للمشتريات / 240 = 217 plus the purchases module
+    expect(PermissionCatalog::count())->toBe(240)
         ->and(PermissionCatalog::knows('sales.returns_view'))->toBeTrue()
         ->and(PermissionCatalog::knows('sales.reports_view'))->toBeTrue()
         ->and(PermissionCatalog::knows('sales.returns_print'))->toBeTrue()

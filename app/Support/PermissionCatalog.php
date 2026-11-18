@@ -82,6 +82,46 @@ final class PermissionCatalog
                 'reports_export' => 'تصدير تقارير المبيعات',
             ],
         ],
+        // المشتريات تقابل بنية المبيعات بثلاث عمليات مستقلة: الفواتير والمردودات والموردون،
+        // ولكل منها طباعتها وتصديرها، فوق تقارير المشتريات.
+        // Purchases mirror sales with three independent operations — invoices, returns and
+        // suppliers — each with its own print/export, plus the purchases reports.
+        'purchases' => [
+            'name_ar' => 'المشتريات',
+            'core' => [
+                'view' => 'عرض فواتير المشتريات',
+                'create' => 'إضافة فاتورة مشتريات',
+                'update' => 'تعديل فاتورة مشتريات',
+                'delete' => 'حذف فاتورة مشتريات',
+            ],
+            'extra' => [
+                'print' => 'طباعة فواتير المشتريات',
+                'export' => 'تصدير فواتير المشتريات',
+                // مردودات المشتريات لا تُرى بمنح الفواتير: مردود يحرّك المخزون في الاتجاه المعاكس.
+                // Purchase returns are not implied by invoice access: a return moves stock backwards.
+                'returns_view' => 'عرض مردودات المشتريات',
+                'returns_create' => 'إضافة مردود مشتريات',
+                'returns_update' => 'تعديل مردود مشتريات',
+                'returns_delete' => 'حذف مردود مشتريات',
+                'returns_print' => 'طباعة مردودات المشتريات',
+                'returns_export' => 'تصدير مردودات المشتريات',
+                // تقارير المشتريات لوحة إحصائية مستقلة / purchases reports are their own dashboard
+                'reports_view' => 'عرض تقارير المشتريات',
+                'reports_print' => 'طباعة تقارير المشتريات',
+                'reports_export' => 'تصدير تقارير المشتريات',
+                // سجل الموردين وحساباتهم المالية: الإنشاء يولّد حساباً في دليل الحسابات،
+                // وكشف الحساب يقرأ دفتر الأستاذ مباشرة.
+                // The supplier registry and its ledgers: creating one numbers a chart account,
+                // and the statement reads the general ledger directly.
+                'suppliers_view' => 'عرض الموردين',
+                'suppliers_create' => 'إضافة مورد جديد',
+                'suppliers_update' => 'تعديل بيانات المورد',
+                'suppliers_delete' => 'حذف المورد',
+                'suppliers_print' => 'طباعة بيانات الموردين',
+                'suppliers_export' => 'تصدير بيانات الموردين',
+                'suppliers_statement' => 'عرض كشف حساب المورد',
+            ],
+        ],
         'tailoring' => [
             'name_ar' => 'كروت التفصيل',
             'core' => [
@@ -210,6 +250,74 @@ final class PermissionCatalog
                 'prices_view' => 'عرض أسعار صرف العملات',
                 'prices_manage' => 'إضافة وتعديل أسعار الصرف',
             ],
+        ],
+        // ── القيود والسندات: ست وحدات مستقلة، لأن رؤية القيد المرحل لا تعني رؤية المؤقت،
+        //    والقبض لا يعني الصرف. القيد المرحل والمؤقت منفصلان عمداً (ترحيل = منح صريح).
+        // ── Entries & vouchers: six independent modules — seeing a posted entry is not seeing a
+        //    temporary one, and receipts are not payments. Posting is its own explicit grant.
+        'journal' => [
+            'name_ar' => 'القيود المرحلة',
+            'core' => [
+                'view' => 'عرض القيود المرحلة',
+                'create' => 'إضافة قيد يومية مرحل',
+                'update' => 'تعديل قيد يومية مرحل',
+                'delete' => 'حذف قيد يومية مرحل',
+            ],
+            'extra' => [
+                'closing_create' => 'إضافة وتعديل قيد إقفال',
+                'print' => 'طباعة القيود المرحلة',
+                'export' => 'تصدير القيود المرحلة',
+            ],
+        ],
+        'journal_temp' => [
+            'name_ar' => 'القيود المؤقتة',
+            'core' => [
+                'view' => 'عرض القيود المؤقتة',
+                'create' => 'إضافة قيد مؤقت',
+                'update' => 'تعديل قيد مؤقت',
+                'delete' => 'حذف قيد مؤقت',
+            ],
+            'extra' => [
+                'post' => 'ترحيل القيد المؤقت',
+                'print' => 'طباعة القيود المؤقتة',
+                'export' => 'تصدير القيود المؤقتة',
+            ],
+        ],
+        'receipts' => [
+            'name_ar' => 'سندات القبض',
+            'core' => [
+                'view' => 'عرض سندات القبض',
+                'create' => 'إضافة سند قبض',
+                'update' => 'تعديل سند قبض',
+                'delete' => 'حذف سند قبض',
+            ],
+            'extra' => [
+                'print' => 'طباعة سندات القبض',
+                'export' => 'تصدير سندات القبض',
+            ],
+        ],
+        'payments' => [
+            'name_ar' => 'سندات الصرف',
+            'core' => [
+                'view' => 'عرض سندات الصرف',
+                'create' => 'إضافة سند صرف',
+                'update' => 'تعديل سند صرف',
+                'delete' => 'حذف سند صرف',
+            ],
+            'extra' => [
+                'print' => 'طباعة سندات الصرف',
+                'export' => 'تصدير سندات الصرف',
+            ],
+        ],
+        'fin_search' => [
+            'name_ar' => 'البحث عن عملية مالية',
+            'core' => ['view' => 'البحث في القيود والسندات'],
+            'extra' => [],
+        ],
+        'wages' => [
+            'name_ar' => 'احتساب الأجور',
+            'core' => ['view' => 'عرض كشوف أجور القصاصين والخياطين'],
+            'extra' => ['calculate' => 'احتساب الأجور'],
         ],
         'invoices' => [
             'name_ar' => 'الفواتير',
@@ -596,6 +704,10 @@ final class PermissionCatalog
             'reports_view' => 'View sales reports',
             'reports_print' => 'Print sales reports',
             'reports_export' => 'Export sales reports',
+            // أفعال القيود والأجور / journal & wages actions
+            'closing_create' => 'Create closing entry',
+            'post' => 'Post temporary entry',
+            'calculate' => 'Calculate wages',
         ];
 
         return ($labels[$actionCode] ?? ucfirst($actionCode)).' — '.ucfirst($moduleCode);

@@ -86,6 +86,12 @@ class SalesReturnController extends SalesBaseController
                     'CUST_NO', 'CUST_NAME', 'RETURN_TOTAL', 'DISCOUNT', 'NET', 'STORE_NO',
                     'BRANCH_NO', 'CUR_NO',
                     DB::raw("TO_CHAR(RET_DATE,'YYYY-MM-DD') AS RET_DATE_ISO"),
+                    // عدد سطور المردود لبطاقة القائمة — استعلام مرتبط محدود بالصفوف المعادة فقط.
+                    // The return's line count for the list card — a correlated subquery over the
+                    // fetched page only, never over the whole table.
+                    DB::raw('(SELECT COUNT(*) FROM '.self::TABLE_DETAILS.' d '
+                        .'WHERE d.RETURN_NO = RETURN_SALES.RETURN_NO '
+                        .'AND d.YEAR = RETURN_SALES.YEAR) AS ITEMS_COUNT'),
                 ])
                 ->orderBy($sort['column'], $sort['dir'])
                 ->orderByDesc('RETURN_NO')
@@ -794,6 +800,7 @@ class SalesReturnController extends SalesBaseController
             'net' => $this->num($row, 'NET'),
             'branch_no' => $this->int($row, 'BRANCH_NO'),
             'store_no' => $this->int($row, 'STORE_NO'),
+            'items_count' => $this->int($row, 'ITEMS_COUNT'),
         ];
     }
 
