@@ -63,6 +63,12 @@ class SalesInvoiceController extends SalesBaseController
                     'HANDING_DONE', 'TEL_NO1', 'BILLS_KINDS',
                     DB::raw("TO_CHAR(DAT,'YYYY-MM-DD') AS DAT_ISO"),
                     DB::raw('(NVL(NET,0) - NVL(AMOUNT_PAID,0)) AS REMAINING'),
+                    // عدد الأصناف الحقيقي: SANF_NUMS يحمل 1 في الصفوف القديمة فلا يصلح للبطاقة.
+                    // The real line count: SANF_NUMS is literally 1 in legacy rows, so the card
+                    // needs the lines table itself.
+                    DB::raw('(SELECT COUNT(*) FROM '.self::TABLE_DETAILS.' d '
+                        .'WHERE d.BILL_NO = SALES_BILL.BILL_NO '
+                        .'AND d.YEAR = SALES_BILL.YEAR) AS ITEMS_COUNT'),
                 ])
                 ->orderBy($sort['column'], $sort['dir'])
                 ->orderByDesc('BILL_NO')
@@ -211,7 +217,7 @@ class SalesInvoiceController extends SalesBaseController
                 'branch_no' => $this->int($header, 'BRANCH_NO'),
                 'cur_no' => $this->int($header, 'CUR_NO'),
                 'cur_name' => $currency ? ($currency->CUR_NAME ?? $currency->cur_name ?? null) : null,
-                'items_count' => $this->int($header, 'SANF_NUMS'),
+                'items_count' => count($detailRows),
                 'total' => $net === null ? null : $this->num($header, 'TOTAL'),
                 'discount' => $this->num($header, 'DISCOUNT'),
                 'dis_rate' => $this->num($header, 'DIS_RATE'),
@@ -1032,7 +1038,7 @@ class SalesInvoiceController extends SalesBaseController
             'remaining' => $this->num($row, 'REMAINING'),
             'payment_status' => $this->paymentStatus($net, $paid),
             'payment_method' => $this->str($row, 'PAYMENT_METHOD'),
-            'items_count' => $this->int($row, 'SANF_NUMS'),
+            'items_count' => $this->int($row, 'ITEMS_COUNT') ?? $this->int($row, 'SANF_NUMS'),
             'branch_no' => $this->int($row, 'BRANCH_NO'),
             'store_no' => $this->int($row, 'STORE_NO'),
             'handing_done' => $this->int($row, 'HANDING_DONE'),

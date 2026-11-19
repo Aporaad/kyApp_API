@@ -192,6 +192,7 @@ class PurchaseInvoiceController extends PurchaseBaseController
                 'branch_no' => $this->int($header, 'BRANCH_NO'),
                 'details' => $this->str($header, 'DETAILES'),
                 'sanf_nums' => $this->int($header, 'SANF_NUMS'),
+                'items_count' => count($lines),
                 'created_by_name' => $this->str($header, 'CREATED_BY_NAME'),
                 'created_on' => $this->str($header, 'CREATED_ON_ISO'),
                 'updated_by_name' => $this->str($header, 'LAST_UPDATED_BY_NAME'),
@@ -505,15 +506,19 @@ class PurchaseInvoiceController extends PurchaseBaseController
             ->leftJoin('ACCOUNTS.STORES s', 's.STORE_NO', '=', 'b.STORE_NO')
             ->leftJoin('ACCOUNTS.PROV p', 'p.PROV_NO', '=', 'b.PROV_NO')
             ->leftJoin('ACCOUNTS.CHART_ACC c', 'c.ACC_NO', '=', 'b.ACC_NO1')
+            ->leftJoin('ACCOUNTS.CURRENCY cu', 'cu.CUR_NO', '=', 'b.CUR_NO1')
             ->select([
                 'b.BILL_NO', 'b.YEAR', 'b.BILL_TYPE', 'b.PROV_NO', 'b.PROV_NAME', 'b.MANUAL_BILL_NO',
                 'b.PROV_BILL', 'b.TOTAL', 'b.DISCOUNT', 'b.NET', 'b.CUR_NO', 'b.CUR_PRICE',
                 'b.CUR_NO1', 'b.CUR_PRICE1', 'b.STORE_NO', 'b.ENTRY_NO', 'b.ACC_NO', 'b.ACC_NO1',
                 'b.SANF_NUMS', 'b.BRANCH_NO', 'b.SEQ_PRICE1',
-                's.STORE_NAME', 'c.ACC_NAME AS PARTY_NAME',
+                's.STORE_NAME', 'c.ACC_NAME AS PARTY_NAME', 'cu.CUR_NAME AS CUR_NAME',
                 DB::raw('TO_CHAR(b.DAT, \'YYYY-MM-DD\') AS DAT_ISO'),
                 DB::raw('ROUND(NVL(b.NET, 0) * NVL(b.CUR_PRICE1, 1), 2) AS NET_BASE'),
                 DB::raw('(SELECT COUNT(*) FROM ACCOUNTS.RETURN_BUY r WHERE r.BILL_NO = b.BILL_NO AND r.BILL_YEAR = b.YEAR) AS RETURN_COUNT'),
+                // عدد الأصناف الحقيقي من سطور الفاتورة (SANF_NUMS = 1 تاريخياً).
+                // The real line count from the lines table (SANF_NUMS is literally 1).
+                DB::raw('(SELECT COUNT(*) FROM ACCOUNTS.BUY_DETAILES d WHERE d.BILL_NO = b.BILL_NO AND d.YEAR = b.YEAR) AS ITEMS_COUNT'),
             ]);
     }
 
@@ -654,6 +659,8 @@ class PurchaseInvoiceController extends PurchaseBaseController
             'posted' => $this->int($row, 'ENTRY_NO') !== null,
             'return_count' => $this->int($row, 'RETURN_COUNT') ?? 0,
             'branch_no' => $this->int($row, 'BRANCH_NO'),
+            'items_count' => $this->int($row, 'ITEMS_COUNT') ?? 0,
+            'cur_name' => $this->str($row, 'CUR_NAME'),
         ];
     }
 

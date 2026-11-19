@@ -49,14 +49,18 @@ class PurchaseReturnController extends PurchaseBaseController
             $query = DB::connection('oracle')->table(self::TABLE.' r')
                 ->leftJoin('ACCOUNTS.STORES s', 's.STORE_NO', '=', 'r.STORE_NO')
                 ->leftJoin('ACCOUNTS.CHART_ACC c', 'c.ACC_NO', '=', 'r.ACC_NO')
+                ->leftJoin('ACCOUNTS.CURRENCY cu', 'cu.CUR_NO', '=', 'r.CUR_NO')
                 ->select([
                     'r.RETURN_NO', 'r.YEAR', 'r.BILL_NO', 'r.BILL_YEAR', 'r.BILL_TYPE',
                     'r.PROV_NO', 'r.PROV_NAME', 'r.MANUAL_RETURN_NO', 'r.RETURN_TOTAL',
                     'r.DISCOUNT', 'r.NET', 'r.CUR_NO', 'r.CUR_PRICE', 'r.STORE_NO',
                     'r.ENTRY_NO', 'r.BRANCH_NO',
-                    's.STORE_NAME', 'c.ACC_NAME AS PARTY_NAME',
+                    's.STORE_NAME', 'c.ACC_NAME AS PARTY_NAME', 'cu.CUR_NAME AS CUR_NAME',
                     DB::raw('TO_CHAR(r.RET_DATE, \'YYYY-MM-DD\') AS RET_DATE_ISO'),
                     DB::raw('ROUND(NVL(r.NET, 0) * NVL(r.CUR_PRICE, 1), 2) AS NET_BASE'),
+                    // عدد الأصناف الحقيقي لبطاقة القائمة.
+                    // The real line count for the list card.
+                    DB::raw('(SELECT COUNT(*) FROM ACCOUNTS.RETURN_BUY_DETAILES d WHERE d.RETURN_NO = r.RETURN_NO AND d.YEAR = r.YEAR) AS ITEMS_COUNT'),
                 ]);
 
             $this->applyListFilters($query, $request);
@@ -791,6 +795,8 @@ class PurchaseReturnController extends PurchaseBaseController
             'entry_no' => $this->int($row, 'ENTRY_NO'),
             'posted' => $this->int($row, 'ENTRY_NO') !== null,
             'branch_no' => $this->int($row, 'BRANCH_NO'),
+            'items_count' => $this->int($row, 'ITEMS_COUNT') ?? 0,
+            'cur_name' => $this->str($row, 'CUR_NAME'),
         ];
     }
 
