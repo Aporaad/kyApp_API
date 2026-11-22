@@ -59,7 +59,7 @@ class SalesInvoiceController extends SalesBaseController
                 ->select([
                     'BILL_NO', 'YEAR', 'BILL_TYPE', 'CUST_NO', 'CUST_NAME',
                     'MANUAL_BILL_NO', 'TOTAL', 'DISCOUNT', 'NET', 'AMOUNT_PAID',
-                    'STORE_NO', 'BRANCH_NO', 'CUR_NO', 'SANF_NUMS', 'PAYMENT_METHOD',
+                    'STORE_NO', 'BRANCH_NO', 'CUR_NO', 'ACC_NO', 'SANF_NUMS', 'PAYMENT_METHOD',
                     'HANDING_DONE', 'TEL_NO1', 'BILLS_KINDS',
                     DB::raw("TO_CHAR(DAT,'YYYY-MM-DD') AS DAT_ISO"),
                     DB::raw('(NVL(NET,0) - NVL(AMOUNT_PAID,0)) AS REMAINING'),
@@ -155,7 +155,10 @@ class SalesInvoiceController extends SalesBaseController
                     'TOTAL', 'DISCOUNT', 'DIS_RATE', 'NET', 'AMOUNT_PAID', 'STORE_NO', 'BRANCH_NO',
                     'CUR_NO', 'SANF_NUMS', 'PAYMENT_METHOD', 'HANDING_DONE', 'TEL_NO1', 'TEL_NO2',
                     'ADDRESS', 'BILLS_KINDS', 'DETAILES', 'BENEFICIARY_NAME', 'VOUCHER_NO',
-                    'TRANSFER_TO_ACC_NAME', 'CREATED_BY_NAME',
+                    'TRANSFER_TO_ACC_NAME', 'CREATED_BY_NAME', 'ACC_NO', 'ACC_NO1',
+                    // اسم الحساب المدين (صندوق/بنك في النقدي، حساب العميل في الآجل).
+                    // The debit account name (cash box/bank for cash, customer ledger for credit).
+                    DB::raw('(SELECT MAX(c.ACC_NAME) FROM ACCOUNTS.CHART_ACC c WHERE c.ACC_NO = SALES_BILL.ACC_NO) AS ACC_NAME'),
                     DB::raw("TO_CHAR(DAT,'YYYY-MM-DD') AS DAT_ISO"),
                     DB::raw("TO_CHAR(HANDING_DATE,'YYYY-MM-DD') AS HANDING_DATE_ISO"),
                     DB::raw('(NVL(NET,0) - NVL(AMOUNT_PAID,0)) AS REMAINING'),
@@ -180,10 +183,11 @@ class SalesInvoiceController extends SalesBaseController
                 : null;
 
             $detailRows = DB::connection('oracle')->table(self::TABLE_DETAILS.' d')
+                ->leftJoin('ACCOUNTS.SANFS_D sd', 'sd.SANF_DNO', '=', 'd.SANF_DNO')
                 ->select([
-                    'd.SEQ', 'd.SANF_NO', 'd.QTY', 'd.CAP', 'd.PCS', 'd.SANF_PRICE',
+                    'd.SEQ', 'd.SANF_NO', 'd.SANF_DNO', 'd.QTY', 'd.CAP', 'd.PCS', 'd.SANF_PRICE',
                     'd.DISCOUNT_RATE', 'd.DISCOUNT1', 'd.BOUNS', 'd.TOTAL', 'd.REMARKS',
-                    'd.CATEGORY', 'd.COLOR_NO',
+                    'd.CATEGORY', 'd.COLOR_NO', 'sd.SANF_DNAME AS SUB_NAME',
                     DB::raw('(SELECT MAX(s.SANF_NAME) FROM '.self::TABLE_SANFS.' s WHERE s.SANF_NO = d.SANF_NO) AS SANF_NAME'),
                 ])
                 ->where('d.BILL_NO', $billNo)
@@ -206,6 +210,9 @@ class SalesInvoiceController extends SalesBaseController
                 'handing_date' => $this->str($header, 'HANDING_DATE_ISO'),
                 'cust_no' => $this->int($header, 'CUST_NO'),
                 'cust_name' => $this->str($header, 'CUST_NAME'),
+                'acc_no' => $this->int($header, 'ACC_NO'),
+                'acc_name' => $this->str($header, 'ACC_NAME'),
+                'acc_no1' => $this->int($header, 'ACC_NO1'),
                 'tel_no1' => $this->str($header, 'TEL_NO1'),
                 'tel_no2' => $this->str($header, 'TEL_NO2'),
                 'address' => $this->str($header, 'ADDRESS'),
@@ -1080,6 +1087,7 @@ class SalesInvoiceController extends SalesBaseController
             'remaining' => $this->num($row, 'REMAINING'),
             'payment_status' => $this->paymentStatus($net, $paid),
             'payment_method' => $this->str($row, 'PAYMENT_METHOD'),
+            'acc_no' => $this->int($row, 'ACC_NO'),
             'items_count' => $lineCounts[$this->int($row, 'BILL_NO').'|'.$this->int($row, 'YEAR')]
                 ?? $this->int($row, 'ITEMS_COUNT')
                 ?? $this->int($row, 'SANF_NUMS'),
@@ -1098,7 +1106,9 @@ class SalesInvoiceController extends SalesBaseController
         return [
             'seq' => $this->int($row, 'SEQ'),
             'sanf_no' => $this->int($row, 'SANF_NO'),
+            'sanf_dno' => $this->int($row, 'SANF_DNO'),
             'sanf_name' => $this->str($row, 'SANF_NAME'),
+            'sub_name' => $this->str($row, 'SUB_NAME'),
             'qty' => $this->num($row, 'QTY'),
             'cap' => $this->num($row, 'CAP'),
             'pcs' => $this->num($row, 'PCS'),

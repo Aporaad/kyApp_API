@@ -38,6 +38,8 @@ use App\Http\Controllers\Stores\StoreReportController;
 use App\Http\Controllers\Stores\TransferOrderController;
 use App\Http\Controllers\SupportInquiryController;
 use App\Http\Controllers\TableQueryController;
+use App\Http\Controllers\Tailoring\TailoringCreateController;
+use App\Http\Controllers\Tailoring\TailoringLookupController;
 use App\Http\Controllers\TailoringController;
 use App\Http\Controllers\UserAdminController;
 use App\Http\Controllers\WorkerController;
@@ -267,6 +269,45 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/tailoring/bills/{billNo}/{year}', [TailoringController::class, 'show'])
         ->middleware('permission:tailoring.view')
         ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+});
+
+// ============================================================
+// مسارات إنشاء فاتورة التفصيل - Tailoring creation routes
+// كلها تحت صلاحية tailoring.create وحدها (لا customers.view ولا stores.*) — الخادم هو من
+// يقرأ العملاء والأقمشة والمقاسات السابقة ويقرر، فالإنشاء لا يحتاج منحاً أوسع.
+// All under the tailoring.create grant alone (no customers.view, no stores.*) — the server
+// reads customers, fabrics and previous models itself, so creation needs no broader grant.
+// ============================================================
+Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/tailoring/create/reference', [TailoringLookupController::class, 'reference'])
+        ->middleware('permission:tailoring.create');
+    Route::get('/tailoring/create/next-numbers', [TailoringLookupController::class, 'nextNumbers'])
+        ->middleware('permission:tailoring.create');
+    Route::get('/tailoring/create/customers', [TailoringLookupController::class, 'customers'])
+        ->middleware('permission:tailoring.create');
+    Route::get('/tailoring/create/customers/{custNo}/phones', [TailoringLookupController::class, 'phones'])
+        ->middleware('permission:tailoring.create')
+        ->where(['custNo' => '[0-9]+']);
+    Route::get('/tailoring/create/customers/{custNo}/previous-models', [TailoringLookupController::class, 'previousModels'])
+        ->middleware('permission:tailoring.create')
+        ->where(['custNo' => '[0-9]+']);
+    Route::get('/tailoring/create/customers/{custNo}/previous-models/{billNo}/{year}/{seqNo}', [TailoringLookupController::class, 'previousModelDetail'])
+        ->middleware('permission:tailoring.create')
+        ->where(['custNo' => '[0-9]+', 'billNo' => '[0-9]+', 'year' => '[0-9]{4}', 'seqNo' => '[0-9]+']);
+    Route::get('/tailoring/create/customers/{custNo}/beneficiaries', [TailoringLookupController::class, 'beneficiaries'])
+        ->middleware('permission:tailoring.create')
+        ->where(['custNo' => '[0-9]+']);
+    Route::get('/tailoring/create/workers', [TailoringLookupController::class, 'workers'])
+        ->middleware('permission:tailoring.create');
+    Route::get('/tailoring/create/fabrics', [TailoringLookupController::class, 'fabrics'])
+        ->middleware('permission:tailoring.create');
+    Route::get('/tailoring/create/fabrics/{sanfNo}/variants', [TailoringLookupController::class, 'fabricVariants'])
+        ->middleware('permission:tailoring.create')
+        ->where(['sanfNo' => '[0-9]+']);
+    Route::post('/tailoring/create/quote', [TailoringCreateController::class, 'quote'])
+        ->middleware('permission:tailoring.create');
+    Route::post('/tailoring/create/bills', [TailoringCreateController::class, 'store'])
+        ->middleware('permission:tailoring.create');
 });
 
 // ============================================================

@@ -148,6 +148,7 @@ class SalesReturnController extends SalesBaseController
                     'RETURN_NO', 'YEAR', 'MANUAL_RETURN_NO', 'BILL_NO', 'BILL_YEAR', 'BILL_TYPE',
                     'CUST_NO', 'CUST_NAME', 'RETURN_TOTAL', 'DISCOUNT', 'DIS_RATE', 'NET', 'STORE_NO',
                     'BRANCH_NO', 'CUR_NO', 'ACC_NO', 'DETAILES', 'CREATED_BY_NAME',
+                    DB::raw('(SELECT MAX(c.ACC_NAME) FROM ACCOUNTS.CHART_ACC c WHERE c.ACC_NO = RETURN_SALES.ACC_NO) AS ACC_NAME'),
                     DB::raw("TO_CHAR(RET_DATE,'YYYY-MM-DD') AS RET_DATE_ISO"),
                 ])
                 ->where('RETURN_NO', $returnNo)
@@ -166,9 +167,11 @@ class SalesReturnController extends SalesBaseController
                 : null;
 
             $detailRows = DB::connection('oracle')->table(self::TABLE_DETAILS.' d')
+                ->leftJoin('ACCOUNTS.SANFS_D sd', 'sd.SANF_DNO', '=', 'd.SANF_DNO')
                 ->select([
-                    'd.SEQ', 'd.SANF_NO', 'd.RET_QTY', 'd.CAP', 'd.PCS', 'd.SANF_PRICE',
+                    'd.SEQ', 'd.SANF_NO', 'd.SANF_DNO', 'd.RET_QTY', 'd.CAP', 'd.PCS', 'd.SANF_PRICE',
                     'd.DISCOUNT_RATE', 'd.DISCOUNT1', 'd.BOUNS', 'd.TOTAL', 'd.CATEGORY', 'd.COLOR_NO',
+                    'sd.SANF_DNAME AS SUB_NAME',
                     DB::raw('(SELECT MAX(s.SANF_NAME) FROM '.self::TABLE_SANFS.' s WHERE s.SANF_NO = d.SANF_NO) AS SANF_NAME'),
                 ])
                 ->where('d.RETURN_NO', $returnNo)
@@ -188,6 +191,8 @@ class SalesReturnController extends SalesBaseController
                 'date' => $this->str($header, 'RET_DATE_ISO'),
                 'cust_no' => $this->int($header, 'CUST_NO'),
                 'cust_name' => $this->str($header, 'CUST_NAME'),
+                'acc_no' => $this->int($header, 'ACC_NO'),
+                'acc_name' => $this->str($header, 'ACC_NAME'),
                 'note' => $this->str($header, 'DETAILES'),
                 'created_by_name' => $this->str($header, 'CREATED_BY_NAME'),
                 'store_no' => $this->int($header, 'STORE_NO'),
@@ -813,7 +818,9 @@ class SalesReturnController extends SalesBaseController
         return [
             'seq' => $this->int($row, 'SEQ'),
             'sanf_no' => $this->int($row, 'SANF_NO'),
+            'sanf_dno' => $this->int($row, 'SANF_DNO'),
             'sanf_name' => $this->str($row, 'SANF_NAME'),
+            'sub_name' => $this->str($row, 'SUB_NAME'),
             'qty' => $this->num($row, 'RET_QTY'),
             'cap' => $this->num($row, 'CAP'),
             'pcs' => $this->num($row, 'PCS'),
