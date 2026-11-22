@@ -79,6 +79,16 @@ final class TailoringPolicy
     public const REVENUE_ACCOUNT_HI = 41219999;
 
     /**
+     * نطاق حسابات المحافظ والصرافة — «الحسابات البنكية» في قائمة حساب العربون
+     * (1221: جوالي، ون كاش، سبأ كاش، موبايل موني…) — مقيس من CHART_ACC الحيّة.
+     * The wallet/exchange range — the "bank accounts" of the deposit-account picker
+     * (1221: Jawali, OneCash, SabaCash…), measured live from CHART_ACC.
+     */
+    public const BANK_ACCOUNT_LO = 12210000;
+
+    public const BANK_ACCOUNT_HI = 12219999;
+
+    /**
      * طرق الدفع كما تُكتب حرفياً في فواتير النظام القديم (مقيسة من البيانات)
      * Payment methods exactly as the legacy bills store them (measured).
      *
@@ -283,27 +293,44 @@ final class TailoringPolicy
     }
 
     /**
-     * قائمة الحسابات المعروضة: الصناديق وحسابات الإيراد من CHART_ACC الحيّة
-     * The offered accounts: cash boxes and revenue accounts read live from CHART_ACC.
+     * قائمة الحسابات المعروضة: الصناديق النقدية والمحافظ/البنوك وحسابات الإيراد من CHART_ACC
+     * The offered accounts: cash boxes, wallet/bank accounts and revenue accounts live
+     * from CHART_ACC.
+     *
+     * الصناديق النقدية: 1211 (ريال يمني) + 1212 (دولار) + 1213 (ريال سعودي).
+     * الحسابات البنكية (المحافظ والصرافة): 1221 — اختيارها يُظهر رقم الحوالة.
+     * Cash: 1211 (YER) + 1212 (USD) + 1213 (SAR). Banks (wallets/exchange): 1221 — picking
+     * one reveals the transfer-number field.
      *
      * فشل القراءة لا يكسر المرجع: تُعاد القيم الافتراضية الثابتة.
      * A failed read never breaks the reference: the static defaults return instead.
      *
-     * @return array{credit: array<int, array<string, mixed>>, cash: array<int, array<string, mixed>>}
+     * @return array{credit: array<int, array<string, mixed>>, cash: array<int, array<string, mixed>>, bank: array<int, array<string, mixed>>}
      */
     public static function accounts(): array
     {
         $credit = [['acc_no' => self::REVENUE_ACCOUNT, 'name' => 'مبيعات آجلة']];
         $cash = [['acc_no' => self::DEFAULT_CASH_ACCOUNT, 'name' => 'صندوق محمد السريحي']];
+        $bank = [];
 
         try {
             $rows = DB::connection('oracle')->select(
                 'SELECT ACC_NO, ACC_NAME FROM ACCOUNTS.CHART_ACC
-                  WHERE (ACC_NO BETWEEN :clo AND :chi) OR (ACC_NO BETWEEN :rlo AND :rhi)
+                  WHERE (ACC_NO BETWEEN :clo AND :chi)
+                     OR (ACC_NO BETWEEN :dlo AND :dhi)
+                     OR (ACC_NO BETWEEN :slo AND :shi)
+                     OR (ACC_NO BETWEEN :blo AND :bhi)
+                     OR (ACC_NO BETWEEN :rlo AND :rhi)
                   ORDER BY ACC_NO',
                 [
                     'clo' => self::CASH_ACCOUNT_LO,
                     'chi' => self::CASH_ACCOUNT_HI,
+                    'dlo' => 12120000,
+                    'dhi' => 12129999,
+                    'slo' => 12130000,
+                    'shi' => 12139999,
+                    'blo' => self::BANK_ACCOUNT_LO,
+                    'bhi' => self::BANK_ACCOUNT_HI,
                     'rlo' => self::REVENUE_ACCOUNT_LO,
                     'rhi' => self::REVENUE_ACCOUNT_HI,
                 ]
@@ -311,6 +338,7 @@ final class TailoringPolicy
 
             $credit = [];
             $cash = [];
+            $bank = [];
 
             foreach ($rows as $row) {
                 $data = (array) $row;
@@ -320,6 +348,8 @@ final class TailoringPolicy
 
                 if ($accNo >= self::REVENUE_ACCOUNT_LO) {
                     $credit[] = ['acc_no' => $accNo, 'name' => $name];
+                } elseif ($accNo >= self::BANK_ACCOUNT_LO) {
+                    $bank[] = ['acc_no' => $accNo, 'name' => $name];
                 } else {
                     $cash[] = ['acc_no' => $accNo, 'name' => $name];
                 }
@@ -328,6 +358,6 @@ final class TailoringPolicy
             report($e);
         }
 
-        return ['credit' => $credit, 'cash' => $cash];
+        return ['credit' => $credit, 'cash' => $cash, 'bank' => $bank];
     }
 }

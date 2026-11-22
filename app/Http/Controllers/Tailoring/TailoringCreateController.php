@@ -189,11 +189,27 @@ class TailoringCreateController extends Controller
                     'default_price' => $pricing['default_price'],
                     'pricing_status' => $pricing['pricing_status'],
                     'pricing_message' => $pricing['pricing_message'],
+                    'ohdid_preview' => $this->nextOhdidPreview(),
                 ],
             ], 200);
         } catch (Throwable $e) {
             return $this->errorResponse('خطأ في حساب الاقتباس / Failed to calculate the quote', $e);
         }
+    }
+
+    /**
+     * معاينة رقم الطلب الفرعي (MULTI_CLOTHS.OHDID) — الأكبر الحالي + 1، تقديرية لأن
+     * الاعتماد الفعلي يُركَّب من OHID وترتيب القطع عند الحفظ.
+     * The sub-order number (MULTI_CLOTHS.OHDID) preview — current max + 1, an estimate
+     * because the real one composes from OHID and the piece order at save time.
+     */
+    private function nextOhdidPreview(): int
+    {
+        $row = (array) DB::connection('oracle')->selectOne(
+            'SELECT NVL(MAX(OHDID), 0) + 1 AS N FROM ACCOUNTS.MULTI_CLOTHS'
+        );
+
+        return (int) (reset($row) ?: 1);
     }
 
     /**

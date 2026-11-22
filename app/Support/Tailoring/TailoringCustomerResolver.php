@@ -38,8 +38,10 @@ final class TailoringCustomerResolver
     ];
 
     /**
-     * بطاقة العميل الموجود أو null — مع رفض الموقوف لدى المتحكم
-     * The existing customer's card, or null — stopped ones are refused by the controller.
+     * بطاقة العميل الموجود أو null — مع رفض الموقوف لدى المتحكم، ومعها الرصيد المالي
+     * لحسابه من CHART_ACC (طلب المستخدم: عرض رصيد العميل في بطاقة الاختيار).
+     * The existing customer's card, or null — stopped ones are refused by the controller —
+     * carrying the ledger balance from CHART_ACC (user request: show it on the card).
      *
      * @return array<string, mixed>|null
      */
@@ -50,9 +52,12 @@ final class TailoringCustomerResolver
         }
 
         $row = (array) DB::connection('oracle')->selectOne(
-            'SELECT CUST_NO, CUST_NAME, TEL1, TEL2, ADDR, ACC_NO, STOPPING_CUST
-               FROM ACCOUNTS.CUST
-              WHERE CUST_NO = :no',
+            'SELECT c.CUST_NO, c.CUST_NAME, c.TEL1, c.TEL2, c.ADDR, c.ACC_NO,
+                    c.STOPPING_CUST, ch.BALANCE AS ACC_BALANCE
+               FROM ACCOUNTS.CUST c
+               LEFT JOIN ACCOUNTS.CHART_ACC ch
+                 ON ch.ACC_NO = c.ACC_NO
+              WHERE c.CUST_NO = :no',
             ['no' => $custNo]
         );
 
@@ -196,6 +201,9 @@ final class TailoringCustomerResolver
             })(),
             'acc_no' => self::pickNum($row, 'ACC_NO') !== null ? (int) self::pickNum($row, 'ACC_NO') : null,
             'stopping_cust' => (int) (self::pickNum($row, 'STOPPING_CUST') ?? 0),
+            // الرصيد المالي لحساب العميل كما يحمله CHART_ACC — قد يكون سالباً (مدين له)
+            // The ledger balance as CHART_ACC carries it — may be negative.
+            'acc_balance' => self::pickNum($row, 'ACC_BALANCE'),
         ];
     }
 
