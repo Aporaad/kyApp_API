@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use App\Support\ActivityLogger;
 use App\Support\ArabicEncoding;
+use App\Support\Finance\FinancePolicy;
 use App\Support\PermissionCatalog;
 use App\Support\PermissionGrantSync;
 use App\Support\PermissionResolver;
@@ -144,6 +145,42 @@ class UserAdminController extends Controller
             ]);
         } catch (Throwable $e) {
             return $this->errorResponse('خطأ في جلب قائمة المستخدمين', $e);
+        }
+    }
+
+    /**
+     * الصناديق النقدية المعرّفة في النظام — خيارات صندوق المستخدم الافتراضي
+     * The cash boxes defined in the system — the user's default-treasury options.
+     *
+     * المصدر شجرة الحسابات في نطاق الصناديق (121) لا جدول `CASH_ACC`: الأخير خريطة «الحساب
+     * الافتراضي لكل نوع عملية» (21 نوعاً)، وصفّ النوع 1 فيه صندوق واحد، فقراءته كانت ستعرض
+     * صندوقاً واحداً بدل صناديق النظام. الموقوفة (`STOPPING_ACC = 1`) لا تُعرض لأنها خارج الخدمة.
+     * The source is the chart's cash-box range (121), not `CASH_ACC`: the latter maps one default
+     * account per posting type (21 of them), so its type-1 row is a single box — reading it would
+     * offer one box instead of the system's boxes. Stopped boxes are excluded: out of service.
+     */
+    public function cashAccounts(): JsonResponse
+    {
+        try {
+            $rows = DB::connection('oracle')->select(
+                'SELECT ACC_NO, ACC_NAME FROM ACCOUNTS.CHART_ACC
+                  WHERE ACC_NO BETWEEN :lo AND :hi AND NVL(STOPPING_ACC, 0) <> 1
+                  ORDER BY ACC_NO',
+                ['lo' => FinancePolicy::CASH_RANGE[0], 'hi' => FinancePolicy::CASH_RANGE[1]]
+            );
+
+            $items = array_map(fn ($row): array => [
+                'acc_no' => $this->intOf((array) $row, 'ACC_NO'),
+                'acc_name' => $this->stringOf((array) $row, 'ACC_NAME'),
+            ], $rows);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'تم جلب الصناديق النقدية / Cash boxes retrieved',
+                'data' => ArabicEncoding::cleanData($items),
+            ], 200);
+        } catch (Throwable $e) {
+            return $this->errorResponse('خطأ في جلب الصناديق النقدية / Failed to retrieve cash boxes', $e);
         }
     }
 

@@ -123,6 +123,13 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/users', [UserAdminController::class, 'index'])
         ->middleware('permission:users.view');
 
+    // الصناديق النقدية لمنتقي «حساب الصندوق الافتراضي» — مسار حرفي قبل `/users/{userId}`،
+    // ومفتوح لأيٍّ من صلاحيات إدارة المستخدمين لأن النموذج يُفتح للعرض أو للإنشاء أو للتعديل.
+    // The cash boxes for the default-treasury picker — a literal path ahead of /users/{userId},
+    // opened by any user-administration grant since the form serves view, create, and update.
+    Route::get('/users/cash-accounts', [UserAdminController::class, 'cashAccounts'])
+        ->middleware('permission:users.view,users.create,users.update');
+
     // سجل النشاط العام وخيارات الفلترة: مساران ثابتان، يُسجَّلان قبل `/users/{userId}`
     // General audit trail and its filter options. Literal segments, registered ahead of /users/{id}.
     Route::get('/activity', [UserAdminController::class, 'activity'])

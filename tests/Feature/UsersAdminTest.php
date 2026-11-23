@@ -94,6 +94,36 @@ test('the permission guard covers every administration route', function () {
     }
 });
 
+test('the cash-box picker lists only cash accounts from the chart', function () {
+    // الحراسة أولاً: بلا توكن ⇒ 401، وبلا منح ⇒ 403 بالأكواد الثلاثة (أيُّها يفتح النموذج)
+    // The guard first: no token ⇒ 401, no grants ⇒ 403 naming all three codes (any opens the form).
+    $this->getJson('/api/users/cash-accounts')->assertUnauthorized();
+
+    Sanctum::actingAs(ungrantedUser(), ['*']);
+    $this->getJson('/api/users/cash-accounts')->assertForbidden()
+        ->assertJsonPath('errors.permission', ['users.view', 'users.create', 'users.update']);
+
+    Sanctum::actingAs(adminForAdminTests(), ['*']);
+    $payload = $this->getJson('/api/users/cash-accounts')->assertOk()->json();
+
+    expect($payload['success'])->toBeTrue()->and($payload['data'])->toBeArray();
+
+    // قراءة فقط: القاعدة قد تكون خالية من الصناديق، والإخفاق حينها بيئي لا انحدار
+    // Read-only: a box-free database is an environment fact, not a regression.
+    if ($payload['data'] === []) {
+        test()->markTestSkipped('لا توجد صناديق نقدية في القاعدة الحالية.');
+    }
+
+    foreach ($payload['data'] as $row) {
+        expect($row)->toHaveKeys(['acc_no', 'acc_name']);
+        // الصناديق وحدها (121) — لا بنوك (122) ولا مخازن (124)
+        // Cash boxes only (121) — no banks (122) and no stores (124).
+        expect((int) $row['acc_no'])->toBeGreaterThanOrEqual(12100000)
+            ->toBeLessThanOrEqual(12199999)
+            ->and(trim((string) $row['acc_name']))->not->toBe('');
+    }
+});
+
 test('an administrator lists users with the customer-style meta shape', function () {
     Sanctum::actingAs(adminForAdminTests(), ['*']);
 
