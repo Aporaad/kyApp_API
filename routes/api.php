@@ -745,6 +745,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('/providers/{id}', [ProviderController::class, 'destroy'])
         ->middleware('permission:providers.delete')
         ->where('id', '[0-9]+');
+    // كشف اعتماد المزود: مسار مستقل وصلاحية مستقلة وكل كشف يُدقّق
+    // Reveal provider credentials: its own route, its own grant, every reveal audited.
+    Route::get('/providers/{id}/credentials', [ProviderController::class, 'revealCredentials'])
+        ->middleware('permission:providers.reveal_credentials')
+        ->where('id', '[0-9]+');
 
     // اشتراكات المزود / provider subscriptions (PROVIDERS_DTL)
     Route::get('/providers/{id}/subscriptions', [ProviderController::class, 'subscriptions'])
@@ -753,7 +758,19 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/providers/{id}/subscriptions', [ProviderController::class, 'storeSubscription'])
         ->middleware('permission:providers.subscriptions_manage')
         ->where('id', '[0-9]+');
+    Route::get('/providers/{id}/subscriptions/{dtlId}', [ProviderController::class, 'showSubscription'])
+        ->middleware('permission:providers.view')
+        ->where('id', '[0-9]+')->where('dtlId', '[0-9]+');
+    Route::get('/providers/{id}/subscriptions/{dtlId}/credentials', [ProviderController::class, 'revealSubscription'])
+        ->middleware('permission:providers.reveal_credentials')
+        ->where('id', '[0-9]+')->where('dtlId', '[0-9]+');
     Route::put('/provider-subscriptions/{dtlId}', [ProviderController::class, 'updateSubscription'])
+        ->middleware('permission:providers.subscriptions_manage')
+        ->where('dtlId', '[0-9]+');
+    Route::patch('/provider-subscriptions/{dtlId}/toggle', [ProviderController::class, 'toggleSubscription'])
+        ->middleware('permission:providers.subscriptions_manage')
+        ->where('dtlId', '[0-9]+');
+    Route::post('/provider-subscriptions/{dtlId}/test', [ProviderController::class, 'testSubscription'])
         ->middleware('permission:providers.subscriptions_manage')
         ->where('dtlId', '[0-9]+');
     Route::delete('/provider-subscriptions/{dtlId}', [ProviderController::class, 'deleteSubscription'])
@@ -761,21 +778,27 @@ Route::middleware('auth:sanctum')->group(function () {
         ->where('dtlId', '[0-9]+');
 
     // الرسائل النصية / SMS (MSG_QUEUE + MSG_ARCHIVE)
+    // مسارات `bulk/*` تُعلَن قبل `{id}` رغم أن `{id}` مقيّد بالأرقام — للقراءة لا للضرورة
+    // The bulk/* routes are declared before {id} even though {id} is digit-constrained.
     Route::get('/sms/messages', [SmsController::class, 'index'])
         ->middleware('permission:sms.view');
     Route::post('/sms/messages', [SmsController::class, 'store'])
         ->middleware('permission:sms.create');
+    Route::post('/sms/messages/bulk/resend', [SmsController::class, 'bulkResend'])
+        ->middleware('permission:sms.toggle');
+    Route::post('/sms/messages/bulk/delete', [SmsController::class, 'bulkDelete'])
+        ->middleware('permission:sms.delete');
     Route::get('/sms/messages/{id}', [SmsController::class, 'show'])
         ->middleware('permission:sms.view')
         ->where('id', '[0-9]+');
     Route::put('/sms/messages/{id}', [SmsController::class, 'update'])
         ->middleware('permission:sms.update')
         ->where('id', '[0-9]+');
-    Route::patch('/sms/messages/{id}/toggle', [SmsController::class, 'toggle'])
-        ->middleware('permission:sms.toggle')
-        ->where('id', '[0-9]+');
     Route::delete('/sms/messages/{id}', [SmsController::class, 'destroy'])
         ->middleware('permission:sms.delete')
+        ->where('id', '[0-9]+');
+    Route::post('/sms/messages/{id}/resend', [SmsController::class, 'resend'])
+        ->middleware('permission:sms.toggle')
         ->where('id', '[0-9]+');
 
     // رسائل واتساب / WhatsApp (W_MSG_QUEUE + W_MSG_ARCHIVE)
@@ -783,17 +806,38 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:whatsapp.view');
     Route::post('/whatsapp/messages', [WhatsappController::class, 'store'])
         ->middleware('permission:whatsapp.create');
+    Route::post('/whatsapp/messages/bulk/resend', [WhatsappController::class, 'bulkResend'])
+        ->middleware('permission:whatsapp.toggle');
+    Route::post('/whatsapp/messages/bulk/pause', [WhatsappController::class, 'bulkPause'])
+        ->middleware('permission:whatsapp.toggle');
+    Route::post('/whatsapp/messages/bulk/delete', [WhatsappController::class, 'bulkDelete'])
+        ->middleware('permission:whatsapp.delete');
     Route::get('/whatsapp/messages/{id}', [WhatsappController::class, 'show'])
         ->middleware('permission:whatsapp.view')
         ->where('id', '[0-9]+');
     Route::put('/whatsapp/messages/{id}', [WhatsappController::class, 'update'])
         ->middleware('permission:whatsapp.update')
         ->where('id', '[0-9]+');
-    Route::patch('/whatsapp/messages/{id}/toggle', [WhatsappController::class, 'toggle'])
-        ->middleware('permission:whatsapp.toggle')
-        ->where('id', '[0-9]+');
     Route::delete('/whatsapp/messages/{id}', [WhatsappController::class, 'destroy'])
         ->middleware('permission:whatsapp.delete')
+        ->where('id', '[0-9]+');
+    Route::get('/whatsapp/messages/{id}/attempts', [WhatsappController::class, 'attempts'])
+        ->middleware('permission:whatsapp.view')
+        ->where('id', '[0-9]+');
+    Route::get('/whatsapp/messages/{id}/history', [WhatsappController::class, 'history'])
+        ->middleware('permission:whatsapp.view')
+        ->where('id', '[0-9]+');
+    Route::post('/whatsapp/messages/{id}/send-now', [WhatsappController::class, 'sendNow'])
+        ->middleware('permission:whatsapp.toggle')
+        ->where('id', '[0-9]+');
+    Route::post('/whatsapp/messages/{id}/pause', [WhatsappController::class, 'pause'])
+        ->middleware('permission:whatsapp.toggle')
+        ->where('id', '[0-9]+');
+    Route::post('/whatsapp/messages/{id}/resume', [WhatsappController::class, 'resume'])
+        ->middleware('permission:whatsapp.toggle')
+        ->where('id', '[0-9]+');
+    Route::post('/whatsapp/messages/{id}/resend', [WhatsappController::class, 'resend'])
+        ->middleware('permission:whatsapp.toggle')
         ->where('id', '[0-9]+');
 
     // إعدادات الخدمات / service config (CORP + SERVICES)
@@ -803,6 +847,9 @@ Route::middleware('auth:sanctum')->group(function () {
         ->middleware('permission:services.settings_manage');
     Route::post('/services', [ServiceConfigController::class, 'storeService'])
         ->middleware('permission:services.update');
+    Route::get('/services/{id}', [ServiceConfigController::class, 'showService'])
+        ->middleware('permission:services.view')
+        ->where('id', '[0-9]+');
     Route::put('/services/{id}', [ServiceConfigController::class, 'updateService'])
         ->middleware('permission:services.update')
         ->where('id', '[0-9]+');

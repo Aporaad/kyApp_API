@@ -5,122 +5,119 @@ namespace App\Http\Controllers\Services;
 use App\Support\ActivityLogger;
 use App\Support\ArabicEncoding;
 use App\Support\MessageQueueWriter;
+use App\Support\Messaging\ChannelSpec;
+use App\Support\Messaging\MessageActions;
+use App\Support\Messaging\MessageQuery;
+use App\Support\Messaging\MessageStatus;
+use App\Support\Messaging\MessageWriter;
+use App\Support\Messaging\WhatsAppDirectSender;
+use App\Support\PermissionResolver;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\Rule;
 
 /**
- * فئة مجردة لقنوات الرسائل (SMS وواتساب) — كل الكتابة «إدراج في الطابور» فقط
- * Abstract message-channel controller (SMS & WhatsApp) — every write is enqueue-only.
+ * فئة مجردة لقنوات الرسائل (SMS وواتساب) — كل الكتابة «إدراج في الطابور» أو إرسال مباشر صريح
+ * Abstract message-channel controller (SMS & WhatsApp) — every write is either an enqueue or an
+ * explicit direct send.
  *
- * التصميم الجوهري: الإرسال الفعلي يحدث داخل مهمة أوراكل/Java (`SEND_MSG`/`W_SEND_MSG`) تلتهم
- * `*_QUEUE` كل ثوانٍ؛ الـ API لا يرسل شبكياً أبلاً، فيدرج الصف بـ `IS_SENT='N'` ويترك المهمة ترسل.
- * دلالاة الحالة: `N` منتظرة (في `*_QUEUE`)، `Y` مُرسلة و`F` فاشلة (في `*_ARCHIVE`).
- * Core design: real sending happens inside the Oracle/Java jobs that drain *_QUEUE; the API never
- * sends synchronously — it enqueues with IS_SENT='N'. Status: N pending (queue), Y/F final (archive).
+ * التصميم الجوهري لم يتغيّر: الإرسال الفعلي يحدث داخل مهمة أوراكل/Java التي تلتهم الطابور، والـAPI
+ * لا يرسل تلقائياً. الاستثناء الوحيد هو «الإرسال المباشر» الذي يطلبه المستخدم صراحةً، وهو يمرّ عبر
+ * نفس دوال النقل والأرشفة (انظر `WhatsAppDirectSender`).
+ * The core design is unchanged: the Oracle/Java job transmits, and the API never sends on its own.
+ * The single exception is the user-requested direct send, which still goes through the same transport
+ * and archiving functions.
  */
 abstract class MessageChannelController extends ServiceBaseController
 {
-    /** الجدول الطابور (منتظرة) / queue table (pending) */
-    abstract protected function queueTable(): string;
+    /** مواصفات القناة (الجداول/الوحدة/الحقول الخاصة) / the channel's spec */
+    abstract protected function spec(): ChannelSpec;
 
-    /** جدول الأرشفة (مُرسلة/فاشلة) / archive table (sent/failed) */
-    abstract protected function archiveTable(): string;
-
-    /** كود الوحدة للصلاحيات والتدقيق / module code for grants & audit */
-    abstract protected function module(): string;
-
-    /** الحقول الإضافية الخاصة بالقناة (واتساب: ملفات/توضيح) / channel-specific extra columns */
-    abstract protected function extraColumns(): array;
-
-    /** عمود رسالة الخطأ إن وُجد (واتساب) / optional error column (whatsapp) */
-    protected function hasErrorColumn(): bool
-    {
-        return false;
-    }
-
-    /** الأعمدة الأساسية المشتركة / shared base columns */
-    protected function baseColumns(): array
-    {
-        return ['ID', 'MSG_TEXT', 'MOBILE_NO', 'IS_SENT', 'CREATED_AT', 'CREATED_BY',
-            'UPDATED_AT', 'UPDATED_BY', 'SERVICE_ID', 'PROVIDER_ID', 'CUSTOMER_NAME', 'SEND_ATTEMPT'];
-    }
+    public function __construct(
+        protected readonly PermissionResolver $permissions,
+        protected readonly ActivityLogger $activity,
+    ) {}
 
     /**
-     * قائمة الرسائل حسب الحالة مع ترقيم صفحي وProjection للنص
-     * Message list by status, server-paginated, with a text preview projection
+     * قائمة الرسائل — فلاتر متقدمة + فرز + تقسيم + عدّادات (كلها خادمياً)
+     * The message list — advanced filters, sorting, paging, and counts, all server-side.
      */
     public function index(Request $request): JsonResponse
     {
-        [$page, $limit, $offset] = $this->pagination($request);
-        $status = strtolower((string) ($request->input('status') ?? 'all'));
-        $search = trim((string) ($request->input('search') ?? ''));
+        $validator = Validator::make($request->all(), [
+            'status' => ['nullable', Rule::in(array_merge(['all'], MessageStatus::all()))],
+            'source' => ['nullable', Rule::in(['all', 'queue', 'archive'])],
+            'sort' => ['nullable', Rule::in(['created_at', 'id', 'mobile', 'attempts', 'status'])],
+            'dir' => ['nullable', Rule::in(['asc', 'desc'])],
+            'page' => ['nullable', 'integer', 'min:1'],
+            'limit' => ['nullable', 'integer', 'min:1', 'max:200'],
+            'from' => ['nullable', 'date_format:Y-m-d'],
+            'to' => ['nullable', 'date_format:Y-m-d'],
+            'provider_id' => ['nullable', 'integer'],
+            'service_id' => ['nullable', 'integer'],
+            'min_attempts' => ['nullable', 'integer', 'min:0'],
+            'has_file' => ['nullable', 'boolean'],
+            'error_code' => ['nullable', 'string', 'max:60'],
+            'search' => ['nullable', 'string', 'max:200'],
+        ]);
+
+        if ($validator->fails()) {
+            return $this->validationFailed($validator->errors()->toArray());
+        }
 
         try {
-            // الحالة → مصدر البيانات: منتظرة من الطابور، مُرسلة/فاشلة من الأرشفة
-            // Status → source: pending from queue, sent/failed from archive.
-            $sources = match ($status) {
-                'pending' => [['table' => $this->queueTable(), 'sent' => null]],
-                'sent' => [['table' => $this->archiveTable(), 'sent' => 'Y']],
-                'failed' => [['table' => $this->archiveTable(), 'sent' => 'F']],
-                default => [
-                    ['table' => $this->queueTable(), 'sent' => null],
-                    ['table' => $this->archiveTable(), 'sent' => null],
-                ],
-            };
+            $spec = $this->spec();
+            $filters = [
+                'status' => (string) $request->input('status', 'all'),
+                'source' => (string) $request->input('source', 'all'),
+                'search' => trim((string) $request->input('search', '')),
+                'from_date' => $request->input('from'),
+                'to_date' => $request->input('to'),
+                'provider_id' => $request->input('provider_id'),
+                'service_id' => $request->input('service_id'),
+                'error_code' => $request->input('error_code'),
+                'min_attempts' => $request->input('min_attempts'),
+                'has_file' => $request->has('has_file') ? $request->boolean('has_file') : null,
+                'sort' => (string) $request->input('sort', 'created_at'),
+                'dir' => (string) $request->input('dir', 'desc'),
+                'page' => (int) $request->input('page', 1),
+                'limit' => (int) $request->input('limit', 50),
+            ];
 
-            $total = 0;
-            $rows = collect();
+            $query = new MessageQuery($spec);
+            $page = $query->paginate($filters);
+            $limit = $query->attemptLimit();
+            $can = $this->canCallback($request);
 
-            foreach ($sources as $src) {
-                $query = DB::connection('oracle')->table($src['table'])
-                    ->selectRaw("ID, SUBSTR(MSG_TEXT,1,80) AS MSG_TEXT_PREVIEW, MOBILE_NO, IS_SENT, TO_CHAR(CREATED_AT,'YYYY-MM-DD HH24:MI:SS') AS CREATED_AT, SERVICE_ID, PROVIDER_ID, CUSTOMER_NAME, SEND_ATTEMPT");
+            $rows = array_map(function (array $row) use ($spec, $can, $limit): array {
+                $row['attempt_limit'] = $limit;
+                $row['actions'] = MessageActions::forRow(
+                    $row['status'],
+                    $row['source'],
+                    $spec->module,
+                    $can,
+                    $spec->supportsWorkerActions()
+                );
 
-                if ($src['sent'] !== null) {
-                    $query->where('IS_SENT', $src['sent']);
-                }
-
-                if ($search !== '') {
-                    $oracleSearch = ArabicEncoding::toOracleSearchChars($search);
-                    $query->where(function ($q) use ($search, $oracleSearch) {
-                        $q->where('CUSTOMER_NAME', 'LIKE', '%'.$oracleSearch.'%')
-                            ->orWhere('CUSTOMER_NAME', 'LIKE', '%'.$search.'%')
-                            ->orWhere('MOBILE_NO', 'LIKE', '%'.$search.'%');
-                    });
-                }
-
-                $total += $query->count();
-                // الأحدث أولاً: نرتّب بتأريخ الإنشاء ثم بالمعرّف (يشمل الطابور والأرشفة معًا)
-                // Newest-first: order by created_at then id (covers queue and archive uniformly).
-                $rows = $rows->merge($query->orderByDesc('CREATED_AT')->orderByDesc('ID')->get());
-            }
-
-            // دمج المصادر (all = queue + archive) ثم إعادة الترقيم على الدمج
-            // For the merged `all` case, re-paginate across both sources.
-            // mلاحظة: أوراكل/yajra يُرجع الأعمدة بحروف صغيرة (`id`)، فالقراءة بـ `['ID']` كانت تُفشل
-            // الاستعلام عند status=all («Undefined array key "ID"»). نقرأ الصغير ثم الكبير احتياطاً.
-            if (count($sources) > 1) {
-                // مفتاح ترتيب مركّب: CREATED_AT (نص زمني مرتّب لغويًا) ثم ID ممدّد بأصفار لضمان الأحدث أولاً
-                // Composite sort key: created_at (chronologically lexically sortable) then zero-padded id.
-                $sorted = $rows->sortByDesc(function ($r): string {
-                    $arr = (array) $r;
-                    $createdAt = (string) ($arr['created_at'] ?? $arr['CREATED_AT'] ?? '');
-                    $id = str_pad((string) (int) ($arr['id'] ?? $arr['ID'] ?? 0), 14, '0', STR_PAD_LEFT);
-
-                    return $createdAt.'|'.$id;
-                })->values();
-                $rows = $sorted->slice($offset, $limit);
-            } else {
-                $rows = $rows->slice(0, $limit);
-            }
-
-            $data = array_map(static fn ($r): array => ArabicEncoding::cleanData((array) $r), $rows->all());
+                return $row;
+            }, $page['rows']);
 
             return response()->json([
                 'success' => true,
-                'data' => $data,
-                'meta' => $this->meta($total, $page, $limit),
+                'data' => $rows,
+                'meta' => [
+                    'total' => $page['total'],
+                    'page' => $page['page'],
+                    'limit' => $page['limit'],
+                    'pages' => $page['limit'] > 0 ? (int) ceil($page['total'] / $page['limit']) : 0,
+                    'counts' => $page['counts'],
+                    'filters_applied' => [
+                        'status' => $filters['status'],
+                        'source' => $filters['source'],
+                    ],
+                ],
             ]);
         } catch (\Throwable $e) {
             return $this->errorResponse('خطأ في جلب سجل الرسائل', $e);
@@ -128,64 +125,76 @@ abstract class MessageChannelController extends ServiceBaseController
     }
 
     /**
-     * تفاصيل رسالة — النص الكامل، تُبحث في الطابور ثم الأرشفة
-     * Message detail — full text; looked up in queue then archive
+     * تفاصيل رسالة بالنص الكامل — تُبحث في الطابور ثم الأرشيف
+     * Message detail with the full text — queue first, then archive.
      */
     public function show(int $id): JsonResponse
     {
         try {
-            $cols = $this->baseColumns();
+            $spec = $this->spec();
+            $row = (new MessageQuery($spec))->find($id);
 
-            $row = DB::connection('oracle')->table($this->queueTable())->whereIn('ID', [$id])->first();
-            $table = $this->queueTable();
-
-            if (! $row) {
-                $row = DB::connection('oracle')->table($this->archiveTable())->select($cols)->where('ID', $id)->first();
-                $table = $this->archiveTable();
-            }
-
-            if (! $row) {
+            if ($row === null) {
                 return $this->notFound($id);
             }
 
-            unset($cols); // الأعمدة تُقرأ كاملة من الجدول / columns read fully per table
+            $row['attempt_limit'] = (new MessageQuery($spec))->attemptLimit();
+            $row['actions'] = MessageActions::forRow(
+                $row['status'],
+                $row['source'],
+                $spec->module,
+                $this->canCallback(request()),
+                $spec->supportsWorkerActions()
+            );
 
-            return response()->json([
-                'success' => true,
-                'data' => ArabicEncoding::cleanData((array) $row),
-                'source' => $table === $this->queueTable() ? 'queue' : 'archive',
-            ]);
+            return response()->json(['success' => true, 'data' => $row]);
         } catch (\Throwable $e) {
             return $this->errorResponse('خطأ في جلب تفاصيل الرسالة', $e);
         }
     }
 
     /**
-     * إنشاء رسالة — إدراج في الطابور فقط بـ IS_SENT='N' (يدعم قائمة أرقام)
-     * Create message — enqueue only with IS_SENT='N' (supports a list of numbers)
+     * إنشاء رسالة — إدراج في الطابور، أو إرسال مباشر عند الطلب الصريح
+     * Create a message — enqueue, or send directly when explicitly requested.
      */
     public function store(Request $request): JsonResponse
     {
-        $base = [
+        $spec = $this->spec();
+
+        $rules = [
             'msg_text' => ['required', 'string', 'max:4000'],
             'provider_id' => ['nullable', 'integer'],
             'service_id' => ['nullable', 'integer'],
             'customer_name' => ['nullable', 'string', 'max:250'],
+            'mode' => ['nullable', Rule::in(['queue', 'direct'])],
+            'mobile_no' => ['required_without:mobile_nos', 'nullable'],
+            'mobile_nos' => ['required_without:mobile_no', 'nullable', 'array', 'max:50'],
+            'mobile_nos.*' => ['required', 'string'],
         ];
 
-        $validator = Validator::make($request->all(), $base + [
-            'mobile_no' => ['required_without:mobile_nos', 'nullable'],
-            'mobile_nos' => ['required_without:mobile_no', 'nullable', 'array'],
-            'mobile_nos.*' => ['required', 'string'],
-        ], [
+        if ($spec->hasFileFields) {
+            $rules += [
+                'file_path' => ['nullable', 'string', 'max:1000'],
+                'file_name' => ['nullable', 'string', 'max:255'],
+                'file_type' => ['nullable', 'string', 'max:50'],
+                'caption' => ['nullable', 'string', 'max:4000'],
+            ];
+        }
+
+        $validator = Validator::make($request->all(), $rules, [
             'msg_text.required' => 'نص الرسالة مطلوب / Message text is required.',
         ]);
 
         if ($validator->fails()) {
+            return $this->validationFailed($validator->errors()->toArray());
+        }
+
+        $mode = (string) $request->input('mode', 'queue');
+
+        if ($mode === 'direct' && ! $spec->supportsWorkerActions()) {
             return response()->json([
                 'success' => false,
-                'message' => 'بيانات الرسالة غير صالحة / Validation failed.',
-                'errors' => $validator->errors(),
+                'message' => 'الإرسال المباشر غير مدعوم لقناة SMS / Direct send is not supported for the SMS channel.',
             ], 422);
         }
 
@@ -197,183 +206,421 @@ abstract class MessageChannelController extends ServiceBaseController
             ], 422);
         }
 
+        if ($mode === 'direct' && count($numbers) > 20) {
+            return response()->json([
+                'success' => false,
+                'message' => 'الإرسال المباشر يقبل 20 رقماً كحد أقصى؛ استخدم الإدراج في الطابور للأعداد الكبيرة / Direct send accepts at most 20 numbers.',
+            ], 422);
+        }
+
         try {
             $actor = $this->actor($request);
-            $msgText = ArabicEncoding::toOracleSearchChars((string) $request->input('msg_text'));
-            $customerName = $request->input('customer_name')
+            $text = ArabicEncoding::toOracleSearchChars((string) $request->input('msg_text'));
+            $customerName = $request->filled('customer_name')
                 ? ArabicEncoding::toOracleSearchChars(trim((string) $request->input('customer_name')))
                 : null;
 
-            $inserted = [];
+            $destination = $this->destination($request, $spec);
+            if ($destination === null) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'لا يوجد اشتراك إرسال نشط لهذه القناة / No active send subscription for this channel.',
+                ], 422);
+            }
+
+            $ids = [];
 
             foreach ($numbers as $mobile) {
-                $id = $this->nextQueueId();
+                // المعرّف = أكبر تسلسل بين الطابور والأرشيف + 1 — القاعدة الصريحة في هذا المشروع
+                // The id: highest sequence across queue and archive + 1 — this project's explicit rule.
+                $id = MessageQueueWriter::nextId($spec->key);
 
                 $row = [
                     'ID' => $id,
-                    'MSG_TEXT' => $msgText,
-                    'MOBILE_NO' => (int) $mobile,
+                    'MSG_TEXT' => $text,
+                    'MOBILE_NO' => $mobile,
                     'IS_SENT' => 'N',
-                    'PROVIDER_ID' => $request->input('provider_id') ? (int) $request->input('provider_id') : null,
-                    'SERVICE_ID' => $request->input('service_id') ? (int) $request->input('service_id') : null,
+                    'SERVICE_ID' => $destination['service_id'],
+                    'PROVIDER_ID' => $destination['provider_id'],
                     'CUSTOMER_NAME' => $customerName,
                     'SEND_ATTEMPT' => 0,
                     'CREATED_AT' => DB::raw('SYSDATE'),
                     'CREATED_BY' => $actor,
                 ];
 
-                foreach ($this->extraColumns() as $col => $key) {
-                    $val = $request->input($key);
-                    $row[$col] = ($val !== null && $val !== '') ? trim((string) $val) : null;
+                if ($spec->hasWorkerState) {
+                    $row += [
+                        'STATUS' => 'NEW',
+                        'ATTEMPTS' => 0,
+                        'NEXT_ATTEMPT_AT' => DB::raw('SYSDATE'),
+                        'SEND_LOCK' => 'N',
+                    ];
                 }
 
-                DB::connection('oracle')->table($this->queueTable())->insert($row);
-                $inserted[] = $id;
+                if ($spec->hasFileFields) {
+                    foreach (['file_path' => 'FILE_PATH', 'file_name' => 'FILE_NAME', 'file_type' => 'FILE_TYPE', 'caption' => 'CAPTION'] as $key => $column) {
+                        $value = trim((string) $request->input($key, ''));
+                        $row[$column] = $value !== '' ? ArabicEncoding::toOracleSearchChars($value) : null;
+                    }
+                }
+
+                DB::connection('oracle')->table($spec->queue)->insert($row);
+                $ids[] = $id;
             }
 
-            $this->activity($request, $this->module().'.create', count($inserted).' رسالة في الطابور');
+            $this->activity->success($spec->module.'.create', [
+                'user_id' => $request->user()?->getAttribute('USER_ID'),
+                'module_code' => $spec->module,
+                'entity_type' => $spec->queue,
+                'entity_id' => $ids[0] ?? null,
+                'description_ar' => ($mode === 'direct' ? 'إرسال مباشر' : 'إدراج في الطابور').' لـ'.count($ids).' رسالة',
+            ], $request);
+
+            if ($mode === 'queue') {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'تمت إضافة الرسائل إلى طابور الإرسال / Messages enqueued successfully.',
+                    'ids' => $ids,
+                    'queued' => count($ids),
+                ], 201);
+            }
+
+            // الإرسال المباشر: الصف أُنشئ أولاً (فلا رسالة «شبح») ثم يُرسل الآن
+            // Direct send: the row exists first (no ghost message), then it is sent now.
+            $sender = new WhatsAppDirectSender($this->activity);
+            $results = [];
+
+            foreach ($ids as $id) {
+                $results[] = ['id' => $id] + $sender->sendNow($id, $request, $actor);
+            }
+
+            $sent = count(array_filter($results, static fn (array $r): bool => ($r['status'] ?? '') === MessageStatus::SENT));
+            $failed = array_values(array_filter(
+                $results,
+                static fn (array $r): bool => ($r['status'] ?? '') !== MessageStatus::SENT
+            ));
+
+            // رسالة الفشل تحمل **سبب الخادم الفعلي** لا عبارة عامة: المستخدم يجب أن يعرف أن
+            // المفتاح منتهٍ أو الجلسة غير جاهزة بقراءة الإشعار نفسه.
+            // The failure message carries the server's actual reason, not a generic phrase.
+            $reason = (string) ($failed[0]['message'] ?? 'خطأ غير معروف');
+
+            $message = match (true) {
+                $sent === count($ids) => 'أُرسلت الرسائل مباشرة / Messages sent directly.',
+                $sent === 0 => 'فشل الإرسال — '.$reason,
+                default => "أُرسل {$sent} من ".count($ids).' — '.$reason,
+            };
 
             return response()->json([
-                'success' => true,
-                'message' => 'تمت إضافة الرسائل إلى طابور الإرسال / Messages enqueued successfully.',
-                'ids' => $inserted,
-                'queued' => count($inserted),
-            ], 201);
+                'success' => $sent > 0,
+                'message' => $message,
+                'ids' => $ids,
+                'queued' => 0,
+                'results' => $results,
+            ], $sent > 0 ? 200 : 502);
         } catch (\Throwable $e) {
             return $this->errorResponse('خطأ في إضافة الرسالة', $e);
         }
     }
 
     /**
-     * تعديل رسالة — مسموح على المنتظرة في الطابور فقط
-     * Update message — only pending rows in the queue may change
+     * تعديل رسالة — الطابور مباشرة، والأرشيف عبر إنشاء صف جديد بالتعديلات
+     * Edit a message — in place for the queue, as a new row for the archive.
      */
     public function update(Request $request, int $id): JsonResponse
     {
-        $validator = Validator::make($request->all(), [
+        $rules = [
             'msg_text' => ['required', 'string', 'max:4000'],
             'mobile_no' => ['nullable'],
             'customer_name' => ['nullable', 'string', 'max:250'],
-        ], [
+            'provider_id' => ['nullable', 'integer'],
+            'service_id' => ['nullable', 'integer'],
+        ];
+
+        if ($this->spec()->hasFileFields) {
+            $rules += [
+                'file_path' => ['nullable', 'string', 'max:1000'],
+                'file_name' => ['nullable', 'string', 'max:255'],
+                'file_type' => ['nullable', 'string', 'max:50'],
+                'caption' => ['nullable', 'string', 'max:4000'],
+            ];
+        }
+
+        $validator = Validator::make($request->all(), $rules, [
             'msg_text.required' => 'نص الرسالة مطلوب / Message text is required.',
         ]);
 
         if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'بيانات الرسالة غير صالحة / Validation failed.',
-                'errors' => $validator->errors(),
-            ], 422);
+            return $this->validationFailed($validator->errors()->toArray());
         }
 
         try {
-            $row = DB::connection('oracle')->table($this->queueTable())
-                ->select(['ID', 'IS_SENT'])
-                ->where('ID', $id)
-                ->first();
+            $result = (new MessageWriter($this->spec(), $this->activity))
+                ->update($id, $request->all(), $request, $this->actor($request));
 
-            if (! $row) {
-                return $this->notFound($id);
-            }
-
-            $data = [
-                'MSG_TEXT' => ArabicEncoding::toOracleSearchChars((string) $request->input('msg_text')),
-                'UPDATED_AT' => DB::raw('SYSDATE'),
-                'UPDATED_BY' => $this->actor($request),
-            ];
-
-            if ($request->filled('mobile_no')) {
-                $data['MOBILE_NO'] = (int) $request->input('mobile_no');
-            }
-            if ($request->has('customer_name')) {
-                $data['CUSTOMER_NAME'] = $request->input('customer_name')
-                    ? ArabicEncoding::toOracleSearchChars(trim((string) $request->input('customer_name')))
-                    : null;
-            }
-
-            DB::connection('oracle')->table($this->queueTable())->where('ID', $id)->update($data);
-
-            $this->activity($request, $this->module().'.update', "تعديل رسالة #{$id}");
-
-            return response()->json([
-                'success' => true,
-                'message' => 'تم تعديل الرسالة / Message updated.',
-            ]);
+            return $this->writeResponse($result);
         } catch (\Throwable $e) {
             return $this->errorResponse('خطأ في تعديل الرسالة', $e);
         }
     }
 
     /**
-     * وسم حالة رسالة في الطابور (IS_SENT) — لإعادة المحاولة/الإلغاء
-     * Tag a queued message status (IS_SENT) — for retry/cancel
-     */
-    public function toggle(Request $request, int $id): JsonResponse
-    {
-        $validator = Validator::make($request->all(), [
-            'is_sent' => ['required', 'string', 'in:N,Y,F'],
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'حالة غير صالحة / Invalid status.',
-                'errors' => $validator->errors(),
-            ], 422);
-        }
-
-        try {
-            if (! DB::connection('oracle')->table($this->queueTable())->where('ID', $id)->exists()) {
-                return $this->notFound($id);
-            }
-
-            DB::connection('oracle')->table($this->queueTable())->where('ID', $id)->update([
-                'IS_SENT' => strtoupper((string) $request->input('is_sent')),
-                'UPDATED_AT' => DB::raw('SYSDATE'),
-                'UPDATED_BY' => $this->actor($request),
-            ]);
-
-            $this->activity($request, $this->module().'.toggle', "وسم رسالة #{$id} بالحالة ".$request->input('is_sent'));
-
-            return response()->json([
-                'success' => true,
-                'message' => 'تم تحديث حالة الرسالة / Message status updated.',
-            ]);
-        } catch (\Throwable $e) {
-            return $this->errorResponse('خطأ في تحديث حالة الرسالة', $e);
-        }
-    }
-
-    /**
-     * حذف رسالة من الطابور
-     * Delete a queued message
+     * حذف رسالة (طابور أو أرشيف) — المؤرشف يُسلسَل في سجل النشاط قبل حذفه
+     * Delete a message (queue or archive) — archived rows are serialised into the activity trail.
      */
     public function destroy(Request $request, int $id): JsonResponse
     {
         try {
-            if (! DB::connection('oracle')->table($this->queueTable())->where('ID', $id)->exists()) {
+            $result = (new MessageWriter($this->spec(), $this->activity))->delete($id, $request);
+
+            return $this->writeResponse($result);
+        } catch (\Throwable $e) {
+            return $this->errorResponse('خطأ في حذف الرسالة', $e);
+        }
+    }
+
+    /**
+     * إيقاف مؤقت (واتساب فقط)
+     * Pause (WhatsApp only).
+     */
+    public function pause(Request $request, int $id): JsonResponse
+    {
+        if (! $this->spec()->supportsWorkerActions()) {
+            return $this->unsupported();
+        }
+
+        try {
+            return $this->writeResponse(
+                (new MessageWriter($this->spec(), $this->activity))->pause($id, $request, $this->actor($request))
+            );
+        } catch (\Throwable $e) {
+            return $this->errorResponse('خطأ في إيقاف الرسالة', $e);
+        }
+    }
+
+    /**
+     * استئناف الإرسال (واتساب فقط)
+     * Resume (WhatsApp only).
+     */
+    public function resume(Request $request, int $id): JsonResponse
+    {
+        if (! $this->spec()->supportsWorkerActions()) {
+            return $this->unsupported();
+        }
+
+        try {
+            return $this->writeResponse(
+                (new MessageWriter($this->spec(), $this->activity))->resume($id, $request, $this->actor($request))
+            );
+        } catch (\Throwable $e) {
+            return $this->errorResponse('خطأ في استئناف الرسالة', $e);
+        }
+    }
+
+    /**
+     * إرسال فوري يتجاوز دورة الطابور (واتساب فقط)
+     * Send now, bypassing the queue schedule (WhatsApp only).
+     */
+    public function sendNow(Request $request, int $id): JsonResponse
+    {
+        if (! $this->spec()->supportsWorkerActions()) {
+            return $this->unsupported();
+        }
+
+        try {
+            $result = (new WhatsAppDirectSender($this->activity))->sendNow($id, $request, $this->actor($request));
+
+            return $this->writeResponse($result);
+        } catch (\Throwable $e) {
+            return $this->errorResponse('خطأ في الإرسال الفوري', $e);
+        }
+    }
+
+    /**
+     * إعادة إرسال رسالة واحدة — صف جديد بمعرّف جديد
+     * Resend one message — a new row with a new id.
+     */
+    public function resend(Request $request, int $id): JsonResponse
+    {
+        try {
+            return $this->writeResponse(
+                (new MessageWriter($this->spec(), $this->activity))->resend($id, $request, $this->actor($request))
+            );
+        } catch (\Throwable $e) {
+            return $this->errorResponse('خطأ في إعادة إرسال الرسالة', $e);
+        }
+    }
+
+    /**
+     * إعادة إرسال مجموعة
+     * Resend a batch.
+     */
+    public function bulkResend(Request $request): JsonResponse
+    {
+        return $this->bulk($request, MessageActions::RESEND);
+    }
+
+    /**
+     * إيقاف مجموعة (واتساب فقط)
+     * Pause a batch (WhatsApp only).
+     */
+    public function bulkPause(Request $request): JsonResponse
+    {
+        if (! $this->spec()->supportsWorkerActions()) {
+            return $this->unsupported();
+        }
+
+        return $this->bulk($request, MessageActions::PAUSE);
+    }
+
+    /**
+     * حذف مجموعة
+     * Delete a batch.
+     */
+    public function bulkDelete(Request $request): JsonResponse
+    {
+        return $this->bulk($request, MessageActions::DELETE);
+    }
+
+    /**
+     * سجل المحاولات (واتساب فقط)
+     * Attempt trail (WhatsApp only).
+     */
+    public function attempts(int $id): JsonResponse
+    {
+        if (! $this->spec()->supportsWorkerActions()) {
+            return $this->unsupported();
+        }
+
+        try {
+            $query = new MessageQuery($this->spec());
+            if ($query->find($id) === null) {
                 return $this->notFound($id);
             }
 
-            DB::connection('oracle')->table($this->queueTable())->where('ID', $id)->delete();
-
-            $this->activity($request, $this->module().'.delete', "حذف رسالة #{$id}");
-
-            return response()->json([
-                'success' => true,
-                'message' => 'تم حذف الرسالة / Message deleted.',
-            ]);
+            return response()->json(['success' => true, 'data' => $query->attempts($id)]);
         } catch (\Throwable $e) {
-            return $this->errorResponse('خطأ في حذف الرسالة', $e);
+            return $this->errorResponse('خطأ في جلب محاولات الرسالة', $e);
+        }
+    }
+
+    /**
+     * تاريخ حالات الرسالة (واتساب فقط)
+     * Status history (WhatsApp only).
+     */
+    public function history(int $id): JsonResponse
+    {
+        if (! $this->spec()->supportsWorkerActions()) {
+            return $this->unsupported();
+        }
+
+        try {
+            $query = new MessageQuery($this->spec());
+            if ($query->find($id) === null) {
+                return $this->notFound($id);
+            }
+
+            return response()->json(['success' => true, 'data' => $query->history($id)]);
+        } catch (\Throwable $e) {
+            return $this->errorResponse('خطأ في جلب تاريخ الرسالة', $e);
         }
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────
 
     /**
-     * توحيد الأرقام المرسلة (مفرد أو قائمة) ورفض غير الرقمي
-     * Normalise sent numbers (single or list), rejecting non-numeric
+     * تنفيذ إجراء جماعي مع تحقق موحّد
+     * Run a bulk action with shared validation.
+     */
+    private function bulk(Request $request, string $action): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'ids' => ['required', 'array', 'min:1', 'max:100'],
+            'ids.*' => ['required', 'integer', 'min:1'],
+        ], [
+            'ids.required' => 'اختر رسالة واحدة على الأقل / Select at least one message.',
+        ]);
+
+        if ($validator->fails()) {
+            return $this->validationFailed($validator->errors()->toArray());
+        }
+
+        try {
+            $result = (new MessageWriter($this->spec(), $this->activity))
+                ->bulk($action, (array) $request->input('ids'), $request, $this->actor($request));
+
+            return response()->json([
+                'success' => $result['done'] > 0,
+                'message' => "نجح {$result['done']} من {$result['requested']} / {$result['done']} of {$result['requested']} done.",
+                'requested' => $result['requested'],
+                'done' => $result['done'],
+                'results' => $result['results'],
+            ], $result['done'] > 0 ? 200 : 409);
+        } catch (\Throwable $e) {
+            return $this->errorResponse('خطأ في تنفيذ الإجراء الجماعي', $e);
+        }
+    }
+
+    /**
+     * تحويل نتيجة طبقة الكتابة إلى استجابة
+     * Turn a writer result into an HTTP response.
      *
+     * @param  array{ok: bool, code: int, message: string, new_id?: int, status?: string, http?: int|null, provider_msg_id?: string|null}  $result
+     */
+    private function writeResponse(array $result): JsonResponse
+    {
+        $payload = [
+            'success' => (bool) $result['ok'],
+            'message' => (string) $result['message'],
+        ];
+
+        foreach (['new_id', 'message_id', 'status', 'http', 'provider_msg_id', 'ids'] as $key) {
+            if (array_key_exists($key, $result)) {
+                $payload[$key] = $result[$key];
+            }
+        }
+
+        return response()->json($payload, (int) $result['code']);
+    }
+
+    /**
+     * دالة الإذن المغلَّفة على `PermissionResolver` — مصدر `actions` في كل صف
+     * The can() callback wrapped over PermissionResolver — the source of every row's `actions`.
+     */
+    private function canCallback(Request $request): callable
+    {
+        $user = $request->user();
+
+        return fn (string $code): bool => $this->permissions->can($user, $code);
+    }
+
+    /**
+     * الوجهة المطلوبة: من الطلب إن حُدّدت، وإلا أول اشتراك نشط للقناة
+     * The requested destination: from the request when given, else the channel's first active sub.
+     *
+     * @return array{provider_id: int, service_id: int}|null
+     */
+    private function destination(Request $request, ChannelSpec $spec): ?array
+    {
+        $providerId = $request->input('provider_id');
+        $serviceId = $request->input('service_id');
+
+        if ($providerId && $serviceId) {
+            $exists = DB::connection('oracle')->table('ACCOUNTS.PROVIDERS_DTL')
+                ->where('PROVIDER_ID', (int) $providerId)
+                ->where('SERVICE_ID', (int) $serviceId)
+                ->where('STATUS', 1)
+                ->exists();
+
+            if ($exists) {
+                return ['provider_id' => (int) $providerId, 'service_id' => (int) $serviceId];
+            }
+        }
+
+        return MessageQueueWriter::resolveDestination($spec->key);
+    }
+
+    /**
      * @return list<int>
      */
     private function resolveNumbers(Request $request): array
@@ -390,47 +637,45 @@ abstract class MessageChannelController extends ServiceBaseController
 
         $numbers = [];
         foreach ($raw as $n) {
-            $digits = preg_replace('/\D/', '', (string) $n);
-            if ($digits !== '') {
-                $numbers[] = (int) $digits;
+            $digits = preg_replace('/\D/', '', (string) $n) ?? '';
+            if ($digits === '') {
+                continue;
             }
+            $value = (int) $digits;
+            if (strlen($digits) < 9 || strlen($digits) > 15 || $value === 0) {
+                continue;
+            }
+            $numbers[] = $value;
         }
 
         return array_values(array_unique($numbers));
     }
 
     /**
-     * المعرّف التالي في الطابور — القاعدة الموحّدة عبر `MessageQueueWriter`:
-     * أكبر تسلسل بين جدول الطابور وجدول الأرشيف + 1، لا MAX للطابور وحده؛ الطابور يُفرَّغ بعد
-     * الأرشفة فكان الحساب القديم يعيد معرّفاً موجوداً في الأرشيف فيتكرر بين جدولين تعاملهما
-     * الشاشات كسجل واحد.
-     * Next queue id — unified rule via MessageQueueWriter: the highest sequence across the queue
-     * and archive tables, + 1, never MAX of the queue alone; the queue is drained after
-     * archiving, so the old computation could return an id that already exists in the archive,
-     * duplicated across two tables the screens treat as one log.
+     * @param  array<string, array<int, string>>  $errors
      */
-    private function nextQueueId(): int
+    private function validationFailed(array $errors): JsonResponse
     {
-        // module() يعيد `sms` أو `whatsapp` — نفس مفاتيح قنوات `MessageQueueWriter` بالضبط
-        // module() returns `sms` or `whatsapp` — exactly MessageQueueWriter's channel keys.
-        return MessageQueueWriter::nextId($this->module());
+        return response()->json([
+            'success' => false,
+            'message' => 'بيانات الرسالة غير صالحة / Validation failed.',
+            'errors' => $errors,
+        ], 422);
     }
 
-    private function activity(Request $request, string $code, string $desc): void
+    private function unsupported(): JsonResponse
     {
-        app(ActivityLogger::class)->success($code, [
-            'user_id' => $request->user()?->getAttribute('USER_ID'),
-            'module_code' => $this->module(),
-            'entity_type' => $this->queueTable(),
-            'description_ar' => $desc,
-        ], $request);
+        return response()->json([
+            'success' => false,
+            'message' => 'هذا الإجراء غير مدعوم لقناة الرسائل النصية / This action is not supported for the SMS channel.',
+        ], 422);
     }
 
     private function notFound(int $id): JsonResponse
     {
         return response()->json([
             'success' => false,
-            'message' => "الرسالة رقم [{$id}] غير موجودة في الطابور / Message [{$id}] not found in queue.",
+            'message' => "الرسالة رقم [{$id}] غير موجودة / Message [{$id}] not found.",
         ], 404);
     }
 }
