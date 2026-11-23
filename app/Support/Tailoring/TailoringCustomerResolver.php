@@ -38,10 +38,10 @@ final class TailoringCustomerResolver
     ];
 
     /**
-     * بطاقة العميل الموجود أو null — مع رفض الموقوف لدى المتحكم، ومعها الرصيد المالي
-     * لحسابه من CHART_ACC (طلب المستخدم: عرض رصيد العميل في بطاقة الاختيار).
+     * بطاقة العميل الموجود أو null — مع رفض الموقوف لدى المتحكم، ومعها رصيده من حركاته
+     * في ENTRY_SUB (طلب المستخدم: عرض رصيد العميل في بطاقة الاختيار).
      * The existing customer's card, or null — stopped ones are refused by the controller —
-     * carrying the ledger balance from CHART_ACC (user request: show it on the card).
+     * carrying the balance from the customer's own ENTRY_SUB movements (user request).
      *
      * @return array<string, mixed>|null
      */
@@ -51,12 +51,20 @@ final class TailoringCustomerResolver
             return null;
         }
 
+        // رصيد العميل يُحسب من حركاته وحده (ENTRY_MNT مقيَّد بالحساب ورقم العميل معاً)
+        // — لا من CHART_ACC.BALANCE: آلاف العملاء يشتركون في حساب المراقبة 12310000
+        // فرصيد الحساب الكامل ليس رصيد العميل الواحد (نفس تقييد كشف الحساب).
+        // The customer balance is computed from their own movements (ENTRY_MNT scoped
+        // by account AND customer number) — never CHART_ACC.BALANCE, which thousands
+        // of customers share through the control account (same scoping as the statement).
         $row = (array) DB::connection('oracle')->selectOne(
             'SELECT c.CUST_NO, c.CUST_NAME, c.TEL1, c.TEL2, c.ADDR, c.ACC_NO,
-                    c.STOPPING_CUST, ch.BALANCE AS ACC_BALANCE
+                    c.STOPPING_CUST,
+                    (SELECT NVL(SUM(es.ENTRY_MNT), 0)
+                       FROM ACCOUNTS.ENTRY_SUB es
+                      WHERE es.ACC_NO = c.ACC_NO
+                        AND es.GIVING = c.CUST_NO) AS ACC_BALANCE
                FROM ACCOUNTS.CUST c
-               LEFT JOIN ACCOUNTS.CHART_ACC ch
-                 ON ch.ACC_NO = c.ACC_NO
               WHERE c.CUST_NO = :no',
             ['no' => $custNo]
         );
@@ -201,8 +209,8 @@ final class TailoringCustomerResolver
             })(),
             'acc_no' => self::pickNum($row, 'ACC_NO') !== null ? (int) self::pickNum($row, 'ACC_NO') : null,
             'stopping_cust' => (int) (self::pickNum($row, 'STOPPING_CUST') ?? 0),
-            // الرصيد المالي لحساب العميل كما يحمله CHART_ACC — قد يكون سالباً (مدين له)
-            // The ledger balance as CHART_ACC carries it — may be negative.
+            // رصيد العميل من حركاته المقيّدة بحسابه ورقمه — قد يكون سالباً (مدين له)
+            // The customer's balance from movements scoped by account and customer number.
             'acc_balance' => self::pickNum($row, 'ACC_BALANCE'),
         ];
     }

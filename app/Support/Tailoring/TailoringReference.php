@@ -84,6 +84,9 @@ final class TailoringReference
             'manual_bill_no' => $manualNo,
             'year' => $year,
             'ohid_preview' => self::ohidPreview($year, $manualNo),
+            // معاينة تسلسل الموديل التالي (SALES_DETAILES_SHAPES.SEQ_NO) ليعرضها جدول الموديلات
+            // The next model-sequence preview for the models table.
+            'next_shape_seq' => TailoringNumbering::nextShapeSeq(),
         ];
     }
 
@@ -128,10 +131,10 @@ final class TailoringReference
 
         try {
             $rows = DB::connection('oracle')->select(
-                'SELECT PROMID, PRODANE, PRO_GROUP, ACTIVE
+                'SELECT PROMID, PRODID, PRODANE, PRO_GROUP, ACTIVE
                    FROM ACCOUNTS.PRO_DTYPE
                   WHERE ACTIVE = 1
-                  ORDER BY PROMID, PRODANE'
+                  ORDER BY PRODID, PRODANE'
             );
 
             $seen = [];
@@ -141,6 +144,9 @@ final class TailoringReference
                 $promid = (int) (self::pickNum($data, 'PROMID') ?? 0);
                 $value = self::pickText($data, 'PRODANE');
                 $group = self::pickNum($data, 'PRO_GROUP');
+                // معرف النوع (PRODID) هو ما يعرضه النموذج بجانب الاسم ولا يعرفه العميل
+                // The PRODID identifier shown beside the name per the user's request.
+                $prodid = self::pickNum($data, 'PRODID');
 
                 if (! isset($keys[$promid]) || $value === null || $value === '') {
                     continue;
@@ -159,6 +165,7 @@ final class TailoringReference
                     $specs[$keys[$promid]][] = [
                         'value' => $value,
                         'group' => $group === null ? null : (int) $group,
+                        'prodid' => $prodid === null ? null : (int) $prodid,
                     ];
                 } elseif ($group !== null) {
                     $index = $seen[$dedupeKey];

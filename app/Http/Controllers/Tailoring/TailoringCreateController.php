@@ -239,13 +239,13 @@ class TailoringCreateController extends Controller
     }
 
     /**
-     * إنشاء فاتورة تفصيل — معاملة واحدة: قيد ثم رأس ثم موديلات ثم قطع، بلا مخزون
-     * Create a cutting bill — one transaction: entry, header, models, pieces; no stock rows.
+     * إنشاء فاتورة تفصيل — معاملة واحدة: قيد ثم رأس ثم موديلات ثم قطع، بلا كتابة مخزون مباشرة
+     * Create a cutting bill — one transaction: entry, header, models, pieces; no direct stock write.
      *
-     * ── القرارات المعتمدة: BILLS_KINDS=1 حصراً، ولا صفوف ITEM_MOVE_D (الخصم مؤجل للقص)،
-     *    والاستهلاك والتعبئة الافتراضية يعيد الخادم حسابها (مصدر الحقيقة لا الواجهة).
-     * ── Approved decisions: kind 1 only, no stock rows (deduction deferred to cutting), and
-     *    the server recomputes consumption and the default measurements as the truth source.
+     * ── القرارات المعتمدة: BILLS_KINDS=1 حصراً، وITEM_MOVE_D VIEW مشتق من الفاتورة وقطعها
+     *    (لا نكتب مستند مخزون مستقلاً)، والاستهلاك والتعبئة الافتراضية يعيد الخادم حسابها.
+     * ── Approved decisions: kind 1 only, ITEM_MOVE_D is a view derived from the bill and its
+     *    pieces (no separate stock document is written), and the server recomputes consumption.
      */
     public function store(Request $request): JsonResponse
     {
@@ -358,8 +358,13 @@ class TailoringCreateController extends Controller
             'manual_bill_no' => $manualNo,
             'amount_paid' => $paid,
             'payment_method' => TailoringDocumentWriter::clip((string) $payload['payment_method'], 30),
-            'voucher_no' => TailoringDocumentWriter::clip($finance['voucher_no'] ?? null, 20),
+            // «اخذ المقاسات» يُكتب في VOUCHER_NO كما في النموذج القديم، ورقم الحوالة البنكية
+            // في FIRST_TRANSFER (طلب المستخدم الحرفي 2026-11-22).
+            // "Taken measurements" writes VOUCHER_NO like the legacy form; the bank
+            // transfer number writes FIRST_TRANSFER (the user's literal request).
+            'voucher_no' => TailoringDocumentWriter::clip((string) ($header['measurements_by'] ?? ''), 20),
             'transfer_through' => TailoringDocumentWriter::clip($finance['transfer_through'] ?? null, 30),
+            'transfer_no' => TailoringDocumentWriter::clip($finance['transfer_no'] ?? null, 15),
             'urgent' => $header['urgent'] ? 1 : 0,
             'giving_date' => $header['giving_date'],
             'giving_in' => TailoringDocumentWriter::clip($header['giving_note'] ?? null, 100),
@@ -401,7 +406,7 @@ class TailoringCreateController extends Controller
                 'notes2' => TailoringDocumentWriter::clip($model['notes'] ?? null, 150),
                 'button_type' => TailoringDocumentWriter::clip((string) $model['specs']['button_type'], 30),
                 'button_no' => TailoringDocumentWriter::clip($model['specs']['button_no'] ?? null, 30),
-                'buttons_num' => $model['specs']['buttons_num'],
+                'buttons_num' => isset($model['specs']['buttons_num']) ? (int) $model['specs']['buttons_num'] : null,
                 'com_cabak_type' => TailoringDocumentWriter::clip($model['specs']['com_cabak_type'] ?? null, 30),
                 'neck_type' => TailoringDocumentWriter::clip($model['specs']['neck_type'] ?? null, 30),
                 'pocket_or_without' => TailoringDocumentWriter::clip($model['specs']['pocket_or_without'] ?? null, 30),
@@ -540,8 +545,11 @@ class TailoringCreateController extends Controller
             'finance.cust_known' => 'nullable|boolean',
             'finance.credit_account' => 'required|integer|min:1',
             'finance.cash_account' => 'nullable|integer|min:1',
-            'finance.voucher_no' => 'nullable|string|max:20',
-            'finance.transfer_through' => 'nullable|string|max:30',
+            // رقم الحوالة البنكية يُكتب في FIRST_TRANSFER و«اخذ المقاسات» في VOUCHER_NO
+            // The bank transfer number writes FIRST_TRANSFER; "taken measurements" writes
+            // VOUCHER_NO.
+            'finance.transfer_no' => 'nullable|string|max:15',
+            'header.measurements_by' => 'nullable|string|max:20',
         ]);
 
         if ($validator->fails()) {
@@ -642,8 +650,12 @@ class TailoringCreateController extends Controller
             ], 422);
         }
 
+        // طريقة الدفع من وجود رقم حوالة بنكي (FIRST_TRANSFER) — «اخذ المقاسات»
+        // لا علاقة لها بطريقة الدفع إطلاقاً (VOUCHER_NO عمود مختلف).
+        // The payment method derives from the bank transfer number (FIRST_TRANSFER) —
+        // the measurements-by text (VOUCHER_NO) never affects it.
         $paymentMethod = $paid > 0
-            ? (($finance['voucher_no'] ?? null) !== null || ($finance['transfer_through'] ?? null) !== null
+            ? (($finance['transfer_no'] ?? null) !== null
                 ? TailoringPolicy::PAYMENT_METHOD_TRANSFER
                 : TailoringPolicy::PAYMENT_METHOD_CASH)
             : TailoringPolicy::PAYMENT_METHOD_ON_ACCOUNT;
@@ -800,7 +812,12 @@ class TailoringCreateController extends Controller
                 'gabzor_hand' => (bool) ($model['gabzor_hand'] ?? false),
                 'measurements' => $measures,
                 'specs' => $model['specs'],
-                'item' => $sizeItem,
+                // صنف النمط وأصناف المقاس هويتان مختلفتان — نحتفظ بالرقمين معاً
+                // Style and size items have separate identities — preserve both numbers.
+                'item' => [
+                    'sanf_no' => (int) $styleItem['sanf_no'],
+                    'sanf_dno' => (int) $sizeItem['sanf_dno'],
+                ],
                 'pieces' => $preparedPieces,
             ];
         }
@@ -855,12 +872,22 @@ class TailoringCreateController extends Controller
                 'giving_time' => isset($header['giving_time']) ? (float) $header['giving_time'] : null,
                 'giving_note' => $header['giving_note'] ?? null,
                 'details' => $header['details'] ?? null,
+                // «اخذ المقاسات» — يُكتب في SALES_BILL.VOUCHER_NO (طلب المستخدم الحرفي)
+                // "Taken measurements" — written to SALES_BILL.VOUCHER_NO (user request).
+                'measurements_by' => isset($header['measurements_by'])
+                    ? TailoringDocumentWriter::clip((string) $header['measurements_by'], 20)
+                    : null,
             ],
             'finance' => [
                 'paid' => $paid,
                 'cust_known' => $custKnown,
                 'credit_account' => (int) $finance['credit_account'],
                 'cash_account' => isset($finance['cash_account']) ? (int) $finance['cash_account'] : null,
+                // رقم الحوالة البنكية يُكتب في SALES_BILL.FIRST_TRANSFER
+                // The bank transfer number writes SALES_BILL.FIRST_TRANSFER.
+                'transfer_no' => isset($finance['transfer_no'])
+                    ? TailoringDocumentWriter::clip((string) $finance['transfer_no'], 15)
+                    : null,
                 'voucher_no' => $finance['voucher_no'] ?? null,
                 'transfer_through' => $finance['transfer_through'] ?? null,
             ],

@@ -40,6 +40,7 @@ final class TailoringDocumentWriter
                   REF_NO, DETAILES, TOTAL, SANF_NUMS, DIS_RATE, DISCOUNT, NET,
                   CUR_NO, CUR_PRICE, STORE_NO, ENTRY_NO, ACC_NO, ACC_NO1, ACC_NO2,
                   MANUAL_BILL_NO, AMOUNT_PAID, PAYMENT_METHOD, VOUCHER_NO, TRANSFER_THROUGH,
+                  FIRST_TRANSFER,
                   URGENT, GIVING_DATE, GIVING_IN, PERMANENT_CUST, CUST_KNOWN,
                   BILLS_KINDS, BRANCH_NO, CUTTING_OR_SLAES, SELECT1, ORDSID,
                   CREATED_ON, CREATED_BY, CREATED_BY_NAME, THE_TIME)
@@ -47,6 +48,7 @@ final class TailoringDocumentWriter
                      :tel_no1, :address, :ref_no, :details, :total, :sanf_nums, 0, 0, :net,
                      1, 1, 1, :entry_no, :acc_no, :acc_no1, :acc_no2,
                      :manual_bill_no, :amount_paid, :payment_method, :voucher_no, :transfer_through,
+                     :transfer_no,
                      :urgent, TO_DATE(:giving_date, \'YYYY-MM-DD\'), :giving_in, :permanent_cust, :cust_known,
                      :bills_kinds, :branch_no, 1, 1, 1,
                      SYSDATE, :created_by, :created_by_name, :the_time)',

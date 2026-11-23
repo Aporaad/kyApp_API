@@ -2,6 +2,8 @@
 
 use App\Models\User;
 use App\Support\ArabicEncoding;
+use App\Support\Tailoring\TailoringModelItemResolver;
+use App\Support\Tailoring\TailoringPolicy;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
 
@@ -44,6 +46,17 @@ function tailoringCreateAdmin(): User
     return $user;
 }
 
+/** مستخدم بلا منح — الرفض الافتراضي / a user with no grants — deny by default. */
+function tailoringCreateUngrantedUser(): User
+{
+    $user = new User;
+    $user->setAttribute('USER_ID', 999999);
+    $user->setAttribute('IS_ADMIN', 0);
+    $user->setAttribute('IS_ACTIVATED', 1);
+
+    return $user;
+}
+
 test('every creation route demands a session', function () {
     $samples = [
         ['get', '/api/tailoring/create/reference'],
@@ -64,7 +77,7 @@ test('every creation route demands a session', function () {
 });
 
 test('an ungranted caller is refused on every creation route with tailoring.create', function () {
-    Sanctum::actingAs(tailoringUngrantedUser(), ['*']);
+    Sanctum::actingAs(tailoringCreateUngrantedUser(), ['*']);
 
     $samples = [
         ['get', '/api/tailoring/create/reference'],
@@ -298,60 +311,128 @@ test('a full bill is created inside a rolled-back transaction', function () {
     }
 
     $custNo = (int) ($row['CUST_NO'] ?? $row['cust_no']);
+    $reported = getenv('TAILORING_CREATE_REPORTED_PAYLOAD') === '1';
 
-    // قماش متوفر فعلاً من مسار الأقمشة / a truly available fabric from the fabrics path
-    $fabric = (array) DB::connection('oracle')->selectOne(
-        'SELECT d.SANF_NO, d.SANF_DNO, d.SANF_DNAME, SUM(p.PAL) AS AVAILABLE
-           FROM ACCOUNTS.SANFS_D d
-           JOIN ACCOUNTS.SANFS_D_PAL p ON p.SANF_DNO = d.SANF_DNO AND p.STORE_NO NOT IN (11,12,2)
-          WHERE d.SANF_NO IN (SELECT SANF_NO FROM ACCOUNTS.SANFS WHERE TYPE_NO = 101)
-          GROUP BY d.SANF_NO, d.SANF_DNO, d.SANF_DNAME
-         HAVING SUM(p.PAL) > 5 AND ROWNUM <= 1'
-    );
+    if ($reported) {
+        $custNo = 26322;
+    }
 
-    if ($fabric === []) {
-        $this->markTestSkipped('لا يوجد قماش متوفر على القاعدة الحية.');
+    if ($reported) {
+        // الحمولة المبلّغ عنها تستخدم قماشها المحدد، فلا تعتمد على وجود قماش آخر متوفر
+        // The reported payload uses its exact fabric and never depends on an unrelated one.
+        $fabricNo = 1517;
+        $fabricDno = 10101038504;
+    } else {
+        // قماش متوفر فعلاً من مسار الأقمشة / a truly available fabric from the fabrics path
+        $fabric = (array) DB::connection('oracle')->selectOne(
+            'SELECT d.SANF_NO, d.SANF_DNO, d.SANF_DNAME, SUM(p.PAL) AS AVAILABLE
+               FROM ACCOUNTS.SANFS_D d
+               JOIN ACCOUNTS.SANFS_D_PAL p ON p.SANF_DNO = d.SANF_DNO AND p.STORE_NO NOT IN (11,12,2)
+              WHERE d.SANF_NO IN (SELECT SANF_NO FROM ACCOUNTS.SANFS WHERE TYPE_NO = 101)
+              GROUP BY d.SANF_NO, d.SANF_DNO, d.SANF_DNAME
+             HAVING SUM(p.PAL) > 5 AND ROWNUM <= 1'
+        );
+
+        if ($fabric === []) {
+            $this->markTestSkipped('لا يوجد قماش متوفر على القاعدة الحية.');
+
+            return;
+        }
+
+        $fabricNo = (int) ($fabric['sanf_no'] ?? $fabric['SANF_NO']);
+        $fabricDno = (int) ($fabric['sanf_dno'] ?? $fabric['SANF_DNO']);
+    }
+    $family = $reported ? 1 : 2;
+    $l1 = $reported ? 57.5 : 38;
+    $l5 = $reported ? 16.5 : 14;
+    $l3 = $reported ? 23.5 : 16;
+    $measurements = ['l1' => $l1, 'l5' => $l5, 'l3' => $l3];
+    $specs = [
+        'button_type' => 'طقطق',
+        'com_cabak_type' => $reported ? 'كبك قماش' : 'ساده',
+        'neck_type' => 'قلاب',
+        'pocket_or_without' => 'جيوب سيار',
+        'gabzor_type' => $reported ? 'باين حشوة' : 'سحاااااب',
+        'mobile_pocket' => 'عادي+قلم',
+    ];
+
+    if ($reported) {
+        $measurements += [
+            'l2' => 16.5,
+            'l4' => 14.5,
+            'l6' => 9.0,
+            'l7' => 5.75,
+            'l8' => 28.0,
+            'l9' => 16.0,
+            'l10' => 8.5,
+        ];
+    }
+
+    // صنف النمط من حل الخادم نفسه — لا نكرر صيغة TYPE_NO/STYL_NO في الاختبار
+    // The style item through the server resolver — no duplicated type/style formula.
+    $typeNo = 300 + $family;
+    $styleNo = $typeNo * 100 + TailoringPolicy::sizeBand($l1);
+    $styleItem = TailoringModelItemResolver::resolveStyleItem($typeNo, $styleNo);
+
+    if ($styleItem === null) {
+        $this->markTestSkipped("صنف النمط [{$typeNo}/{$styleNo}] غير موجود.");
 
         return;
     }
 
+    $sizeItem = TailoringModelItemResolver::findSizeItem($styleItem['sanf_no'], $l1, $l5);
+
     $before = (array) DB::connection('oracle')->selectOne(
         'SELECT COUNT(*) AS N FROM ACCOUNTS.SALES_BILL WHERE YEAR = :y AND CUTTING_OR_SLAES = 1',
-        ['y' => (int) date('Y')]
+        ['y' => TailoringPolicy::dbYear()]
     );
 
     $response = $this->postJson('/api/tailoring/create/bills', [
         'customer' => ['mode' => 'existing', 'cust_no' => $custNo],
-        'header' => ['bill_kind' => 1, 'urgent' => true, 'giving_date' => date('Y-m-d', strtotime('+7 days'))],
-        'models' => [[
-            'shape_style_no' => 2,
-            'measurements' => ['l1' => 38, 'l5' => 14, 'l3' => 16],
-            'specs' => [
-                'button_type' => 'طقطق',
-                'com_cabak_type' => 'ساده',
-                'neck_type' => 'قلاب',
-                'pocket_or_without' => 'جيوب سيار',
-                'gabzor_type' => 'سحاااااب',
-                'mobile_pocket' => 'عادي+قلم',
-            ],
+        'header' => array_filter([
+            'bill_kind' => 1,
+            'urgent' => ! $reported,
+            'giving_date' => $reported ? null : date('Y-m-d', strtotime('+7 days')),
+            'measurements_by' => $reported ? 'محمد السريحي' : null,
+            'details' => $reported ? 'عليكم فاتورة تفصيل آجلة رقم 15465' : null,
+        ], static fn ($value): bool => $value !== null),
+        'models' => [array_filter([
+            'shape_style_no' => $family,
+            'gabzor_hand' => false,
+            'notes' => $reported ? 'تركيبه رسمي مطفى' : null,
+            'measurements' => $measurements,
+            // BUTTONS_NUM اختياري عمداً — هذا Regression لخطأ Undefined array key
+            // BUTTONS_NUM is deliberately omitted — regression for the undefined-key failure.
+            'specs' => $specs,
             'pieces' => [[
-                'sanf_no' => (int) ($fabric['sanf_no'] ?? $fabric['SANF_NO']),
-                'sanf_dno' => (int) ($fabric['sanf_dno'] ?? $fabric['SANF_DNO']),
+                'gabzor_hand' => false,
+                'tatryz_in' => false,
+                'sanf_no' => $fabricNo,
+                'sanf_dno' => $fabricDno,
                 'cloth_type' => 'عرضين',
-                'price' => 11000,
+                'price' => 12000,
                 'from_store' => 1,
                 'habna_duabl' => true,
             ]],
-        ]],
-        'finance' => [
-            'paid' => 5000,
-            'cust_known' => false,
-            'credit_account' => 41210001,
-            'cash_account' => 12110005,
+        ], static fn ($value): bool => $value !== null),
         ],
+        'finance' => array_filter([
+            'paid' => 1000,
+            'cust_known' => true,
+            'credit_account' => 41210001,
+            'cash_account' => 12210002,
+            'transfer_no' => $reported ? '155555555555555' : null,
+        ], static fn ($value): bool => $value !== null),
     ]);
 
     $response->assertCreated()->assertJsonPath('success', true);
+
+    $after = (array) DB::connection('oracle')->selectOne(
+        'SELECT COUNT(*) AS N FROM ACCOUNTS.SALES_BILL WHERE YEAR = :y AND CUTTING_OR_SLAES = 1',
+        ['y' => TailoringPolicy::dbYear()]
+    );
+
+    expect((int) reset($after))->toBe((int) reset($before) + 1);
 
     $data = $response->json('data');
 
@@ -359,14 +440,15 @@ test('a full bill is created inside a rolled-back transaction', function () {
         ->and($data['manual_bill_no'])->toBeInt()
         ->and($data['ohid'])->toBeInt()
         ->and($data['entry_no'])->toBeInt()
-        ->and($data['total'])->toBe(11000.0)
-        ->and($data['paid'])->toBe(5000.0)
-        ->and($data['remaining'])->toBe(6000.0)
+        ->and((float) $data['total'])->toBe(12000.0)
+        ->and((float) $data['paid'])->toBe(1000.0)
+        ->and((float) $data['remaining'])->toBe(11000.0)
         ->and($data['pieces_count'])->toBe(1);
 
     // الرأس موجود بالهوية المركبة / the header exists by its composite identity
     $header = (array) DB::connection('oracle')->selectOne(
-        'SELECT BILL_NO, YEAR, MANUAL_BILL_NO, OHID, ENTRY_NO, TOTAL, NET, AMOUNT_PAID, BILLS_KINDS, CUTTING_OR_SLAES
+        'SELECT BILL_NO, YEAR, MANUAL_BILL_NO, OHID, ENTRY_NO, TOTAL, NET, AMOUNT_PAID,
+               BILLS_KINDS, CUTTING_OR_SLAES, TEL_NO1, ADDRESS, VOUCHER_NO, FIRST_TRANSFER
            FROM ACCOUNTS.SALES_BILL
           WHERE BILL_NO = :b AND YEAR = :y',
         ['b' => $data['bill_no'], 'y' => $data['year']]
@@ -377,34 +459,47 @@ test('a full bill is created inside a rolled-back transaction', function () {
         ->and((int) ($header['CUTTING_OR_SLAES'] ?? $header['cutting_or_slaes']))->toBe(1)
         ->and((int) ($header['OHID'] ?? $header['ohid']))->toBe($data['ohid']);
 
-    // الموديل والقطعة بحساب OHDID النصي / the model and piece with the concat OHDID
-    $shape = (array) DB::connection('oracle')->selectOne(
-        'SELECT SEQ_NO, OHDID, STYL_NO, BUTTON_TYPE FROM ACCOUNTS.SALES_DETAILES_SHAPES
-          WHERE BILL_NO = :b AND YEAR = :y AND SEQ_NO = :s',
-        ['b' => $data['bill_no'], 'y' => $data['year'], 's' => $data['ohid'] % 10 === 0 ? null : null]
-    );
+    if ($reported) {
+        expect($header['VOUCHER_NO'] ?? $header['voucher_no'])->toBe(ArabicEncoding::toOracleSearchChars('محمد السريحي'))
+            ->and($header['FIRST_TRANSFER'] ?? $header['first_transfer'])->toBe('155555555555555');
+    }
 
     // OHDID للموديل الأول = OHID + '1' (ربط نصي) / the first model OHDID = OHID + '1'
     $shape = (array) DB::connection('oracle')->selectOne(
-        'SELECT SEQ_NO, OHDID, STYL_NO, BUTTON_TYPE, SANF_NO, SANF_DNO
+        'SELECT SEQ_NO, OHDID, STYL_NO, BUTTON_TYPE, BUTTONS_NUM, SANF_NO, SANF_DNO
            FROM ACCOUNTS.SALES_DETAILES_SHAPES
-          WHERE BILL_NO = :b AND YEAR = :y AND OHDID = :o',
-        ['b' => $data['bill_no'], 'y' => $data['year'], 'o' => $data['ohid']]
+          WHERE BILL_NO = :b AND YEAR = :y
+          ORDER BY SEQ_NO',
+        ['b' => $data['bill_no'], 'y' => $data['year']]
     );
 
-    expect($shape)->not->toBeEmpty();
+    $shapeSanfNo = (int) ($shape['SANF_NO'] ?? $shape['sanf_no']);
+    $shapeSanfDno = (int) ($shape['SANF_DNO'] ?? $shape['sanf_dno']);
+
+    expect($shape)->not->toBeEmpty()
+        ->and((int) ($shape['OHDID'] ?? $shape['ohdid']))->toBe((int) ((string) $data['ohid'].'1'))
+        ->and($shapeSanfNo)->toBe($styleItem['sanf_no'])
+        ->and($shapeSanfDno)->toBeGreaterThan(0)
+        ->and($shape['BUTTONS_NUM'] ?? $shape['buttons_num'])->toBeNull();
+
+    if ($sizeItem !== null) {
+        expect($shapeSanfDno)->toBe($sizeItem);
+    }
 
     $piece = (array) DB::connection('oracle')->selectOne(
-        'SELECT SEQ_NO1, OHDID, SANFPRICE, SANF_COST, STK_COST, CONSUMED_CLOTH_QTY_YARDS
+        'SELECT SEQ_NO1, SEQ_NO, OHDID, SANF_NO, SANF_DNO, SANFPRICE, SANF_COST, STK_COST,
+               CONSUMED_CLOTH_QTY_YARDS
            FROM ACCOUNTS.MULTI_CLOTHS
-          WHERE BILL_NO = :b AND YEAR = :y AND SEQ_NO1 = :s',
-        ['b' => $data['bill_no'], 'y' => $data['year'], 's' => $shape['SEQ_NO1'] ?? $shape['seq_no1']]
+          WHERE BILL_NO = :b AND YEAR = :y AND SEQ_NO = :s',
+        ['b' => $data['bill_no'], 'y' => $data['year'], 's' => $shape['SEQ_NO'] ?? $shape['seq_no']]
     );
 
     expect($piece)->not->toBeEmpty()
-        ->and((float) ($piece['SANFPRICE'] ?? $piece['sanfprice']))->toBe(11000.0);
+        ->and((int) ($piece['SANF_NO'] ?? $piece['sanf_no']))->toBe($fabricNo)
+        ->and((int) ($piece['SANF_DNO'] ?? $piece['sanf_dno']))->toBe($fabricDno)
+        ->and((float) ($piece['SANFPRICE'] ?? $piece['sanfprice']))->toBe(12000.0);
 
-    // القيد: سطران للعربون 5000 على إجمالي 11000 ⇒ 4 سطور / the entry: 4 lines with a deposit
+    // القيد: عربون 1000 على إجمالي 12000 ⇒ 4 سطور / the entry: 4 lines with a deposit
     $lines = DB::connection('oracle')->select(
         'SELECT ACC_NO, ENTRY_MNT FROM ACCOUNTS.ENTRY_SUB WHERE ENTRY_NO = :e ORDER BY SEQ',
         ['e' => $data['entry_no']]
@@ -412,12 +507,22 @@ test('a full bill is created inside a rolled-back transaction', function () {
 
     expect(count($lines))->toBe(4);
 
-    // بلا أي صف مخزون — القرار المعتمد (الخصم مؤجل للقص) / no stock rows — the approved decision
+    $lineSum = 0.0;
+
+    foreach ($lines as $row) {
+        $line = (array) $row;
+        $lineSum += (float) ($line['ENTRY_MNT'] ?? $line['entry_mnt']);
+    }
+
+    expect($lineSum)->toBe(0.0);
+
+    // ITEM_MOVE_D VIEW مشتق من الفاتورة والقطع ⇒ صف واحد لكل قطعة من المحل
+    // ITEM_MOVE_D is derived from the bill and pieces ⇒ one row per shop-sourced piece.
     $stock = (array) DB::connection('oracle')->selectOne(
         'SELECT COUNT(*) AS N FROM ACCOUNTS.ITEM_MOVE_D
           WHERE BILL_NO = :b AND YEAR = :y AND TR_TYPE_ID = 13',
         ['b' => $data['bill_no'], 'y' => $data['year']]
     );
 
-    expect((int) reset($stock))->toBe(0);
+    expect((int) reset($stock))->toBe(1);
 });

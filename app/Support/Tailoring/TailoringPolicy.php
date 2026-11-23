@@ -13,14 +13,14 @@ use Illuminate\Support\Facades\DB;
  *    • `CUTTING_OR_SLAES = 1` يميّز صفوف التفصيل داخل SALES_BILL المشترك (المبيعات = 2).
  *    • كل فواتير التفصيل في 2026 نوعها `BILL_TYPE = 2` (آجل) — مقيس.
  *    • هذه المرحلة تقبل `BILLS_KINDS = 1` (عادية) حصراً بقرار المستخدم؛ الفئات 2/3/4 مؤجلة.
- *    • الخصم من المخزون (ITEM_MOVE_D) مؤجل إلى مرحلة القص بقرار المستخدم — لا صفوف مخزون هنا.
+ *    • لا نكتب مستند مخزون مستقلاً؛ ITEM_MOVE_D VIEW مشتق من الفاتورة وقطعها تلقائياً.
  *    • `OHID` مفتاح أساسي يُركّبه زناد SEQ_BILL_TRG قبل الإدراج، فلا يُكتب من التطبيق.
  *    • الترحيل ليس زناداً: الفاتورة تحتاج ENTRY_MAIN + ENTRY_SUB صراحةً (FK على ENTRY_NO).
  * ── Every constant below was measured on the live ACCOUNTS schema (Phase 0), not guessed:
  *    CUTTING_OR_SLAES = 1 discriminates tailoring rows in the shared SALES_BILL (sales = 2),
  *    every 2026 tailoring bill is BILL_TYPE = 2 (credit), this phase accepts BILLS_KINDS = 1
- *    only (user decision; kinds 2/3/4 deferred), stock movement rows are deferred to the
- *    cutting stage (user decision), OHID is composed by the BEFORE INSERT trigger, and posting
+ *    only (user decision; kinds 2/3/4 deferred), no separate stock document is written (the
+ *    ITEM_MOVE_D view derives movements), OHID is composed by the BEFORE INSERT trigger, and posting
  *    is NOT trigger driven — a bill needs an explicit ENTRY_MAIN + ENTRY_SUB (ENTRY_NO is a FK).
  */
 final class TailoringPolicy
