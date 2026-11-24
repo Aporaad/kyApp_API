@@ -212,6 +212,31 @@ test('a bill with missing required fields is refused 422 before any write', func
         ]],
         'finance' => ['paid' => 0, 'cust_known' => true, 'credit_account' => 41210001],
     ])->assertStatus(422);
+
+    // مقاسات خارج الحدود المعتمدة: الطول 2-70 والعرض 10-31.5 والكتف 1-23
+    // Out-of-bounds measures: length 2-70, width 10-31.5, shoulder 1-23.
+    $badMeasures = [
+        ['l1' => 1, 'l5' => 14],
+        ['l1' => 71, 'l5' => 14],
+        ['l1' => 38, 'l5' => 9],
+        ['l1' => 38, 'l5' => 32],
+        ['l1' => 38, 'l5' => 14, 'l2' => 24],
+        ['l1' => 38, 'l5' => 14, 'l10' => 14],
+    ];
+
+    foreach ($badMeasures as $measurements) {
+        $this->postJson('/api/tailoring/create/bills', [
+            'customer' => ['mode' => 'existing', 'cust_no' => 1],
+            'header' => ['bill_kind' => 1],
+            'models' => [[
+                'shape_style_no' => 1,
+                'measurements' => $measurements,
+                'specs' => ['button_type' => 'طقطق'],
+                'pieces' => [['sanf_no' => 1986, 'sanf_dno' => 10101051801, 'cloth_type' => 'عرضين', 'price' => 1000]],
+            ]],
+            'finance' => ['paid' => 0, 'cust_known' => true, 'credit_account' => 41210001],
+        ])->assertStatus(422);
+    }
 });
 
 test('a duplicated customer name is answered 409 with the existing row and nothing is written', function () {
@@ -525,4 +550,19 @@ test('a full bill is created inside a rolled-back transaction', function () {
     );
 
     expect((int) reset($stock))->toBe(1);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// عقد اسم النوع في STYLE_NAME — الاسم وحده لا وصف الشريحة الحجمية (بلا قاعدة)
+// The STYLE_NAME type-name contract — the label alone, not the band description (no DB).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('the model type name written to STYLE_NAME is the family label alone', function () {
+    expect(TailoringPolicy::styleName(1))->toBe('قطري')
+        ->and(TailoringPolicy::styleName(4))->toBe('قطريA')
+        ->and(TailoringPolicy::styleName(12))->toBe('معوز وشميز')
+        // عائلة غير معروفة: يبقى الاسم الاحتياطي كما هو، وبلا احتياطي «موديل»
+        // An unknown family keeps the fallback, and «موديل» without one.
+        ->and(TailoringPolicy::styleName(99, 'قطري رجالي من 50 الى 70'))->toBe('قطري رجالي من 50 الى 70')
+        ->and(TailoringPolicy::styleName(99))->toBe('موديل');
 });

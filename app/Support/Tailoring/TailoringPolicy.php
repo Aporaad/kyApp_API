@@ -156,6 +156,23 @@ final class TailoringPolicy
     ];
 
     /**
+     * اسم نوع الموديل كما يُكتب في STYLE_NAME على الموديل وقطعه: اسم العائلة وحده
+     * («قطري») لا وصف شريحة المقاس («قطري رجالي من 50 الى 70») الذي يحمله صنف SANFS.
+     * The model type name written to STYLE_NAME on the model and its pieces: the family
+     * label alone («قطري»), never the size-band item description held by SANFS.
+     */
+    public static function styleName(int $family, ?string $fallback = null): string
+    {
+        $label = self::MODEL_FAMILIES[$family]['label'] ?? null;
+
+        if ($label !== null && trim($label) !== '') {
+            return $label;
+        }
+
+        return $fallback !== null && trim($fallback) !== '' ? $fallback : 'موديل';
+    }
+
+    /**
      * نطاقات المقاس الحجمي (STYL_NO = TYPE_NO*100 + الحزام): الحزام يُشتق من L1 كما في
      * أسماء قاموس STYLE (رجالي 50-68، شبابي كبير 45-49، شبابي 40-44، ولادي كبير 35-39،
      * ولادي واسط 30-34، ولادي 18-29). مثال مقيس: L1=38 ⇒ حزام 4 ⇒ 30204.

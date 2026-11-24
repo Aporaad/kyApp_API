@@ -515,8 +515,16 @@ class TailoringCreateController extends Controller
             'models.*.beneficiary' => 'nullable|string|max:100',
             'models.*.notes' => 'nullable|string|max:150',
             'models.*.gabzor_hand' => 'nullable|boolean',
-            'models.*.measurements.l1' => 'required|numeric|min:0',
-            'models.*.measurements.l5' => 'required|numeric|min:0',
+            'models.*.measurements.l1' => 'required|numeric|between:2,70',
+            'models.*.measurements.l5' => 'required|numeric|between:10,31.5',
+            'models.*.measurements.l2' => 'nullable|numeric|between:1,23',
+            'models.*.measurements.l3' => 'nullable|numeric|between:1,30',
+            'models.*.measurements.l4' => 'nullable|numeric|between:1,23',
+            'models.*.measurements.l6' => 'nullable|numeric|between:1,15',
+            'models.*.measurements.l7' => 'nullable|numeric|between:1,10',
+            'models.*.measurements.l8' => 'nullable|numeric|between:1,40',
+            'models.*.measurements.l9' => 'nullable|numeric|between:1,20',
+            'models.*.measurements.l10' => 'nullable|numeric|between:1,13',
             'models.*.measurements.*' => 'nullable|numeric|min:0',
             'models.*.specs.button_type' => 'required|string|max:30',
             'models.*.specs.button_no' => 'nullable|string|max:30',
@@ -806,7 +814,9 @@ class TailoringCreateController extends Controller
             $preparedModels[] = [
                 'family' => $family,
                 'styl_no' => $stylNo,
-                'style_label' => $styleItem['sanf_name'],
+                // اسم النوع وحده («قطري») لا وصف الشريحة الحجمية («قطري رجالي من 50 الى 70»)
+                // The type name alone («قطري»), never the size-band description.
+                'style_label' => TailoringPolicy::styleName($family, $styleItem['sanf_name']),
                 'beneficiary' => $model['beneficiary'] ?? null,
                 'notes' => $model['notes'] ?? null,
                 'gabzor_hand' => (bool) ($model['gabzor_hand'] ?? false),
@@ -932,6 +942,12 @@ class TailoringCreateController extends Controller
                 ], 422);
             }
 
+            // هاتف الفاتورة وعنوانها من النموذج أولاً ثم من ملف العميل — يُكتبان في
+            // SALES_BILL.TEL_NO1 و SALES_BILL.ADDRESS (طلب المستخدم الحرفي).
+            // The bill phone and address come from the form first, then the customer file —
+            // they are written to SALES_BILL.TEL_NO1 and SALES_BILL.ADDRESS.
+            $customer = self::withBillContact($customer, $input);
+
             return ['customer' => $customer, 'created' => false];
         }
 
@@ -967,7 +983,28 @@ class TailoringCreateController extends Controller
             $input['address'] ?? null
         );
 
+        $customer = self::withBillContact($customer, $input);
+
         return ['customer' => $customer, 'created' => true];
+    }
+
+    /**
+     * تثبيت هاتف الفاتورة وعنوانها من حقول النموذج أولاً ثم من ملف العميل
+     * Pin the bill's phone and address from the form first, then from the customer file.
+     *
+     * @param  array<string, mixed>  $customer
+     * @param  array<string, mixed>  $input
+     * @return array<string, mixed>
+     */
+    private static function withBillContact(array $customer, array $input): array
+    {
+        $phone = isset($input['phone']) ? trim((string) $input['phone']) : '';
+        $address = isset($input['address']) ? trim((string) $input['address']) : '';
+
+        $customer['phone'] = $phone !== '' ? $phone : ($customer['tel1'] ?? null);
+        $customer['address'] = $address !== '' ? $address : ($customer['addr'] ?? null);
+
+        return $customer;
     }
 
     /**
