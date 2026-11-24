@@ -4,6 +4,7 @@ use App\Models\User;
 use App\Support\ArabicEncoding;
 use App\Support\Tailoring\TailoringModelItemResolver;
 use App\Support\Tailoring\TailoringPolicy;
+use App\Support\Tailoring\TailoringPosting;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
 
@@ -417,7 +418,9 @@ test('a full bill is created inside a rolled-back transaction', function () {
         'header' => array_filter([
             'bill_kind' => 1,
             'urgent' => ! $reported,
-            'giving_date' => $reported ? null : date('Y-m-d', strtotime('+7 days')),
+            // المستعجل: التاريخ والوقت نصاً في مقدمة ملاحظة الاستعجال
+            // Urgent: the date and time as text at the head of the urgent note.
+            'giving_note' => $reported ? null : date('d/m/Y', strtotime('+7 days')).' 10:30 - ضروري',
             'measurements_by' => $reported ? 'محمد السريحي' : null,
             'details' => $reported ? 'عليكم فاتورة تفصيل آجلة رقم 15465' : null,
         ], static fn ($value): bool => $value !== null),
@@ -482,7 +485,15 @@ test('a full bill is created inside a rolled-back transaction', function () {
     expect($header)->not->toBeEmpty()
         ->and((int) ($header['BILLS_KINDS'] ?? $header['bills_kinds']))->toBe(1)
         ->and((int) ($header['CUTTING_OR_SLAES'] ?? $header['cutting_or_slaes']))->toBe(1)
-        ->and((int) ($header['OHID'] ?? $header['ohid']))->toBe($data['ohid']);
+        ->and((int) ($header['OHID'] ?? $header['ohid']))->toBe($data['ohid'])
+        // القيم الثابتة المطلوبة: ORDSID=0، CUR_NO1/CUR_PRICE1=1، ولا طريقة دفع ولا تاريخ مستعجل
+        // The required constants: ORDSID = 0, CUR_NO1/CUR_PRICE1 = 1, no payment method,
+        // and no urgent date column.
+        ->and((int) ($header['ORDSID'] ?? $header['ordsid']))->toBe(0)
+        ->and((int) ($header['CUR_NO1'] ?? $header['cur_no1']))->toBe(1)
+        ->and((int) ($header['CUR_PRICE1'] ?? $header['cur_price1']))->toBe(1)
+        ->and($header['PAYMENT_METHOD'] ?? $header['payment_method'])->toBeNull()
+        ->and($header['GIVING_DATE'] ?? $header['giving_date'])->toBeNull();
 
     if ($reported) {
         expect($header['VOUCHER_NO'] ?? $header['voucher_no'])->toBe(ArabicEncoding::toOracleSearchChars('محمد السريحي'))
@@ -503,6 +514,7 @@ test('a full bill is created inside a rolled-back transaction', function () {
 
     expect($shape)->not->toBeEmpty()
         ->and((int) ($shape['OHDID'] ?? $shape['ohdid']))->toBe((int) ((string) $data['ohid'].'1'))
+        ->and((int) ($shape['RQUEST_NO'] ?? $shape['rquest_no']))->toBe(1)
         ->and($shapeSanfNo)->toBe($styleItem['sanf_no'])
         ->and($shapeSanfDno)->toBeGreaterThan(0)
         ->and($shape['BUTTONS_NUM'] ?? $shape['buttons_num'])->toBeNull();
@@ -522,6 +534,11 @@ test('a full bill is created inside a rolled-back transaction', function () {
     expect($piece)->not->toBeEmpty()
         ->and((int) ($piece['SANF_NO'] ?? $piece['sanf_no']))->toBe($fabricNo)
         ->and((int) ($piece['SANF_DNO'] ?? $piece['sanf_dno']))->toBe($fabricDno)
+        // PROD_NO = رقم صنف المقاس للموديل، وORDSDID = 0، ولا لون ثانٍ
+        // PROD_NO is the model's size item, ORDSDID = 0, and no second colour.
+        ->and((int) ($piece['PROD_NO'] ?? $piece['prod_no']))->toBe((int) ($shape['SANF_DNO'] ?? $shape['sanf_dno']))
+        ->and((int) ($piece['ORDSDID'] ?? $piece['ordsdid']))->toBe(0)
+        ->and($piece['CLOTHS_COLOR2'] ?? $piece['cloths_color2'])->toBeNull()
         ->and((float) ($piece['SANFPRICE'] ?? $piece['sanfprice']))->toBe(12000.0);
 
     // القيد: عربون 1000 على إجمالي 12000 ⇒ 4 سطور / the entry: 4 lines with a deposit
@@ -540,6 +557,54 @@ test('a full bill is created inside a rolled-back transaction', function () {
     }
 
     expect($lineSum)->toBe(0.0);
+
+    // سطر بيانات الفاتورة وصف الصلاحيات موجودان — لا فاتورة بدونهما
+    // The bill's detail row and privilege row exist — no bill without them.
+    $detail = (array) DB::connection('oracle')->selectOne(
+        'SELECT SANF_NO, SANF_PRICE, QTY, CAP, PCS, TOTAL, SEQ, IS_LOCAL, STK_COST, OHID
+           FROM ACCOUNTS.SALES_DETAILES WHERE BILL_NO = :b AND YEAR = :y',
+        ['b' => $data['bill_no'], 'y' => $data['year']]
+    );
+
+    expect($detail)->not->toBeEmpty()
+        ->and((int) ($detail['SANF_NO'] ?? $detail['sanf_no']))->toBe(1)
+        ->and((int) ($detail['QTY'] ?? $detail['qty']))->toBe($data['pieces_count'])
+        ->and((int) ($detail['CAP'] ?? $detail['cap']))->toBe(1)
+        ->and((int) ($detail['SEQ'] ?? $detail['seq']))->toBeGreaterThan(0)
+        ->and((int) ($detail['IS_LOCAL'] ?? $detail['is_local']))->toBe(1)
+        ->and((float) ($detail['SANF_PRICE'] ?? $detail['sanf_price']))->toBe(12000.0);
+
+    $privilege = (array) DB::connection('oracle')->selectOne(
+        'SELECT SEQ, BILL_NO, YEAR FROM ACCOUNTS.SALES_BILL_PRIVILAGE WHERE BILL_NO = :b AND YEAR = :y',
+        ['b' => $data['bill_no'], 'y' => $data['year']]
+    );
+
+    expect($privilege)->not->toBeEmpty()
+        ->and((int) ($privilege['SEQ'] ?? $privilege['seq']))->toBeGreaterThan(0);
+
+    // ENTRY_SUB: رقم العميل في كل الأطراف، وبيان فرعي لكل طرف
+    // ENTRY_SUB: the customer number on every line, with a per-side sub-detail.
+    $texts = TailoringPosting::lineTexts((int) $data['manual_bill_no'], (string) $data['cust_name']);
+
+    foreach ($lines as $row) {
+        $line = (array) $row;
+        expect((int) ($line['GIVING'] ?? $line['giving']))->toBe((int) $data['cust_no']);
+    }
+
+    $customerLines = DB::connection('oracle')->select(
+        'SELECT ACC_NO, ENTRY_MNT, SUB_DETAILS FROM ACCOUNTS.ENTRY_SUB WHERE ENTRY_NO = :e ORDER BY SEQ',
+        ['e' => $data['entry_no']]
+    );
+
+    $fixed = array_map(
+        static fn ($row): string => ArabicEncoding::fixMojibake((string) (((array) $row)['SUB_DETAILS'] ?? ((array) $row)['sub_details'])),
+        $customerLines
+    );
+
+    expect($fixed[0])->toContain($texts['sale'])
+        ->and($fixed[1])->toContain($texts['sale'])
+        ->and($fixed[2])->toContain($texts['cash'])
+        ->and($fixed[3])->toContain($texts['deposit']);
 
     // ITEM_MOVE_D VIEW مشتق من الفاتورة والقطع ⇒ صف واحد لكل قطعة من المحل
     // ITEM_MOVE_D is derived from the bill and pieces ⇒ one row per shop-sourced piece.
@@ -565,4 +630,17 @@ test('the model type name written to STYLE_NAME is the family label alone', func
         // An unknown family keeps the fallback, and «موديل» without one.
         ->and(TailoringPolicy::styleName(99, 'قطري رجالي من 50 الى 70'))->toBe('قطري رجالي من 50 الى 70')
         ->and(TailoringPolicy::styleName(99))->toBe('موديل');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// عقد البيان الفرعي للقيد — لكل طرف صيغته (بلا قاعدة)
+// The entry sub-detail contract — one wording per side (no DB).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('every entry side carries its own sub-detail wording', function () {
+    $texts = TailoringPosting::lineTexts(15464, 'عميل وهمي للتجارب');
+
+    expect($texts['sale'])->toBe('عليكم فاتورة مبيعات رقم 15464 - عميل وهمي للتجارب')
+        ->and($texts['cash'])->toBe('واصل من /عميل وهمي للتجارب فاتورة رقم 15464')
+        ->and($texts['deposit'])->toBe('واصل من فاتورة رقم 15464 - عميل وهمي للتجارب');
 });

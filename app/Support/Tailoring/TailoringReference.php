@@ -37,6 +37,7 @@ final class TailoringReference
         $year = TailoringPolicy::dbYear();
         $billNo = TailoringNumbering::nextBillNo($year);
         $manualNo = TailoringNumbering::nextManualNo($year);
+        $accounts = TailoringPolicy::accounts();
 
         return [
             'next' => [
@@ -58,7 +59,10 @@ final class TailoringReference
             'default_measurements' => self::defaultMeasurements(),
             'width_types' => TailoringPolicy::reference()['width_types'],
             'colors' => self::colors(),
-            'accounts' => TailoringPolicy::accounts(),
+            'accounts' => $accounts,
+            // حساب العربون الافتراضي: صندوق المستخدم (APP_USERS.CASH_ACC_NO) أو الرئيسي
+            // The default deposit account: the user's cash account, else the main cash box.
+            'default_cash_account' => self::defaultCashAccount($accounts),
             'limits' => [
                 'max_models' => TailoringPolicy::MAX_MODELS,
                 'max_pieces' => TailoringPolicy::MAX_PIECES,
@@ -88,6 +92,33 @@ final class TailoringReference
             // The next model-sequence preview for the models table.
             'next_shape_seq' => TailoringNumbering::nextShapeSeq(),
         ];
+    }
+
+    /**
+     * حساب العربون الافتراضي — من APP_USERS.CASH_ACC_NO للمستخدم الحالي، وإلا
+     * الصندوق الرئيسي 12110001 (طلب المستخدم الحرفي).
+     * The default deposit account — the signed-in user's CASH_ACC_NO, else the main cash
+     * box 12110001 (the user's literal request).
+     *
+     * @param  array<string, mixed>  $accounts
+     */
+    private static function defaultCashAccount(array $accounts): int
+    {
+        $user = auth()->user();
+        $raw = $user === null ? null : $user->getAttribute('CASH_ACC_NO');
+        $accNo = is_numeric($raw) ? (int) $raw : null;
+
+        $allowed = [];
+
+        foreach (array_merge($accounts['cash'] ?? [], $accounts['bank'] ?? []) as $account) {
+            $allowed[] = (int) ($account['acc_no'] ?? 0);
+        }
+
+        if ($accNo !== null && $accNo > 0 && in_array($accNo, $allowed, true)) {
+            return $accNo;
+        }
+
+        return TailoringPolicy::MAIN_CASH_ACCOUNT;
     }
 
     /**

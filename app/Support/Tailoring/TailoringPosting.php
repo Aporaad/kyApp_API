@@ -9,11 +9,11 @@ use Illuminate\Support\Facades\DB;
  * ترحيل فاتورة التفصيل إلى القيود المحاسبية القديمة
  * Posting a cutting bill into the legacy journal.
  *
- * ── القيد المقيس من آخر الفواتير الحيّة (22095/22096):
+ * ── القيد المقيس من آخر الفواتير الحيّة (22095/22096، 15464/15457):
  *    عربون 0 ⇒ سطران: مدين حساب العميل بالكامل، دائن 41210001 بالكامل.
  *    عربون > 0 ⇒ أربعة أسطر: السطران أعلاه، ثم مدين الصندوق بالعربون ودائن العميل به.
  *    ENTRY_TYPE_NO = 6 (تفصيل)، بادئة ENTRY_NO = 5، INVOICE_NO = الرقم اليدوي،
- *    GIVING = CUST_NO للعميل العادي وNULL عند الربط بحساب عامل.
+ *    GIVING = CUST_NO في كل الأطراف، ولكل طرف بيانه الفرعي الخاص به.
  * ── The measured entries: zero deposit ⇒ two lines (customer debit, 41210001 credit);
  *    a paid deposit adds the cash debit and the customer credit. Entry type 6, prefix 5.
  *
@@ -28,7 +28,7 @@ final class TailoringPosting
      * ترحيل فاتورة التفصيل — يُرجع رقم القيد المُنشأ
      * Post a cutting bill — returns the created entry number.
      *
-     * @param  array{date: string, manual_no: int, cust_no: int|null, total: float,
+     * @param  array{date: string, manual_no: int, cust_no: int|null, cust_name: string, total: float,
      *               paid: float, party_account: int, credit_account: int, cash_account: int|null,
      *               note: string}  $doc
      */
@@ -53,20 +53,43 @@ final class TailoringPosting
         $paid = round((float) $doc['paid'], 2);
         $giving = $doc['cust_no'];
         $invoiceNo = (int) $doc['manual_no'];
+        $customerName = trim((string) ($doc['cust_name'] ?? ''));
+        $texts = self::lineTexts($invoiceNo, $customerName);
 
-        // 1) حساب العميل/العامل مدين بالإجمالي / the party ledger is debited with the total
-        self::insertLine($entryNo, (int) $doc['party_account'], $total, $giving, $invoiceNo, (string) $doc['note']);
+        // 1) حساب العميل/العامل مديناً بالإجمالي — GIVING رقم العميل دائماً
+        // 1) The party ledger is debited with the total — GIVING is always the customer No.
+        self::insertLine($entryNo, (int) $doc['party_account'], $total, $giving, $invoiceNo, $texts['sale']);
 
-        // 2) مبيعات آجلة دائن بالإجمالي / credit revenue with the total
-        self::insertLine($entryNo, (int) $doc['credit_account'], -$total, null, $invoiceNo, (string) $doc['note']);
+        // 2) مبيعات آجلة دائنة بالإجمالي / credit revenue with the total
+        self::insertLine($entryNo, (int) $doc['credit_account'], -$total, $giving, $invoiceNo, $texts['sale']);
 
         // 3 و 4) العربون: الصندوق مدين والعميل دائن به / the deposit: cash debit, party credit
         if ($paid > 0 && $doc['cash_account'] !== null) {
-            self::insertLine($entryNo, (int) $doc['cash_account'], $paid, null, $invoiceNo, (string) $doc['note']);
-            self::insertLine($entryNo, (int) $doc['party_account'], -$paid, $giving, $invoiceNo, (string) $doc['note']);
+            self::insertLine($entryNo, (int) $doc['cash_account'], $paid, $giving, $invoiceNo, $texts['cash']);
+            self::insertLine($entryNo, (int) $doc['party_account'], -$paid, $giving, $invoiceNo, $texts['deposit']);
         }
 
         return $entryNo;
+    }
+
+    /**
+     * نصوص البيان الفرعي لكل طرف — دالة نقية قابلة للاختبار بلا قاعدة:
+     *   العميل/المبيعات: «عليكم فاتورة مبيعات رقم {no} - {name}»
+     *   الصندوق/البنك:   «واصل من /{name} فاتورة رقم {no}»
+     *   العميل دائناً:   «واصل من فاتورة رقم {no} - {name}»
+     * The per-side sub-detail texts — a pure, database-free function.
+     *
+     * @return array{sale: string, cash: string, deposit: string}
+     */
+    public static function lineTexts(int $invoiceNo, string $customerName): array
+    {
+        $name = trim($customerName);
+
+        return [
+            'sale' => 'عليكم فاتورة مبيعات رقم '.$invoiceNo.' - '.$name,
+            'cash' => 'واصل من /'.$name.' فاتورة رقم '.$invoiceNo,
+            'deposit' => 'واصل من فاتورة رقم '.$invoiceNo.' - '.$name,
+        ];
     }
 
     /**

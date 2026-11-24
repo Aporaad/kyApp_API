@@ -38,19 +38,19 @@ final class TailoringDocumentWriter
             'INSERT INTO ACCOUNTS.SALES_BILL
                  (BILL_NO, YEAR, BILL_TYPE, DAT, CUST_NO, CUST_NAME, TEL_NO1, ADDRESS,
                   REF_NO, DETAILES, TOTAL, SANF_NUMS, DIS_RATE, DISCOUNT, NET,
-                  CUR_NO, CUR_PRICE, STORE_NO, ENTRY_NO, ACC_NO, ACC_NO1, ACC_NO2,
-                  MANUAL_BILL_NO, AMOUNT_PAID, PAYMENT_METHOD, VOUCHER_NO, TRANSFER_THROUGH,
+                  CUR_NO, CUR_PRICE, CUR_NO1, CUR_PRICE1, STORE_NO, ENTRY_NO, ACC_NO, ACC_NO1, ACC_NO2,
+                  MANUAL_BILL_NO, AMOUNT_PAID, VOUCHER_NO, TRANSFER_THROUGH,
                   FIRST_TRANSFER,
-                  URGENT, GIVING_DATE, GIVING_IN, PERMANENT_CUST, CUST_KNOWN,
+                  URGENT, GIVING_IN, PERMANENT_CUST, CUST_KNOWN,
                   BILLS_KINDS, BRANCH_NO, CUTTING_OR_SLAES, SELECT1, ORDSID,
                   CREATED_ON, CREATED_BY, CREATED_BY_NAME, THE_TIME)
              VALUES (:bill_no, :year, :bill_type, TO_DATE(:dat, \'YYYY-MM-DD\'), :cust_no, :cust_name,
                      :tel_no1, :address, :ref_no, :details, :total, :sanf_nums, 0, 0, :net,
-                     1, 1, 1, :entry_no, :acc_no, :acc_no1, :acc_no2,
-                     :manual_bill_no, :amount_paid, :payment_method, :voucher_no, :transfer_through,
+                     1, 1, 1, 1, 1, :entry_no, :acc_no, :acc_no1, :acc_no2,
+                     :manual_bill_no, :amount_paid, :voucher_no, :transfer_through,
                      :transfer_no,
-                     :urgent, TO_DATE(:giving_date, \'YYYY-MM-DD\'), :giving_in, :permanent_cust, :cust_known,
-                     :bills_kinds, :branch_no, 1, 1, 1,
+                     :urgent, :giving_in, :permanent_cust, :cust_known,
+                     :bills_kinds, :branch_no, 1, 1, 0,
                      SYSDATE, :created_by, :created_by_name, :the_time)',
             self::bindings($b)
         );
@@ -66,14 +66,14 @@ final class TailoringDocumentWriter
     {
         DB::connection('oracle')->insert(
             'INSERT INTO ACCOUNTS.SALES_DETAILES_SHAPES
-                 (BILL_NO, YEAR, SEQ_NO, OHID, OHDID, SHAPE_STYLE_NO, STYL_NO, STYLE_NAME,
+                 (BILL_NO, YEAR, SEQ_NO, OHID, OHDID, SHAPE_STYLE_NO, STYL_NO, RQUEST_NO, STYLE_NAME,
                   BENEFICIARYNAME, NOTES2, QTY,
                   BUTTON_TYPE, BUTTON_NO, BUTTONS_NUM,
                   COM_CABAK_TYPE, NECK_TYPE, POCKET_OR_WITHOUT, GABZOR_TYPE,
                   MOBILE_POCKET, PEN_POCKET, HEGAZI_TYPE, TIPPER_TYPE,
                   L1, L2, L3, L4, L5, L6, L7, L8, L9, L10, L11, L12,
                   SANF_NO, SANF_DNO, CLOTH_TYPE, SHAPE_GABROZ_NO)
-             VALUES (:bill_no, :year, :seq_no, :ohid, :ohdid, :shape_style_no, :styl_no, :style_name,
+             VALUES (:bill_no, :year, :seq_no, :ohid, :ohdid, :shape_style_no, :styl_no, :rquest_no, :style_name,
                      :beneficiaryname, :notes2, NULL,
                      :button_type, :button_no, :buttons_num,
                      :com_cabak_type, :neck_type, :pocket_or_without, :gabzor_type,
@@ -95,19 +95,52 @@ final class TailoringDocumentWriter
         DB::connection('oracle')->insert(
             'INSERT INTO ACCOUNTS.MULTI_CLOTHS
                  (SEQ_NO1, SEQ_NO, BILL_NO, YEAR, OHID, OHDID,
-                  SANF_NO, SANF_DNO, CLOTH_NAME, CLOTH_TYPE, CLOTHS_COLOR, CLOTHS_COLOR2,
+                  SANF_NO, SANF_DNO, PROD_NO, CLOTH_NAME, CLOTH_TYPE, CLOTHS_COLOR,
                   QTY, CONSUMED_CLOTH_QTY_HINSH, CONSUMED_CLOTH_QTY_YARDS,
                   CONSUMED_CLOTH_QTY_HINSH1, SHARKH, GABZOR_HAND, TATRYZ_IN, TATRYZ_NO,
                   HABNA_DUABL, SANFPRICE, SANF_COST, STK_COST, SHAPE_STYLE_NO, STYLE_NAME,
                   CLOTH_FRM_LOCAL_STORE, SHELF_NO, CLOTHS_OUR_SELECTION, ORDSDID,
                   CREATED_BY_NAME, F_CANCEL)
              VALUES (:seq_no1, :seq_no, :bill_no, :year, :ohid, :ohdid,
-                     :sanf_no, :sanf_dno, :cloth_name, :cloth_type, :cloths_color, :cloths_color2,
+                     :sanf_no, :sanf_dno, :prod_no, :cloth_name, :cloth_type, :cloths_color,
                      1, :hinsh, :yards,
                      :hinsh1, :sharkh, :gabzor_hand, :tatryz_in, :tatryz_no,
                      :habna_duabl, :sanfprice, :sanf_cost, :stk_cost, :shape_style_no, :style_name,
-                     :cloth_frm_local_store, :shelf_no, NULL, 1,
+                     :cloth_frm_local_store, :shelf_no, NULL, 0,
                      :created_by_name, 0)',
+            self::bindings($b)
+        );
+    }
+
+    /**
+     * إدراج سطر بيانات الفاتورة (SALES_DETAILES) — صف واحد لكل فاتورة كما في النظام
+     * القديم المقيس: صنف 1، السعر متوسط سعر القطعة، والكمية عدد القطع.
+     * Insert the bill's detail row (SALES_DETAILES) — one row per bill as measured on the
+     * legacy rows: item 1, the average piece price, the quantity is the piece count.
+     *
+     * @param  array<string, mixed>  $b
+     */
+    public static function insertDetail(array $b): void
+    {
+        DB::connection('oracle')->insert(
+            'INSERT INTO ACCOUNTS.SALES_DETAILES
+                 (BILL_NO, YEAR, SANF_NO, SANF_PRICE, QTY, CAP, PCS, TOTAL, SEQ, IS_LOCAL, STK_COST, OHID)
+             VALUES (:bill_no, :year, 1, :sanf_price, :qty, 1, :pcs, 0, :seq, 1, 0, :ohid)',
+            self::bindings($b)
+        );
+    }
+
+    /**
+     * إدراج صف صلاحيات الفاتورة (SALES_BILL_PRIVLAGE) — صف واحد لكل فاتورة كما في القديم
+     * Insert the bill's privilege row (SALES_BILL_PRIVLAGE) — one row per bill, as the legacy.
+     *
+     * @param  array<string, mixed>  $b
+     */
+    public static function insertPrivilege(array $b): void
+    {
+        DB::connection('oracle')->insert(
+            'INSERT INTO ACCOUNTS.SALES_BILL_PRIVILAGE (SEQ, BILL_NO, YEAR)
+             VALUES (:seq, :bill_no, :year)',
             self::bindings($b)
         );
     }

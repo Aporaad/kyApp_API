@@ -333,6 +333,7 @@ class TailoringCreateController extends Controller
             'credit_account' => (int) $finance['credit_account'],
             'cash_account' => $paid > 0 ? (int) $finance['cash_account'] : null,
             'note' => $details,
+            'cust_name' => (string) ($customer['cust_name'] ?? ''),
         ]);
 
         // 2) الرأس — OHID يتركه الزناد
@@ -357,7 +358,6 @@ class TailoringCreateController extends Controller
             'acc_no2' => $paid > 0 ? (int) $finance['cash_account'] : null,
             'manual_bill_no' => $manualNo,
             'amount_paid' => $paid,
-            'payment_method' => TailoringDocumentWriter::clip((string) $payload['payment_method'], 30),
             // «اخذ المقاسات» يُكتب في VOUCHER_NO كما في النموذج القديم، ورقم الحوالة البنكية
             // في FIRST_TRANSFER (طلب المستخدم الحرفي 2026-11-22).
             // "Taken measurements" writes VOUCHER_NO like the legacy form; the bank
@@ -366,7 +366,8 @@ class TailoringCreateController extends Controller
             'transfer_through' => TailoringDocumentWriter::clip($finance['transfer_through'] ?? null, 30),
             'transfer_no' => TailoringDocumentWriter::clip($finance['transfer_no'] ?? null, 15),
             'urgent' => $header['urgent'] ? 1 : 0,
-            'giving_date' => $header['giving_date'],
+            // تاريخ/وقت المستعجل لا يُحفظان في أي عمود: يسبقان ملاحظة المستعجل نصاً
+            // The urgent date/time are never stored: they prefix the urgent note as text.
             'giving_in' => TailoringDocumentWriter::clip($header['giving_note'] ?? null, 100),
             'permanent_cust' => $header['permanent_cust'] ? 1 : 0,
             'cust_known' => $finance['cust_known'] ? 1 : 0,
@@ -377,8 +378,16 @@ class TailoringCreateController extends Controller
             'the_time' => gmdate('h:i:s A'),
         ]);
 
-        // 3) OHID الفعلي من الزناد — بدونه تنكسر سلسلة الموديلات والقطع
-        // 3) The trigger's actual OHID — without it the model/piece chain breaks.
+        // 3) صف صلاحيات الفاتورة — صف واحد لكل فاتورة كما في القديم
+        // 3) The bill's privilege row — one per bill, as the legacy.
+        TailoringDocumentWriter::insertPrivilege([
+            'seq' => TailoringNumbering::nextPrivilegeSeq(),
+            'bill_no' => $billNo,
+            'year' => $year,
+        ]);
+
+        // 4) OHID الفعلي من الزناد — بدونه تنكسر سلسلة الموديلات والقطع
+        // 4) The trigger's actual OHID — without it the model/piece chain breaks.
         $ohid = TailoringNumbering::ohidOf($billNo, $year);
 
         if ($ohid === null) {
@@ -401,6 +410,7 @@ class TailoringCreateController extends Controller
                 'ohdid' => $ohdid,
                 'shape_style_no' => $model['family'],
                 'styl_no' => $model['styl_no'],
+                'rquest_no' => 1,
                 'style_name' => TailoringDocumentWriter::clip((string) $model['style_label'], 30),
                 'beneficiaryname' => TailoringDocumentWriter::clip($model['beneficiary'] ?? null, 100),
                 'notes2' => TailoringDocumentWriter::clip($model['notes'] ?? null, 150),
@@ -443,10 +453,12 @@ class TailoringCreateController extends Controller
                     'ohdid' => TailoringNumbering::pieceOhdid($ohid, $piecesCount + $pieceIndex + 1),
                     'sanf_no' => $piece['sanf_no'],
                     'sanf_dno' => $piece['sanf_dno'],
+                    // رقم صنف المقاس للموديل كما تكتبه الصفوف القديمة (PROD_NO)
+                    // The model's size-item number exactly as the legacy rows write it.
+                    'prod_no' => $model['item']['sanf_dno'],
                     'cloth_name' => TailoringDocumentWriter::clip((string) $piece['cloth_name'], 100),
                     'cloth_type' => TailoringDocumentWriter::clip((string) $piece['cloth_type'], 50),
                     'cloths_color' => $piece['color_no'],
-                    'cloths_color2' => TailoringDocumentWriter::clip($piece['color_text'] ?? null, 30),
                     'hinsh' => $piece['hinsh'] === null ? null : round((float) $piece['hinsh'], 2),
                     'yards' => $piece['yards'] === null ? null : round((float) $piece['yards'], 2),
                     'hinsh1' => $piece['hinsh1'] === null ? null : round((float) $piece['hinsh1'], 2),
@@ -468,6 +480,20 @@ class TailoringCreateController extends Controller
                 $piecesCount++;
             }
         }
+
+        // 6) سطر بيانات الفاتورة — صف واحد لكل فاتورة كما في الصفوف القديمة
+        // 6) The bill's detail row — one row per bill exactly as the legacy rows.
+        $safePieces = max(1, $piecesCount);
+
+        TailoringDocumentWriter::insertDetail([
+            'bill_no' => $billNo,
+            'year' => $year,
+            'sanf_price' => round($total / $safePieces, 2),
+            'qty' => $piecesCount,
+            'pcs' => $piecesCount,
+            'seq' => TailoringNumbering::nextDetailSeq(),
+            'ohid' => $ohid,
+        ]);
 
         return [
             'bill_no' => $billNo,
@@ -506,8 +532,6 @@ class TailoringCreateController extends Controller
             'header.ref_no' => 'nullable|string|max:20',
             'header.permanent_cust' => 'nullable|boolean',
             'header.urgent' => 'nullable|boolean',
-            'header.giving_date' => 'nullable|date_format:Y-m-d',
-            'header.giving_time' => 'nullable|numeric|min:0|max:23.99',
             'header.giving_note' => 'nullable|string|max:100',
             'header.details' => 'nullable|string|max:180',
             'models' => 'required|array|min:1|max:'.TailoringPolicy::MAX_MODELS,
@@ -658,15 +682,8 @@ class TailoringCreateController extends Controller
             ], 422);
         }
 
-        // طريقة الدفع من وجود رقم حوالة بنكي (FIRST_TRANSFER) — «اخذ المقاسات»
-        // لا علاقة لها بطريقة الدفع إطلاقاً (VOUCHER_NO عمود مختلف).
-        // The payment method derives from the bank transfer number (FIRST_TRANSFER) —
-        // the measurements-by text (VOUCHER_NO) never affects it.
-        $paymentMethod = $paid > 0
-            ? (($finance['transfer_no'] ?? null) !== null
-                ? TailoringPolicy::PAYMENT_METHOD_TRANSFER
-                : TailoringPolicy::PAYMENT_METHOD_CASH)
-            : TailoringPolicy::PAYMENT_METHOD_ON_ACCOUNT;
+        // طريقة الدفع لم تعد تُحفظ في SALES_BILL.PAYMENT_METHOD (العمود لعملية أخرى)
+        // The payment method is no longer written to SALES_BILL.PAYMENT_METHOD (other process).
 
         // ── الموديلات: الحل والتحقق على الخادم (مصدر الحقيقة) ──
         // ── Models: resolve and verify server-side (the truth source). ──
@@ -843,11 +860,13 @@ class TailoringCreateController extends Controller
         $header = $data['header'];
         $urgent = (bool) ($header['urgent'] ?? false);
 
-        if ($urgent && ($header['giving_date'] ?? null) === null) {
+        // المستعجل: ملاحظة الموعد تحمل التاريخ والوقت نصاً (لا عمود لهما)
+        // Urgent: the note carries the date and time as text (they have no column).
+        if ($urgent && trim((string) ($header['giving_note'] ?? '')) === '') {
             return response()->json([
                 'success' => false,
-                'message' => 'موعد الاستلام مطلوب عند الاستعجال / A delivery date is required for urgent bills',
-                'errors' => ['header.giving_date' => 'required when urgent'],
+                'message' => 'موعد الاستلام مطلوب عند الاستعجال / A delivery note is required for urgent bills',
+                'errors' => ['header.giving_note' => 'required when urgent'],
             ], 422);
         }
 
@@ -878,8 +897,6 @@ class TailoringCreateController extends Controller
                 'ref_no' => $header['ref_no'] ?? null,
                 'permanent_cust' => (bool) ($header['permanent_cust'] ?? false),
                 'urgent' => $urgent,
-                'giving_date' => $header['giving_date'] ?? null,
-                'giving_time' => isset($header['giving_time']) ? (float) $header['giving_time'] : null,
                 'giving_note' => $header['giving_note'] ?? null,
                 'details' => $header['details'] ?? null,
                 // «اخذ المقاسات» — يُكتب في SALES_BILL.VOUCHER_NO (طلب المستخدم الحرفي)
@@ -904,7 +921,6 @@ class TailoringCreateController extends Controller
             'models' => $preparedModels,
             'total' => round($total, 2),
             'pieces_count' => $piecesCount,
-            'payment_method' => $paymentMethod,
             'date' => TailoringPolicy::dbYear().'-'.date('m-d'),
             'branch_no' => 1,
             'created_by' => $createdBy,

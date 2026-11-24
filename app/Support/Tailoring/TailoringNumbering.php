@@ -88,6 +88,32 @@ final class TailoringNumbering
     }
 
     /**
+     * تسلسل سطر بيانات الفاتورة التالي — عدّاد عام على SALES_DETAILES (PK)
+     * The next bill-detail sequence — a global counter over SALES_DETAILES (its PK).
+     */
+    public static function nextDetailSeq(): int
+    {
+        $row = (array) DB::connection('oracle')->selectOne(
+            'SELECT NVL(MAX(SEQ), 0) AS N FROM ACCOUNTS.SALES_DETAILES'
+        );
+
+        return (int) (reset($row) ?: 0) + 1;
+    }
+
+    /**
+     * تسلسل صلاحيات الفاتورة التالي — عدّاد عام على SALES_BILL_PRIVILAGE
+     * The next bill-privilege sequence — a global counter over SALES_BILL_PRIVILAGE.
+     */
+    public static function nextPrivilegeSeq(): int
+    {
+        $row = (array) DB::connection('oracle')->selectOne(
+            'SELECT NVL(MAX(SEQ), 0) AS N FROM ACCOUNTS.SALES_BILL_PRIVILAGE'
+        );
+
+        return (int) (reset($row) ?: 0) + 1;
+    }
+
+    /**
      * رقم القيد التالي: بادئة 5 + سنة(2) + عدّاد(7) — نفس صيغة SalesPolicy::nextEntryNo
      * The next entry number: prefix 5 + 2-digit year + 7-digit counter, same shape as sales.
      */

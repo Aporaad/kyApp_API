@@ -68,6 +68,10 @@ final class TailoringPolicy
 
     public const DEFAULT_CASH_ACCOUNT = 12110005;
 
+    /** الصندوق الرئيسي بالريال اليمني — الافتراضي عند غياب صندوق المستخدم */
+    /** The main YER cash box — the default when the user has no cash account. */
+    public const MAIN_CASH_ACCOUNT = 12110001;
+
     /** نطاق صناديق النقدية المعروضة في قائمة الحسابات / the cash-box range offered in the picker */
     public const CASH_ACCOUNT_LO = 12110000;
 
