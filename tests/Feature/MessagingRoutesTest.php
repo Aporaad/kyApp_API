@@ -176,6 +176,22 @@ test('a live queue row opens with its full text and computed actions', function 
         ->toHaveKeys(['status', 'actions', 'attempt_limit', 'message_text', 'request_id']);
 });
 
+test('the list sorts and filters by the send/update date as well as the creation date', function () {
+    Sanctum::actingAs(messagingAdminUser(), ['*']);
+
+    $this->getJson('/api/whatsapp/messages?sort=updated_at&dir=desc&limit=5')
+        ->assertOk()
+        ->assertJsonPath('success', true);
+
+    $this->getJson('/api/whatsapp/messages?updated_from=2026-11-01&updated_to=2026-11-30&limit=5')
+        ->assertOk()
+        ->assertJsonPath('success', true);
+
+    $this->getJson('/api/whatsapp/messages?created_from=2026-11-01&created_to=2026-11-30&limit=5')
+        ->assertOk()
+        ->assertJsonPath('success', true);
+});
+
 test('the queue id is the highest sequence across queue and archive, plus one', function () {
     // القاعدة المطلوبة صراحةً: أكبر رقم في جدولي الطابور والأرشيف + 1، لكل قناة على حدة.
     // The explicitly required rule: the highest id across queue *and* archive, + 1, per channel.

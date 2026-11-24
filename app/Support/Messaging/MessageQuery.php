@@ -26,6 +26,7 @@ final class MessageQuery
     /** خريطة بيضاء لأعمدة الفرز — لا يُلصق أي اسم من الطلب */
     private const SORT_COLUMNS = [
         'created_at' => 'CREATED_AT',
+        'updated_at' => 'UPDATED_AT',
         'id' => 'ID',
         'mobile' => 'MOBILE_NO',
         'attempts' => 'ATTEMPTS',
@@ -383,6 +384,17 @@ final class MessageQuery
             $parts[] = "TO_DATE(U.CREATED_AT,'YYYY-MM-DD HH24:MI:SS') < TO_DATE(:to_date,'YYYY-MM-DD') + 1";
         }
 
+        // تاريخ التعديل/الإرسال: صفوف قديمة بلا UPDATED_AT ترجع لتاريخ الإنشاء حتى لا تختفي من الفلتر
+        // The update/send date: legacy rows without UPDATED_AT fall back to CREATED_AT so a date
+        // filter never hides them.
+        if (! empty($f['updated_from'])) {
+            $parts[] = "TO_DATE(NVL(U.UPDATED_AT, U.CREATED_AT),'YYYY-MM-DD HH24:MI:SS') >= TO_DATE(:updated_from,'YYYY-MM-DD')";
+        }
+
+        if (! empty($f['updated_to'])) {
+            $parts[] = "TO_DATE(NVL(U.UPDATED_AT, U.CREATED_AT),'YYYY-MM-DD HH24:MI:SS') < TO_DATE(:updated_to,'YYYY-MM-DD') + 1";
+        }
+
         if (! empty($f['provider_id'])) {
             $parts[] = 'U.PROVIDER_ID = :provider_id';
         }
@@ -432,6 +444,12 @@ final class MessageQuery
         }
         if (! empty($f['to_date'])) {
             $b['to_date'] = $f['to_date'];
+        }
+        if (! empty($f['updated_from'])) {
+            $b['updated_from'] = $f['updated_from'];
+        }
+        if (! empty($f['updated_to'])) {
+            $b['updated_to'] = $f['updated_to'];
         }
         if (! empty($f['provider_id'])) {
             $b['provider_id'] = (int) $f['provider_id'];
