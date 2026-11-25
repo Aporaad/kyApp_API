@@ -334,6 +334,7 @@ class TailoringCreateController extends Controller
             'cash_account' => $paid > 0 ? (int) $finance['cash_account'] : null,
             'note' => $details,
             'cust_name' => (string) ($customer['cust_name'] ?? ''),
+            'pieces' => $payload['pieces_count'],
         ]);
 
         // 2) الرأس — OHID يتركه الزناد
@@ -366,16 +367,24 @@ class TailoringCreateController extends Controller
             'transfer_through' => TailoringDocumentWriter::clip($finance['transfer_through'] ?? null, 30),
             'transfer_no' => TailoringDocumentWriter::clip($finance['transfer_no'] ?? null, 15),
             'urgent' => $header['urgent'] ? 1 : 0,
-            // تاريخ/وقت المستعجل لا يُحفظان في أي عمود: يسبقان ملاحظة المستعجل نصاً
+            // تاريخ/وقت المستعجل لا يُحفظان في أي عمود: يسبقان ملاحظة المستعجل نصاً،
+            // وGIVING_DATE يحمل تاريخ حفظ الفاتورة نفسه كما يفعل القديم (لا علاقة له
+            // بتاريخ المستعجل)، وMAIN_BILL=0 صريح وCREATED_ON تاريخ بلا وقت وTHE_TIME فارغ.
             // The urgent date/time are never stored: they prefix the urgent note as text.
+            // GIVING_DATE carries the bill's save date as the legacy does (nothing to do
+            // with the urgent date), MAIN_BILL is an explicit 0, CREATED_ON is a bare
+            // date and THE_TIME stays empty — exactly like the legacy rows.
             'giving_in' => TailoringDocumentWriter::clip($header['giving_note'] ?? null, 100),
+            'giving_date' => $payload['date'],
+            // AM_PM نص ثابت كما يكتبه القديم، وGIVING_TIME يُترك فارغاً (طلب المستخدم)
+            // AM_PM is the legacy's fixed text, and GIVING_TIME stays empty (user request).
+            'am_pm' => TailoringPolicy::AM_PM_TEXT,
             'permanent_cust' => $header['permanent_cust'] ? 1 : 0,
             'cust_known' => $finance['cust_known'] ? 1 : 0,
             'bills_kinds' => TailoringPolicy::BILL_KIND,
             'branch_no' => $payload['branch_no'],
             'created_by' => $payload['created_by'],
             'created_by_name' => TailoringDocumentWriter::clip($payload['created_by_name'], 100),
-            'the_time' => gmdate('h:i:s A'),
         ]);
 
         // 3) صف صلاحيات الفاتورة — صف واحد لكل فاتورة كما في القديم
@@ -397,6 +406,7 @@ class TailoringCreateController extends Controller
         // 4 و 5) الموديلات ثم قطعها — SEQ/SEQ_NO1 عدّادات عامة وOHDID ربط نصي
         // 4/5) Models then their pieces — global counters and the concat OHDID.
         $piecesCount = 0;
+        $firstStkCost = null;
 
         foreach ($payload['models'] as $index => $model) {
             $seqNo = TailoringNumbering::nextShapeSeq();
@@ -478,21 +488,28 @@ class TailoringCreateController extends Controller
                 ]);
 
                 $piecesCount++;
+
+                if ($firstStkCost === null) {
+                    $firstStkCost = $piece['stk_cost'] === null ? null : round((float) $piece['stk_cost'], 2);
+                }
             }
         }
 
-        // 6) سطر بيانات الفاتورة — صف واحد لكل فاتورة كما في الصفوف القديمة
-        // 6) The bill's detail row — one row per bill exactly as the legacy rows.
-        $safePieces = max(1, $piecesCount);
-
+        // 6) سطر بيانات الفاتورة — صف واحد لكل فاتورة كما في الصفوف القديمة:
+        //    SANF_PRICE = STK_COST للقطعة الأولى (وليس سعر القطعة ولا مجموع التكاليف) وبلا OHID.
+        //    القديم غير ثابت في الفواتير متعددة القطع (متوسط سعر أو تكلفة قطعة أو صفر)،
+        //    والمقيس المؤكد: قطعة واحدة ⇒ STK_COST الخاص بها، وقطعتان ⇒ تكلفة الأولى (22188).
+        // 6) The bill's detail row — one row per bill exactly as the legacy rows:
+        //    SANF_PRICE is the first piece's STK_COST (not the piece price, not the cost
+        //    sum) and no OHID. The legacy is inconsistent on multi-piece bills; the
+        //    measured cases are one piece ⇒ its STK_COST, two pieces ⇒ the first's (22188).
         TailoringDocumentWriter::insertDetail([
             'bill_no' => $billNo,
             'year' => $year,
-            'sanf_price' => round($total / $safePieces, 2),
+            'sanf_price' => $firstStkCost,
             'qty' => $piecesCount,
             'pcs' => $piecesCount,
             'seq' => TailoringNumbering::nextDetailSeq(),
-            'ohid' => $ohid,
         ]);
 
         return [

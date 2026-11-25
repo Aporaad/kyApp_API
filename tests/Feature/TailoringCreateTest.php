@@ -476,7 +476,10 @@ test('a full bill is created inside a rolled-back transaction', function () {
     // الرأس موجود بالهوية المركبة / the header exists by its composite identity
     $header = (array) DB::connection('oracle')->selectOne(
         'SELECT BILL_NO, YEAR, MANUAL_BILL_NO, OHID, ENTRY_NO, TOTAL, NET, AMOUNT_PAID,
-               BILLS_KINDS, CUTTING_OR_SLAES, TEL_NO1, ADDRESS, VOUCHER_NO, FIRST_TRANSFER
+               BILLS_KINDS, CUTTING_OR_SLAES, TEL_NO1, ADDRESS, VOUCHER_NO, FIRST_TRANSFER,
+               MAIN_BILL, THE_TIME, AM_PM, GIVING_TIME,
+               TO_CHAR(GIVING_DATE, \'YYYY-MM-DD\') AS GIVING_DATE_S,
+               TO_CHAR(DAT, \'YYYY-MM-DD\') AS DAT_S
            FROM ACCOUNTS.SALES_BILL
           WHERE BILL_NO = :b AND YEAR = :y',
         ['b' => $data['bill_no'], 'y' => $data['year']]
@@ -486,14 +489,21 @@ test('a full bill is created inside a rolled-back transaction', function () {
         ->and((int) ($header['BILLS_KINDS'] ?? $header['bills_kinds']))->toBe(1)
         ->and((int) ($header['CUTTING_OR_SLAES'] ?? $header['cutting_or_slaes']))->toBe(1)
         ->and((int) ($header['OHID'] ?? $header['ohid']))->toBe($data['ohid'])
-        // القيم الثابتة المطلوبة: ORDSID=0، CUR_NO1/CUR_PRICE1=1، ولا طريقة دفع ولا تاريخ مستعجل
+        // القيم الثابتة المطلوبة: ORDSID=0، CUR_NO1/CUR_PRICE1=1، ولا طريقة دفع،
+        // وMAIN_BILL=0 صريح، وTHE_TIME فارغ، وGIVING_DATE = تاريخ حفظ الفاتورة كما في القديم
         // The required constants: ORDSID = 0, CUR_NO1/CUR_PRICE1 = 1, no payment method,
-        // and no urgent date column.
+        // MAIN_BILL an explicit 0, THE_TIME empty, and GIVING_DATE = the bill's save
+        // date exactly like the legacy rows.
         ->and((int) ($header['ORDSID'] ?? $header['ordsid']))->toBe(0)
         ->and((int) ($header['CUR_NO1'] ?? $header['cur_no1']))->toBe(1)
         ->and((int) ($header['CUR_PRICE1'] ?? $header['cur_price1']))->toBe(1)
         ->and($header['PAYMENT_METHOD'] ?? $header['payment_method'])->toBeNull()
-        ->and($header['GIVING_DATE'] ?? $header['giving_date'])->toBeNull();
+        ->and((int) ($header['MAIN_BILL'] ?? $header['main_bill']))->toBe(0)
+        ->and($header['THE_TIME'] ?? $header['the_time'])->toBeNull()
+        ->and($header['GIVING_TIME'] ?? $header['giving_time'])->toBeNull()
+        ->and($header['AM_PM'] ?? $header['am_pm'])->toBe(ArabicEncoding::toOracleSearchChars('1-صباحاً'))
+        ->and((string) ($header['GIVING_DATE_S'] ?? $header['giving_date_s']))
+        ->toBe((string) ($header['DAT_S'] ?? $header['dat_s']));
 
     if ($reported) {
         expect($header['VOUCHER_NO'] ?? $header['voucher_no'])->toBe(ArabicEncoding::toOracleSearchChars('محمد السريحي'))
@@ -566,13 +576,19 @@ test('a full bill is created inside a rolled-back transaction', function () {
         ['b' => $data['bill_no'], 'y' => $data['year']]
     );
 
+    $pieceStkCost = (float) ($piece['STK_COST'] ?? $piece['stk_cost']);
+
     expect($detail)->not->toBeEmpty()
         ->and((int) ($detail['SANF_NO'] ?? $detail['sanf_no']))->toBe(1)
         ->and((int) ($detail['QTY'] ?? $detail['qty']))->toBe($data['pieces_count'])
         ->and((int) ($detail['CAP'] ?? $detail['cap']))->toBe(1)
         ->and((int) ($detail['SEQ'] ?? $detail['seq']))->toBeGreaterThan(0)
         ->and((int) ($detail['IS_LOCAL'] ?? $detail['is_local']))->toBe(1)
-        ->and((float) ($detail['SANF_PRICE'] ?? $detail['sanf_price']))->toBe(12000.0);
+        // SANF_PRICE = تكلفة الصنف STK_COST كما يكتبها القديم (وليس سعر القطعة)، وبلا OHID
+        // SANF_PRICE is the item's STK_COST as the legacy writes it (not the piece
+        // price), and OHID stays empty like the legacy rows.
+        ->and((float) ($detail['SANF_PRICE'] ?? $detail['sanf_price']))->toBe($pieceStkCost)
+        ->and($detail['OHID'] ?? $detail['ohid'])->toBeNull();
 
     $privilege = (array) DB::connection('oracle')->selectOne(
         'SELECT SEQ, BILL_NO, YEAR FROM ACCOUNTS.SALES_BILL_PRIVILAGE WHERE BILL_NO = :b AND YEAR = :y',
@@ -582,9 +598,13 @@ test('a full bill is created inside a rolled-back transaction', function () {
     expect($privilege)->not->toBeEmpty()
         ->and((int) ($privilege['SEQ'] ?? $privilege['seq']))->toBeGreaterThan(0);
 
-    // ENTRY_SUB: رقم العميل في كل الأطراف، وبيان فرعي لكل طرف
-    // ENTRY_SUB: the customer number on every line, with a per-side sub-detail.
-    $texts = TailoringPosting::lineTexts((int) $data['manual_bill_no'], (string) $data['cust_name']);
+    // ENTRY_SUB: رقم العميل في كل الأطراف، وبيان فرعي لكل طرف بصياغة القديم
+    // ENTRY_SUB: the customer number on every line, with a per-side legacy sub-detail.
+    $texts = TailoringPosting::lineTexts(
+        (int) $data['manual_bill_no'],
+        (string) $data['cust_name'],
+        (int) $data['pieces_count']
+    );
 
     foreach ($lines as $row) {
         $line = (array) $row;
@@ -602,7 +622,7 @@ test('a full bill is created inside a rolled-back transaction', function () {
     );
 
     expect($fixed[0])->toContain($texts['sale'])
-        ->and($fixed[1])->toContain($texts['sale'])
+        ->and($fixed[1])->toContain($texts['revenue'])
         ->and($fixed[2])->toContain($texts['cash'])
         ->and($fixed[3])->toContain($texts['deposit']);
 
@@ -638,9 +658,10 @@ test('the model type name written to STYLE_NAME is the family label alone', func
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('every entry side carries its own sub-detail wording', function () {
-    $texts = TailoringPosting::lineTexts(15464, 'عميل وهمي للتجارب');
+    $texts = TailoringPosting::lineTexts(15464, 'عميل وهمي للتجارب', 2);
 
-    expect($texts['sale'])->toBe('عليكم فاتورة مبيعات رقم 15464 - عميل وهمي للتجارب')
+    expect($texts['sale'])->toBe('عليكم فاتورة تفصيل رقم 15464 ل عميل وهمي للتجارب عدد 2')
+        ->and($texts['revenue'])->toBe('فاتورة مبيعات رقم 15464 - عميل وهمي للتجارب')
         ->and($texts['cash'])->toBe('واصل من /عميل وهمي للتجارب فاتورة رقم 15464')
         ->and($texts['deposit'])->toBe('واصل من فاتورة رقم 15464 - عميل وهمي للتجارب');
 });

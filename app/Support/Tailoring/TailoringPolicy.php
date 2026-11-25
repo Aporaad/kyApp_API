@@ -43,6 +43,9 @@ final class TailoringPolicy
     /** فئة الفاتورة الافتراضية المعروضة في الواجهة / the default bill kind shown in the UI */
     public const DEFAULT_BILL_KIND = 1;
 
+    /** نص SALES_BILL.AM_PM الثابت كما يكتبه النظام القديم / the fixed AM_PM text the legacy writes */
+    public const AM_PM_TEXT = '1-صباحاً';
+
     /**
      * نوع القيد في ENTRY_TYPE: 6 تفصيل — كما في آخر الفواتير المقيسة
      * The journal entry type: 6 (tailoring) — as measured on the latest bills.

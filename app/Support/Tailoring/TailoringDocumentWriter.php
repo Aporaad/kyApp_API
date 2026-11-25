@@ -20,7 +20,10 @@ use Illuminate\Support\Facades\DB;
  *
  * ── الثوابت المخفية كما يكتبها النظام القديم: CUTTING_OR_SLAES=1، SELECT1=1، STORE_NO=1،
  *    CUR_NO=1، CUR_PRICE=1، ORDSID=1، DIS_RATE/DISCOUNT=0، HANDING_DONE=0، F_CANCEL=0،
- *    QTY للموديل يُترك NULL (العدد الحقيقي من القطع)، وQTY القطعة=1.
+ *    MAIN_BILL=0 صريح، وGIVING_DATE تاريخ حفظ الفاتورة (لا علاقة له بتاريخ المستعجل)،
+ *    CREATED_ON تاريخ بلا وقت TRUNC(SYSDATE) وTHE_TIME فارغ كما في صفوف القديم،
+ *    وSALES_DETAILES بلا OHID كما في القديم، وQTY للموديل يُترك NULL (العدد الحقيقي من
+ *    القطع)، وQTY القطعة=1.
  * ── Hidden constants exactly as the legacy writes them; the model QTY stays NULL (the piece
  *    count is honest), and the piece QTY is 1.
  */
@@ -41,17 +44,17 @@ final class TailoringDocumentWriter
                   CUR_NO, CUR_PRICE, CUR_NO1, CUR_PRICE1, STORE_NO, ENTRY_NO, ACC_NO, ACC_NO1, ACC_NO2,
                   MANUAL_BILL_NO, AMOUNT_PAID, VOUCHER_NO, TRANSFER_THROUGH,
                   FIRST_TRANSFER,
-                  URGENT, GIVING_IN, PERMANENT_CUST, CUST_KNOWN,
+                  URGENT, GIVING_IN, GIVING_DATE, AM_PM, PERMANENT_CUST, CUST_KNOWN, MAIN_BILL,
                   BILLS_KINDS, BRANCH_NO, CUTTING_OR_SLAES, SELECT1, ORDSID,
-                  CREATED_ON, CREATED_BY, CREATED_BY_NAME, THE_TIME)
+                  CREATED_ON, CREATED_BY, CREATED_BY_NAME)
              VALUES (:bill_no, :year, :bill_type, TO_DATE(:dat, \'YYYY-MM-DD\'), :cust_no, :cust_name,
                      :tel_no1, :address, :ref_no, :details, :total, :sanf_nums, 0, 0, :net,
                      1, 1, 1, 1, 1, :entry_no, :acc_no, :acc_no1, :acc_no2,
                      :manual_bill_no, :amount_paid, :voucher_no, :transfer_through,
                      :transfer_no,
-                     :urgent, :giving_in, :permanent_cust, :cust_known,
+                     :urgent, :giving_in, TO_DATE(:giving_date, \'YYYY-MM-DD\'), :am_pm, :permanent_cust, :cust_known, 0,
                      :bills_kinds, :branch_no, 1, 1, 0,
-                     SYSDATE, :created_by, :created_by_name, :the_time)',
+                     TRUNC(SYSDATE), :created_by, :created_by_name)',
             self::bindings($b)
         );
     }
@@ -114,9 +117,11 @@ final class TailoringDocumentWriter
 
     /**
      * إدراج سطر بيانات الفاتورة (SALES_DETAILES) — صف واحد لكل فاتورة كما في النظام
-     * القديم المقيس: صنف 1، السعر متوسط سعر القطعة، والكمية عدد القطع.
+     * القديم المقيس: صنف 1، والسعر = تكلفة الصنف STK_COST كما يكتب القديم (وليس سعر
+     * القطعة)، والكمية عدد القطع، وبلا OHID كما في القديم.
      * Insert the bill's detail row (SALES_DETAILES) — one row per bill as measured on the
-     * legacy rows: item 1, the average piece price, the quantity is the piece count.
+     * legacy rows: item 1, the price is the item's STK_COST (not the piece price), the
+     * quantity is the piece count, and no OHID — as the legacy writes it.
      *
      * @param  array<string, mixed>  $b
      */
@@ -124,8 +129,8 @@ final class TailoringDocumentWriter
     {
         DB::connection('oracle')->insert(
             'INSERT INTO ACCOUNTS.SALES_DETAILES
-                 (BILL_NO, YEAR, SANF_NO, SANF_PRICE, QTY, CAP, PCS, TOTAL, SEQ, IS_LOCAL, STK_COST, OHID)
-             VALUES (:bill_no, :year, 1, :sanf_price, :qty, 1, :pcs, 0, :seq, 1, 0, :ohid)',
+                 (BILL_NO, YEAR, SANF_NO, SANF_PRICE, QTY, CAP, PCS, TOTAL, SEQ, IS_LOCAL, STK_COST)
+             VALUES (:bill_no, :year, 1, :sanf_price, :qty, 1, :pcs, 0, :seq, 1, 0)',
             self::bindings($b)
         );
     }

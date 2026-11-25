@@ -54,14 +54,16 @@ final class TailoringPosting
         $giving = $doc['cust_no'];
         $invoiceNo = (int) $doc['manual_no'];
         $customerName = trim((string) ($doc['cust_name'] ?? ''));
-        $texts = self::lineTexts($invoiceNo, $customerName);
+        $pieces = max(1, (int) ($doc['pieces'] ?? 1));
+        $texts = self::lineTexts($invoiceNo, $customerName, $pieces);
 
         // 1) حساب العميل/العامل مديناً بالإجمالي — GIVING رقم العميل دائماً
         // 1) The party ledger is debited with the total — GIVING is always the customer No.
         self::insertLine($entryNo, (int) $doc['party_account'], $total, $giving, $invoiceNo, $texts['sale']);
 
-        // 2) مبيعات آجلة دائنة بالإجمالي / credit revenue with the total
-        self::insertLine($entryNo, (int) $doc['credit_account'], -$total, $giving, $invoiceNo, $texts['sale']);
+        // 2) مبيعات آجلة دائنة بالإجمالي — بصياغة القديم «فاتورة مبيعات رقم …»
+        // 2) Revenue credited with the total — the legacy wording «فاتورة مبيعات رقم …».
+        self::insertLine($entryNo, (int) $doc['credit_account'], -$total, $giving, $invoiceNo, $texts['revenue']);
 
         // 3 و 4) العربون: الصندوق مدين والعميل دائن به / the deposit: cash debit, party credit
         if ($paid > 0 && $doc['cash_account'] !== null) {
@@ -73,20 +75,24 @@ final class TailoringPosting
     }
 
     /**
-     * نصوص البيان الفرعي لكل طرف — دالة نقية قابلة للاختبار بلا قاعدة:
-     *   العميل/المبيعات: «عليكم فاتورة مبيعات رقم {no} - {name}»
+     * نصوص البيان الفرعي لكل طرف — دالة نقية قابلة للاختبار بلا قاعدة، بصياغة النظام
+     * القديم المقيس من القيد 5260007867 (فاتورة تفصيل رقم 15470):
+     *   العميل مديناً:   «عليكم فاتورة تفصيل رقم {no} ل {name} عدد {pieces}»
+     *   المبيعات دائناً: «فاتورة مبيعات رقم {no} - {name}»
      *   الصندوق/البنك:   «واصل من /{name} فاتورة رقم {no}»
      *   العميل دائناً:   «واصل من فاتورة رقم {no} - {name}»
-     * The per-side sub-detail texts — a pure, database-free function.
+     * The per-side sub-detail texts — a pure, database-free function, in the exact
+     * wording measured on legacy entry 5260007867 (bill 15470).
      *
-     * @return array{sale: string, cash: string, deposit: string}
+     * @return array{sale: string, revenue: string, cash: string, deposit: string}
      */
-    public static function lineTexts(int $invoiceNo, string $customerName): array
+    public static function lineTexts(int $invoiceNo, string $customerName, int $pieces = 1): array
     {
         $name = trim($customerName);
 
         return [
-            'sale' => 'عليكم فاتورة مبيعات رقم '.$invoiceNo.' - '.$name,
+            'sale' => 'عليكم فاتورة تفصيل رقم '.$invoiceNo.' ل '.$name.' عدد '.$pieces,
+            'revenue' => 'فاتورة مبيعات رقم '.$invoiceNo.' - '.$name,
             'cash' => 'واصل من /'.$name.' فاتورة رقم '.$invoiceNo,
             'deposit' => 'واصل من فاتورة رقم '.$invoiceNo.' - '.$name,
         ];
