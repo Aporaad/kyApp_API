@@ -80,7 +80,7 @@ final class TailoringDocumentWriter
                      :beneficiaryname, :notes2, NULL,
                      :button_type, :button_no, :buttons_num,
                      :com_cabak_type, :neck_type, :pocket_or_without, :gabzor_type,
-                     :mobile_pocket, :pen_pocket, NULL, NULL,
+                     :mobile_pocket, :pen_pocket, NULL, :tipper_type,
                      :l1, :l2, :l3, :l4, :l5, :l6, :l7, :l8, :l9, :l10, NULL, NULL,
                      :sanf_no, :sanf_dno, :cloth_type, :shape_gabroz_no)',
             self::bindings($b)
@@ -88,7 +88,10 @@ final class TailoringDocumentWriter
     }
 
     /**
-     * إدراج قطعة واحدة (قماش) — الاستهلاك والتسعير محسوبان من الخادم
+     * إدراج قطعة واحدة (قماش) — الاستهلاك والتسعير محسوبان من الخادم، ورقم الزر
+     * (BUTTONNO) لهذه القطعة وحدها كما يخزنه النظام القديم.
+     * Insert one piece (fabric) — consumption and pricing computed server-side, and the
+     * button number (BUTTONNO) of this piece alone, as the legacy stores it.
      * Insert one piece (fabric) — consumption and pricing computed server-side.
      *
      * @param  array<string, mixed>  $b
@@ -103,14 +106,14 @@ final class TailoringDocumentWriter
                   CONSUMED_CLOTH_QTY_HINSH1, SHARKH, GABZOR_HAND, TATRYZ_IN, TATRYZ_NO,
                   HABNA_DUABL, SANFPRICE, SANF_COST, STK_COST, SHAPE_STYLE_NO, STYLE_NAME,
                   CLOTH_FRM_LOCAL_STORE, SHELF_NO, CLOTHS_OUR_SELECTION, ORDSDID,
-                  CREATED_BY_NAME, F_CANCEL)
+                  BUTTONNO, CREATED_BY_NAME, F_CANCEL)
              VALUES (:seq_no1, :seq_no, :bill_no, :year, :ohid, :ohdid,
                      :sanf_no, :sanf_dno, :prod_no, :cloth_name, :cloth_type, :cloths_color,
                      1, :hinsh, :yards,
                      :hinsh1, :sharkh, :gabzor_hand, :tatryz_in, :tatryz_no,
                      :habna_duabl, :sanfprice, :sanf_cost, :stk_cost, :shape_style_no, :style_name,
                      :cloth_frm_local_store, :shelf_no, NULL, 0,
-                     :created_by_name, 0)',
+                     :button_no, :created_by_name, 0)',
             self::bindings($b)
         );
     }

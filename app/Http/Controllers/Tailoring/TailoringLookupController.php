@@ -223,12 +223,18 @@ class TailoringLookupController extends Controller
     }
 
     /**
-     * مقاسات العميل السابقة — أحدث الموديلات من الجداول الأساسية (قرار D2)
-     * The customer's previous models — newest first, from the base tables (decision D2).
+     * مقاسات العميل السابقة — أحدث الموديلات من الجداول الأساسية (قرار D2)،
+     * و`scope=all` يجلب كل مقاسات النظام لكل العملاء، و`beneficiary` يفلتر باسم المستفيد.
+     * The customer's previous models — newest first, from the base tables (decision D2);
+     * `scope=all` loads every model in the system for all customers, and `beneficiary`
+     * filters by the beneficiary's name.
      */
-    public function previousModels(int $custNo): JsonResponse
+    public function previousModels(int $custNo, Request $request): JsonResponse
     {
-        if ($custNo <= 0) {
+        $scope = (string) $request->query('scope', '');
+        $beneficiary = trim((string) $request->query('beneficiary', ''));
+
+        if ($custNo <= 0 && $scope !== 'all' && $beneficiary === '') {
             return response()->json([
                 'success' => false,
                 'message' => 'رقم العميل غير صالح / Invalid customer number',
@@ -236,8 +242,31 @@ class TailoringLookupController extends Controller
         }
 
         try {
+            $bindings = [
+                'k' => TailoringPolicy::CUTTING_OR_SLAES,
+                'cap' => self::MAX_PREVIOUS_MODELS,
+            ];
+
+            // فلتر العميل يسقط عند scope=all أو فلتر المستفيد الصريح
+            // The customer filter drops for scope=all or an explicit beneficiary filter.
+            $custFilter = '';
+
+            if ($scope !== 'all' && $beneficiary === '') {
+                $custFilter = 'WHERE b.CUST_NO = :cust AND b.CUTTING_OR_SLAES = :k';
+                $bindings['cust'] = $custNo;
+            } else {
+                $custFilter = 'WHERE b.CUTTING_OR_SLAES = :k';
+            }
+
+            if ($beneficiary !== '') {
+                // البحث بالصيغة المحوّلة كما يفرض عقد الترميز C1
+                // Searching the converted form — the C1 encoding contract.
+                $custFilter .= ' AND s.BENEFICIARYNAME = :ben';
+                $bindings['ben'] = ArabicEncoding::toOracleSearchChars($beneficiary);
+            }
+
             $rows = DB::connection('oracle')->select(
-                'SELECT * FROM (
+                "SELECT * FROM (
                     SELECT s.BILL_NO,
                            s.YEAR,
                            s.SEQ_NO,
@@ -245,23 +274,20 @@ class TailoringLookupController extends Controller
                            MAX(s.STYLE_NAME) AS STYLE_NAME,
                            MAX(s.BENEFICIARYNAME) AS BENEFICIARYNAME,
                            MAX(b.MANUAL_BILL_NO) AS MANUAL_BILL_NO,
-                           TO_CHAR(MAX(b.DAT), \'YYYY-MM-DD\') AS DAT_ISO,
+                           MAX(b.CUST_NO) AS CUST_NO,
+                           MAX(b.CUST_NAME) AS CUST_NAME,
+                           TO_CHAR(MAX(b.DAT), 'YYYY-MM-DD') AS DAT_ISO,
                            COUNT(m.SEQ_NO1) AS PIECES
                       FROM ACCOUNTS.SALES_DETAILES_SHAPES s
                       JOIN ACCOUNTS.SALES_BILL b
                         ON b.BILL_NO = s.BILL_NO AND b.YEAR = s.YEAR
                       LEFT JOIN ACCOUNTS.MULTI_CLOTHS m
                         ON m.BILL_NO = s.BILL_NO AND m.YEAR = s.YEAR AND m.SEQ_NO = s.SEQ_NO
-                     WHERE b.CUST_NO = :cust
-                       AND b.CUTTING_OR_SLAES = :k
+                      {$custFilter}
                      GROUP BY s.BILL_NO, s.YEAR, s.SEQ_NO
                      ORDER BY MAX(b.DAT) DESC, s.SEQ_NO DESC
-                 ) WHERE ROWNUM <= :cap',
-                [
-                    'cust' => $custNo,
-                    'k' => TailoringPolicy::CUTTING_OR_SLAES,
-                    'cap' => self::MAX_PREVIOUS_MODELS,
-                ]
+                 ) WHERE ROWNUM <= :cap",
+                $bindings
             );
 
             $items = [];
@@ -276,6 +302,8 @@ class TailoringLookupController extends Controller
                     'shape_style_no' => CuttingViewReader::num($data, 'SHAPE_STYLE_NO'),
                     'type_name' => CuttingViewReader::txt($data, 'STYLE_NAME'),
                     'beneficiary' => CuttingViewReader::txt($data, 'BENEFICIARYNAME'),
+                    'cust_no' => CuttingViewReader::num($data, 'CUST_NO'),
+                    'cust_name' => CuttingViewReader::txt($data, 'CUST_NAME'),
                     'manual_bill_no' => CuttingViewReader::num($data, 'MANUAL_BILL_NO'),
                     'date' => CuttingViewReader::txt($data, 'DAT_ISO'),
                     'pieces_count' => (int) (CuttingViewReader::num($data, 'PIECES') ?? 0),
@@ -286,7 +314,7 @@ class TailoringLookupController extends Controller
                 'success' => true,
                 'message' => 'تم جلب المقاسات السابقة / Previous models retrieved',
                 'data' => $items,
-                'meta' => ['cust_no' => $custNo],
+                'meta' => ['cust_no' => $custNo, 'scope' => $scope],
             ], 200);
         } catch (\Throwable $e) {
             return $this->errorResponse('خطأ في جلب المقاسات السابقة / Failed to retrieve previous models', $e);
@@ -305,7 +333,7 @@ class TailoringLookupController extends Controller
                         s.BENEFICIARYNAME, s.NOTES2,
                         s.BUTTON_TYPE, s.BUTTON_NO, s.BUTTONS_NUM,
                         s.COM_CABAK_TYPE, s.NECK_TYPE, s.POCKET_OR_WITHOUT,
-                        s.GABZOR_TYPE, s.MOBILE_POCKET, s.PEN_POCKET,
+                        s.GABZOR_TYPE, s.MOBILE_POCKET, s.PEN_POCKET, s.TIPPER_TYPE,
                         s.SHAPE_GABROZ_NO,
                         s.L1, s.L2, s.L3, s.L4, s.L5, s.L6, s.L7, s.L8, s.L9, s.L10, s.L11, s.L12,
                         b.CUST_NO
@@ -327,10 +355,12 @@ class TailoringLookupController extends Controller
             }
 
             // الموديل المطلوب يجب أن يعود للعميل المطلوب: مفتاح رباعي لا ثلاثي.
+            // الصفر يعني «بلا عميل محدد» — موديل مختار من «كل المقاسات».
             // The requested model must belong to the requested customer: a four-part key.
+            // Zero means "no specific customer" — a model picked from "all measurements".
             $ownerNo = (int) (CuttingViewReader::num($row, 'CUST_NO') ?? 0);
 
-            if ($ownerNo !== $custNo) {
+            if ($custNo > 0 && $ownerNo !== $custNo) {
                 return response()->json([
                     'success' => false,
                     'message' => 'هذا الموديل لا يعود لهذا العميل / This model does not belong to this customer',
@@ -359,6 +389,7 @@ class TailoringLookupController extends Controller
                         'gabzor_type' => CuttingViewReader::txt($row, 'GABZOR_TYPE'),
                         'mobile_pocket' => CuttingViewReader::txt($row, 'MOBILE_POCKET'),
                         'pen_pocket' => CuttingViewReader::txt($row, 'PEN_POCKET'),
+                        'tipper_type' => CuttingViewReader::txt($row, 'TIPPER_TYPE'),
                     ],
                     'measurements' => CuttingViewReader::measurements($row),
                     'shape_gabroz_no' => CuttingViewReader::num($row, 'SHAPE_GABROZ_NO'),

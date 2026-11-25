@@ -424,7 +424,7 @@ class TailoringCreateController extends Controller
                 'style_name' => TailoringDocumentWriter::clip((string) $model['style_label'], 30),
                 'beneficiaryname' => TailoringDocumentWriter::clip($model['beneficiary'] ?? null, 100),
                 'notes2' => TailoringDocumentWriter::clip($model['notes'] ?? null, 150),
-                'button_type' => TailoringDocumentWriter::clip((string) $model['specs']['button_type'], 30),
+                'button_type' => TailoringDocumentWriter::clip($model['specs']['button_type'] ?? null, 30),
                 'button_no' => TailoringDocumentWriter::clip($model['specs']['button_no'] ?? null, 30),
                 'buttons_num' => isset($model['specs']['buttons_num']) ? (int) $model['specs']['buttons_num'] : null,
                 'com_cabak_type' => TailoringDocumentWriter::clip($model['specs']['com_cabak_type'] ?? null, 30),
@@ -432,6 +432,9 @@ class TailoringCreateController extends Controller
                 'pocket_or_without' => TailoringDocumentWriter::clip($model['specs']['pocket_or_without'] ?? null, 30),
                 'gabzor_type' => TailoringDocumentWriter::clip($model['specs']['gabzor_type'] ?? null, 30),
                 'mobile_pocket' => TailoringDocumentWriter::clip($model['specs']['mobile_pocket'] ?? null, 30),
+                // فئة الخياط: حرفها (A/B/AA/BB) في TIPPER_TYPE كما يخزنه القديم
+                // The tailor grade: its letter (A/B/AA/BB) in TIPPER_TYPE, as the legacy stores it.
+                'tipper_type' => TailoringDocumentWriter::clip((string) ($model['specs']['tipper_type'] ?? '') ?: null, 30),
                 'pen_pocket' => TailoringDocumentWriter::clip($model['specs']['pen_pocket'] ?? null, 30),
                 'l1' => $model['measurements']['L1'],
                 'l2' => $model['measurements']['L2'],
@@ -476,7 +479,9 @@ class TailoringCreateController extends Controller
                     'gabzor_hand' => $piece['gabzor_hand'] ? 1 : 0,
                     'tatryz_in' => $piece['tatryz_in'] ? 1 : 0,
                     'tatryz_no' => $piece['tatryz_no'],
-                    'habna_duabl' => $piece['habna_duabl'] ? 1 : 0,
+                    'habna_duabl' => $piece['habnaDuabl'] ? 1 : 0,
+                    // رقم الزر لهذه القطعة وحدها / this piece's own button number.
+                    'button_no' => $piece['button_no'],
                     'sanfprice' => round((float) $piece['price'], 2),
                     'sanf_cost' => $piece['sanf_cost'] === null ? null : round((float) $piece['sanf_cost'], 2),
                     'stk_cost' => $piece['stk_cost'] === null ? null : round((float) $piece['stk_cost'], 2),
@@ -553,11 +558,14 @@ class TailoringCreateController extends Controller
             'header.details' => 'nullable|string|max:180',
             'models' => 'required|array|min:1|max:'.TailoringPolicy::MAX_MODELS,
             'models.*.shape_style_no' => 'required|integer|min:1|max:12',
+            // «تأجيل الطلبات»: موديل يُحفظ بلا الحقول الإلزامية
+            // "Postpone orders": a model saved without the mandatory fields.
+            'models.*.deferred' => 'nullable|boolean',
             'models.*.beneficiary' => 'nullable|string|max:100',
             'models.*.notes' => 'nullable|string|max:150',
             'models.*.gabzor_hand' => 'nullable|boolean',
-            'models.*.measurements.l1' => 'required|numeric|between:2,70',
-            'models.*.measurements.l5' => 'required|numeric|between:10,31.5',
+            'models.*.measurements.l1' => 'nullable|numeric|between:2,70',
+            'models.*.measurements.l5' => 'nullable|numeric|between:10,31.5',
             'models.*.measurements.l2' => 'nullable|numeric|between:1,23',
             'models.*.measurements.l3' => 'nullable|numeric|between:1,30',
             'models.*.measurements.l4' => 'nullable|numeric|between:1,23',
@@ -567,7 +575,7 @@ class TailoringCreateController extends Controller
             'models.*.measurements.l9' => 'nullable|numeric|between:1,20',
             'models.*.measurements.l10' => 'nullable|numeric|between:1,13',
             'models.*.measurements.*' => 'nullable|numeric|min:0',
-            'models.*.specs.button_type' => 'required|string|max:30',
+            'models.*.specs.button_type' => 'nullable|string|max:30',
             'models.*.specs.button_no' => 'nullable|string|max:30',
             'models.*.specs.buttons_num' => 'nullable|integer|min:0',
             'models.*.specs.com_cabak_type' => 'nullable|string|max:30',
@@ -575,6 +583,7 @@ class TailoringCreateController extends Controller
             'models.*.specs.pocket_or_without' => 'nullable|string|max:30',
             'models.*.specs.gabzor_type' => 'nullable|string|max:30',
             'models.*.specs.mobile_pocket' => 'nullable|string|max:30',
+            'models.*.specs.tipper_type' => 'nullable|string|in:A,B,AA,BB',
             'models.*.specs.pen_pocket' => 'nullable|string|max:30',
             'models.*.pieces' => 'required|array|min:1',
             'models.*.pieces.*.sanf_no' => 'required|integer|min:1',
@@ -585,6 +594,7 @@ class TailoringCreateController extends Controller
                 }
             }],
             'models.*.pieces.*.price' => 'required|numeric|gt:0',
+            'models.*.pieces.*.button_no' => 'nullable|integer|min:0',
             'models.*.pieces.*.from_store' => 'nullable|integer|in:1,2',
             'models.*.pieces.*.gabzor_hand' => 'nullable|boolean',
             'models.*.pieces.*.tatryz_in' => 'nullable|boolean',
@@ -711,11 +721,37 @@ class TailoringCreateController extends Controller
 
         foreach ($data['models'] as $model) {
             $family = (int) $model['shape_style_no'];
-            $l1 = (float) $model['measurements']['l1'];
-            $l5 = (float) $model['measurements']['l5'];
+            $deferred = (bool) ($model['deferred'] ?? false);
+            $l1Raw = $model['measurements']['l1'] ?? null;
+            $l5Raw = $model['measurements']['l5'] ?? null;
+
+            // الطول والعرض ونوع الأزرار إلزامية إلا في الموديل المؤجَّل
+            // Length, width and the button type are mandatory unless the model is deferred.
+            if (! $deferred && ($l1Raw === null || $l5Raw === null)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'الطول والعرض إلزاميان — أو فعّل «تأجيل الطلبات» للموديل'
+                        .' / Length and width are required — or defer the model',
+                    'errors' => ['models.*.measurements.l1' => 'required unless deferred'],
+                ], 422);
+            }
+
+            if (! $deferred && trim((string) ($model['specs']['button_type'] ?? '')) === '') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'نوع الأزرار إلزامي — أو فعّل «تأجيل الطلبات» للموديل'
+                        .' / The button type is required — or defer the model',
+                    'errors' => ['models.*.specs.button_type' => 'required unless deferred'],
+                ], 422);
+            }
 
             $itemTypeNo = 300 + $family;
             $consumptionTypeNo = TailoringPolicy::consumptionTypeNo($family);
+            // الموديل المؤجَّل بلا طول يستخدم الطول الافتراضي لحل الصنف فقط
+            // A deferred model without a length uses the fallback for item resolution only.
+            $l1 = $l1Raw === null ? TailoringPolicy::DEFERRED_L1 : (float) $l1Raw;
+            $l5 = $l5Raw === null ? TailoringPolicy::DEFERRED_L5 : (float) $l5Raw;
+            $hasMeasurements = $l1Raw !== null && $l5Raw !== null;
             $stylNo = $itemTypeNo * 100 + TailoringPolicy::sizeBand($l1);
 
             // صنف النمط يجب أن يكون موجوداً — لا اختراع أصناف أنماط
@@ -744,7 +780,11 @@ class TailoringCreateController extends Controller
 
             // صنف المقاس: حل ثم إنشاء تلقائي بقالب النظام القديم (القرار المعتمد)
             // The size item: resolve then auto-create with the legacy template (approved).
-            $sizeItem = TailoringModelItemResolver::resolveSizeItem($styleItem, $l1, $l5);
+            // بلا مقاسات لا يُنشأ صنف مقاس جديد — صنف قائم إن وُجد وإلا صنف النمط نفسه
+            // Without measurements no new size item is created — an existing one, else the style item.
+            $sizeItem = $hasMeasurements
+                ? TailoringModelItemResolver::resolveSizeItem($styleItem, $l1, $l5)
+                : ['sanf_dno' => TailoringModelItemResolver::findSizeItem((int) $styleItem['sanf_no'], $l1, $l5) ?? (int) $styleItem['sanf_no'], 'created' => false];
 
             // مجموعات المواصفات للاستهلاك — تُقرأ لا تُخمَّن
             // The spec groups for consumption — read, never guessed.
@@ -797,7 +837,9 @@ class TailoringCreateController extends Controller
 
                 // الاستهلاك يعاد حسابه من الخادم — قيم الواجهة لا تُؤخذ
                 // Consumption is recomputed server-side — UI values are not taken.
-                $consumption = ClothConsumption::calculate([
+                // الموديل المؤجَّل بلا مقاسات: لا استهلاك ولا اقتباس سعر آلي
+                // A deferred model without measurements: no consumption, no automatic quote.
+                $consumption = $hasMeasurements ? ClothConsumption::calculate([
                     'typeno' => $consumptionTypeNo,
                     'cloth_type' => (string) $piece['cloth_type'],
                     'l1' => $l1,
@@ -808,7 +850,7 @@ class TailoringCreateController extends Controller
                     'pro_group2' => $proGroup2,
                     'pro_group4' => $proGroup4,
                     'qty' => 1,
-                ]);
+                ]) : ['hinsh' => null, 'yards' => null, 'hinsh1' => null, 'sharkh' => null];
 
                 // التسعير المرجعي من الخادم (يُخزن للإثراء، والسعر النهائي من المستخدم)
                 // The reference pricing server-side (stored for enrichment; the final price is the user's).
@@ -821,6 +863,7 @@ class TailoringCreateController extends Controller
 
                 $price = round((float) $piece['price'], 2);
                 $total += $price;
+                $buttonNo = isset($piece['button_no']) ? (int) $piece['button_no'] : null;
                 $piecesCount++;
 
                 $preparedPieces[] = [
@@ -834,6 +877,7 @@ class TailoringCreateController extends Controller
                     'tatryz_in' => (bool) ($piece['tatryz_in'] ?? false),
                     'tatryz_no' => isset($piece['tatryz_no']) ? (int) $piece['tatryz_no'] : null,
                     'habna_duabl' => (bool) ($piece['habna_duabl'] ?? false),
+                    'button_no' => $buttonNo,
                     'hinsh' => $consumption['hinsh'],
                     'yards' => $consumption['yards'] === null ? null : round((float) $consumption['yards'], 2),
                     'hinsh1' => $consumption['hinsh1'],

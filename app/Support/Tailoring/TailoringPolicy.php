@@ -47,6 +47,17 @@ final class TailoringPolicy
     public const AM_PM_TEXT = '1-صباحاً';
 
     /**
+     * طول وعرض الافتراضيان لحل صنف النمط في الموديل المؤجَّل بلا مقاسات — للحل فقط،
+     * ولا يُكتبان في عمودي L1/L5 (يبقيان فارغين كما في صفوف القديم الناقصة).
+     * The fallback length and width for resolving the style item of a deferred model
+     * without measurements — resolution only; L1/L5 stay empty like the legacy's gaps.
+     */
+    public const DEFERRED_L1 = 50.0;
+
+    /** @see DEFERRED_L1 */
+    public const DEFERRED_L5 = 23.0;
+
+    /**
      * نوع القيد في ENTRY_TYPE: 6 تفصيل — كما في آخر الفواتير المقيسة
      * The journal entry type: 6 (tailoring) — as measured on the latest bills.
      */
