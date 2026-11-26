@@ -1121,14 +1121,15 @@ class TailoringController extends Controller
      */
     private function paymentPayload(array $billRow, array $headerRow): array
     {
-        // قرار صاحب المؤسسة: تُعرض ثلاثة حقول فقط — الإجمالي، العربون، المتبقي.
+        // قرار صاحب المؤسسة: ثلاثة حقول مالية فقط — الإجمالي، العربون، المتبقي — مع رقم القيد.
         // العربون = المبلغ المدفوع (AMOUNT_PAID) وحده بلا مدفوعات أخرى، والمتبقي = الإجمالي −
         // العربون فقط، بلا خصم ولا صافي ولا حسابات أخرى.
-        // The owner's call: show three fields only — total, deposit, remaining. The deposit is
-        // AMOUNT_PAID alone (no other payments); remaining = total − deposit, with no discount,
-        // no net and no other maths.
+        // The owner's call: three money fields only — total, deposit, remaining — plus the entry no.
+        // The deposit is AMOUNT_PAID alone (no other payments); remaining = total − deposit, with
+        // no discount, no net and no other maths.
         $total = $this->lower($billRow, 'TOTAL') ?? $this->num($headerRow, 'TOTAL');
         $paid = $this->lower($billRow, 'AMOUNT_PAID');
+        $entryNo = $this->num($billRow, 'ENTRY_NO');
 
         $totalValue = (float) ($total ?? 0);
         $paidValue = (float) ($paid ?? 0);
@@ -1146,6 +1147,9 @@ class TailoringController extends Controller
             'is_giving' => $this->lower($billRow, 'IS_GIVING'),
             'giving_date' => $this->txt($headerRow, 'GIVING_DATE_TXT'),
             'payment_method' => $this->lower($billRow, 'PAYMENT_METHOD'),
+            // رقم القيد المحاسبي المرتبط بالفاتورة، وليس رقم السند أو من أخذ المقاسات.
+            // The bill's accounting entry number, never the voucher or measurement-taker number.
+            'entry_no' => $entryNo === null ? null : (int) $entryNo,
             'voucher_no' => $this->lower($billRow, 'VOUCHER_NO'),
             'currency_no' => $this->lower($billRow, 'CUR_NO'),
             'currency_price' => $this->lower($billRow, 'CUR_PRICE'),

@@ -242,7 +242,18 @@ test('payment shows total, deposit and remaining = total minus deposit only', fu
     $paid = (float) ($payment['paid'] ?? 0);
     $remaining = (float) ($payment['remaining'] ?? 0);
 
+    $billRow = DB::connection('oracle')->selectOne(
+        'SELECT ENTRY_NO FROM ACCOUNTS.SALES_BILL WHERE BILL_NO = :bill_no AND YEAR = :year',
+        ['bill_no' => $page[0]['bill_no'], 'year' => $page[0]['year']]
+    );
+    $bill = array_change_key_case((array) $billRow, CASE_UPPER);
+    $expectedEntryNo = isset($bill['ENTRY_NO']) ? (int) $bill['ENTRY_NO'] : null;
+
     expect($remaining)->toBe($total - $paid)
+        // رقم القيد يأتي من SALES_BILL.ENTRY_NO نفسه، لا من رقم السند.
+        // The entry number comes from SALES_BILL.ENTRY_NO itself, never the voucher number.
+        ->and($payment)->toHaveKey('entry_no')
+        ->and($payment['entry_no'])->toBe($expectedEntryNo)
         // لا خصم ولا صافي ولا مدفوعات أخرى في الحمولة الجديدة
         // No discount, net or other payments in the new payload.
         ->and($payment)->not->toHaveKey('discount')
