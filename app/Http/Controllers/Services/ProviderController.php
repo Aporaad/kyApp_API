@@ -735,8 +735,12 @@ class ProviderController extends ServiceBaseController
 
         if ($creating) {
             $data['STATUS'] = (int) ($request->input('status') ?? 1);
-            $data['USER_NAME'] = $request->filled('user_name') ? trim((string) $request->input('user_name')) : null;
-            $data['PASSWORD'] = $request->filled('password') ? trim((string) $request->input('password')) : null;
+            $data['USER_NAME'] = $request->filled('user_name')
+                ? ArabicEncoding::toOracleSearchChars(trim((string) $request->input('user_name')))
+                : null;
+            $data['PASSWORD'] = $request->filled('password')
+                ? ArabicEncoding::toOracleSearchChars(trim((string) $request->input('password')))
+                : null;
         } else {
             if ($request->has('status')) {
                 $data['STATUS'] = (int) $request->input('status');
@@ -744,7 +748,12 @@ class ProviderController extends ServiceBaseController
             foreach (['user_name' => 'USER_NAME', 'password' => 'PASSWORD'] as $key => $column) {
                 $value = $request->input($key);
                 if ($value !== null && $value !== '' && $value !== '***') {
-                    $data[$column] = trim((string) $value);
+                    // الأسرار تمرّ على مُرمِّز أوراكل مثل أي نص آخر: الكتابة الخام لمستخدم/كلمة سر
+                    // عربية تخزّن `¿` لأن الجدول WE8MSWIN1252 (والـASCII لا يتغيّر).
+                    // Secrets go through the Oracle encoder like any other text: raw binding of an
+                    // Arabic user/password stores `¿` because the column is WE8MS1252 (ASCII is
+                    // unchanged by the encoder).
+                    $data[$column] = ArabicEncoding::toOracleSearchChars(trim((string) $value));
                 }
             }
             $data['UPDATED_BY'] = $actor;
@@ -789,7 +798,9 @@ class ProviderController extends ServiceBaseController
         foreach (['user_name' => 'USER_NAME', 'password' => 'PASSWORD', 'token' => 'TOKEN'] as $key => $column) {
             $value = $request->input($key);
             if ($value !== null && $value !== '' && $value !== '***') {
-                $data[$column] = trim((string) $value);
+                // نفس قاعدة النص: مُرمِّز أوراكل قبل الربط، وإلا صار السرّ غير المعرّف في الجدول `¿`
+                // Same text rule: encode before binding, otherwise a non-ASCII secret lands as `¿`.
+                $data[$column] = ArabicEncoding::toOracleSearchChars(trim((string) $value));
             }
         }
 

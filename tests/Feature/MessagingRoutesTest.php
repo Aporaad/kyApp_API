@@ -192,6 +192,24 @@ test('the list sorts and filters by the send/update date as well as the creation
         ->assertJsonPath('success', true);
 });
 
+test('the tab counts follow the advanced filters, not the tab', function () {
+    Sanctum::actingAs(messagingAdminUser(), ['*']);
+
+    $all = $this->getJson('/api/whatsapp/messages?limit=1')->json('meta.counts');
+    $none = $this->getJson('/api/whatsapp/messages?updated_from=2030-01-01&limit=1')->json('meta.counts');
+
+    expect($all['all'])->toBeGreaterThan(0)
+        ->and($none['all'])->toBe(0)
+        ->and($none['sent'])->toBe(0)
+        ->and($none['pending'])->toBe(0);
+
+    // العدّادات لا تتغيّر بتبديل التبويبة: نفس الأرقام مع status=sent
+    // The counts do not depend on the selected tab: identical numbers with status=sent.
+    $withTab = $this->getJson('/api/whatsapp/messages?status=sent&updated_from=2030-01-01&limit=1')->json('meta.counts');
+
+    expect($withTab)->toBe($none);
+});
+
 test('the queue id is the highest sequence across queue and archive, plus one', function () {
     // القاعدة المطلوبة صراحةً: أكبر رقم في جدولي الطابور والأرشيف + 1، لكل قناة على حدة.
     // The explicitly required rule: the highest id across queue *and* archive, + 1, per channel.
