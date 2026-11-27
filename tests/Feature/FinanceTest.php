@@ -39,8 +39,10 @@ function financeUngrantedUser(): User
 }
 
 test('the finance permissions are part of the catalog', function () {
-    // 240 = 217 + 23 للمشتريات (22 فعلاً + صف منح عام) / 240 = 217 plus 23 purchases rows
-    expect(PermissionCatalog::count())->toBe(240);
+    // 285 = كتالوج كامل محدث: 217 + المشتريات + خط الإنتاج + الصلاحية الجديدة
+    // tailoring.cash_boxes_view / the full current catalog: 217 + purchases +
+    // production line + the new tailoring.cash_boxes_view grant.
+    expect(PermissionCatalog::count())->toBe(285);
 
     foreach ([
         'journal.view', 'journal.create', 'journal.update', 'journal.delete', 'journal.closing_create',

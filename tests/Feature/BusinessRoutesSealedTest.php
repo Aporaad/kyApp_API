@@ -190,8 +190,10 @@ test('an ungranted caller is refused per module with the named permission', func
         ['get', '/api/workers/cutters/1/statement', 'cutters.statement_financial'],
         ['get', '/api/workers/cutters/1/work-report', 'cutters.statement_work'],
         ['get', '/api/workers/tailors/1/work-report', 'tailors.statement_work'],
-        ['get', '/api/workers/cutters/group-work-report', 'cutters.group_work_report'],
-        ['get', '/api/workers/tailors/group-work-report', 'tailors.group_work_report'],
+        // احتساب الأجور (wages.view) يعرض الكشف نفسه — فالبوابة تحمل الصلاحيتين معاً
+        // Wage calculation reuses this report — the guard carries both grants.
+        ['get', '/api/workers/cutters/group-work-report', ['cutters.group_work_report', 'wages.view']],
+        ['get', '/api/workers/tailors/group-work-report', ['tailors.group_work_report', 'wages.view']],
         ['patch', '/api/workers/tailors/1/toggle', 'tailors.toggle'],
         ['get', '/api/accounts/tree', [
             'accounts.view',
@@ -208,7 +210,7 @@ test('an ungranted caller is refused per module with the named permission', func
         ['get', '/api/tailoring/bills', 'tailoring.view'],
         ['get', '/api/tailoring/bills/1/2026', 'tailoring.view'],
         ['get', '/api/tailoring/bills/1/2026/movements?seq_nos=1', 'tailoring.view'],
-        ['get', '/api/tailoring/reference', ['tailoring.view', 'tailoring.create']],
+        ['get', '/api/tailoring/reference', ['tailoring.view', 'tailoring.create', 'tailoring.update']],
         ['post', '/api/tailoring/bills/1/2026/activity', ['tailoring.print', 'tailoring.export']],
         ['get', '/api/my-statement/financial', 'my_statement.financial'],
         ['get', '/api/my-statement/work', 'my_statement.work'],
