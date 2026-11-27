@@ -249,7 +249,7 @@ class TailoringCreateController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
-        $payload = $this->writePayload($request);
+        $payload = $this->prepareWritePayload($request, true);
 
         if ($payload instanceof JsonResponse) {
             return $payload;
@@ -269,10 +269,10 @@ class TailoringCreateController extends Controller
                     .' — عميل '.$result['cust_name'].' إجمالي '.$result['total'].' عدد '.$result['pieces_count'],
             ]);
 
-            if ($payload['customer_created'] === true) {
+            if ($result['customer_created'] === true) {
                 $this->logActivity($request, 'tailoring.customer_created', [
                     'entity_type' => 'customer',
-                    'entity_id' => (string) $payload['customer']['cust_no'],
+                    'entity_id' => (string) $result['cust_no'],
                     'description_ar' => 'إنشاء عميل جديد من فاتورة التفصيل: '.$result['cust_name'],
                 ]);
             }
@@ -303,13 +303,17 @@ class TailoringCreateController extends Controller
      */
     private function createBill(array $payload, Request $request): array
     {
+        $this->materializePreparedPayload($payload);
+
         $customer = $payload['customer'];
         $header = $payload['header'];
         $finance = $payload['finance'];
 
-        $year = TailoringPolicy::dbYear();
+        $year = (int) substr((string) $payload['date'], 0, 4);
         $billNo = TailoringNumbering::nextBillNo($year);
-        $manualNo = TailoringNumbering::nextManualNo($year);
+        $manualNo = ! empty($payload['manual_no'])
+            ? (int) $payload['manual_no']
+            : TailoringNumbering::nextManualNo($year);
 
         $total = round((float) $payload['total'], 2);
         $paid = round((float) $finance['paid'], 2);
@@ -324,7 +328,7 @@ class TailoringCreateController extends Controller
         // 1) القيد أولاً — ENTRY_NO مفتاح أجنبي غير فارغ على الرأس
         // 1) The entry first — ENTRY_NO is a NOT NULL foreign key on the header.
         $entryNo = TailoringPosting::postBill([
-            'date' => TailoringPolicy::dbYear().'-'.date('m-d'),
+            'date' => (string) $payload['date'],
             'manual_no' => $manualNo,
             'cust_no' => $customer['cust_no'],
             'total' => $total,
@@ -479,7 +483,7 @@ class TailoringCreateController extends Controller
                     'gabzor_hand' => $piece['gabzor_hand'] ? 1 : 0,
                     'tatryz_in' => $piece['tatryz_in'] ? 1 : 0,
                     'tatryz_no' => $piece['tatryz_no'],
-                    'habna_duabl' => $piece['habnaDuabl'] ? 1 : 0,
+                    'habna_duabl' => $piece['habna_duabl'] ? 1 : 0,
                     // رقم الزر لهذه القطعة وحدها / this piece's own button number.
                     'button_no' => $piece['button_no'],
                     'sanfprice' => round((float) $piece['price'], 2),
@@ -540,7 +544,7 @@ class TailoringCreateController extends Controller
      *
      * @return array<string, mixed>|JsonResponse
      */
-    private function writePayload(Request $request)
+    public function prepareWritePayload(Request $request, bool $deferCreation = false, bool $forEdit = false)
     {
         $validator = Validator::make($request->all(), [
             'customer.mode' => 'required|in:existing,new',
@@ -550,13 +554,18 @@ class TailoringCreateController extends Controller
             'customer.address' => 'nullable|string|max:120',
             'customer.worker_type' => 'nullable|in:employee,cutter,tailor',
             'customer.worker_no' => 'nullable|integer|min:1',
-            'header.bill_kind' => 'required|integer|in:1',
+            'header.bill_kind' => $forEdit ? 'required|integer|in:1,2,3,4' : 'required|integer|in:1',
+            'header.manual_bill_no' => $forEdit ? 'nullable|integer|min:1' : 'nullable',
+            'header.date' => $forEdit ? 'nullable|date_format:Y-m-d' : 'nullable',
             'header.ref_no' => 'nullable|string|max:20',
             'header.permanent_cust' => 'nullable|boolean',
             'header.urgent' => 'nullable|boolean',
             'header.giving_note' => 'nullable|string|max:100',
             'header.details' => 'nullable|string|max:180',
-            'models' => 'required|array|min:1|max:'.TailoringPolicy::MAX_MODELS,
+            'models' => $forEdit
+                ? 'present|array|max:'.TailoringPolicy::MAX_MODELS
+                : 'required|array|min:1|max:'.TailoringPolicy::MAX_MODELS,
+            'models.*.seq_no' => $forEdit ? 'nullable|integer|min:1' : 'nullable',
             'models.*.shape_style_no' => 'required|integer|min:1|max:12',
             // «تأجيل الطلبات»: موديل يُحفظ بلا الحقول الإلزامية
             // "Postpone orders": a model saved without the mandatory fields.
@@ -582,10 +591,14 @@ class TailoringCreateController extends Controller
             'models.*.specs.neck_type' => 'nullable|string|max:30',
             'models.*.specs.pocket_or_without' => 'nullable|string|max:30',
             'models.*.specs.gabzor_type' => 'nullable|string|max:30',
+            'models.*.specs.hegazi_type' => 'nullable|string|max:30',
             'models.*.specs.mobile_pocket' => 'nullable|string|max:30',
-            'models.*.specs.tipper_type' => 'nullable|string|in:A,B,AA,BB',
+            'models.*.specs.tipper_type' => $forEdit ? 'nullable|string|max:30' : 'nullable|string|in:A,B,AA,BB',
             'models.*.specs.pen_pocket' => 'nullable|string|max:30',
-            'models.*.pieces' => 'required|array|min:1',
+            'models.*.pieces' => $forEdit
+                ? 'present|array|max:'.TailoringPolicy::MAX_PIECES
+                : 'required|array|min:1',
+            'models.*.pieces.*.seq_no1' => $forEdit ? 'nullable|integer|min:1' : 'nullable',
             'models.*.pieces.*.sanf_no' => 'required|integer|min:1',
             'models.*.pieces.*.sanf_dno' => 'required|integer|min:1',
             'models.*.pieces.*.cloth_type' => ['required', 'string', function (string $attribute, mixed $value, \Closure $fail): void {
@@ -602,8 +615,19 @@ class TailoringCreateController extends Controller
             'models.*.pieces.*.habna_duabl' => 'nullable|boolean',
             'finance.paid' => 'required|numeric|min:0',
             'finance.cust_known' => 'nullable|boolean',
+            'finance.acc_no' => $forEdit ? 'nullable|integer|min:1' : 'nullable',
+            'finance.total' => $forEdit ? 'nullable|numeric|min:0' : 'nullable',
             'finance.credit_account' => 'required|integer|min:1',
             'finance.cash_account' => 'nullable|integer|min:1',
+            'finance.discount' => $forEdit ? 'nullable|numeric|min:0' : 'nullable',
+            'finance.discount_rate' => $forEdit ? 'nullable|numeric|min:0|max:100' : 'nullable',
+            'finance.line_discount' => $forEdit ? 'nullable|numeric|min:0' : 'nullable',
+            'finance.cur_no' => $forEdit ? 'nullable|integer|min:1' : 'nullable',
+            'finance.cur_price' => $forEdit ? 'nullable|numeric|gt:0' : 'nullable',
+            'finance.cur_no1' => $forEdit ? 'nullable|integer|min:1' : 'nullable',
+            'finance.cur_price1' => $forEdit ? 'nullable|numeric|gt:0' : 'nullable',
+            'finance.select1' => $forEdit ? 'nullable|integer|in:1,2' : 'nullable',
+            'finance.transfer_through' => $forEdit ? 'nullable|string|max:30' : 'nullable',
             // رقم الحوالة البنكية يُكتب في FIRST_TRANSFER و«اخذ المقاسات» في VOUCHER_NO
             // The bank transfer number writes FIRST_TRANSFER; "taken measurements" writes
             // VOUCHER_NO.
@@ -622,7 +646,7 @@ class TailoringCreateController extends Controller
         $data = $validator->validated();
 
         // ── العميل ── / ── The customer ──
-        $customerResult = $this->resolveCustomer($request, $data['customer']);
+        $customerResult = $this->resolveCustomer($request, $data['customer'], $deferCreation, $forEdit);
 
         if ($customerResult instanceof JsonResponse) {
             return $customerResult;
@@ -658,13 +682,30 @@ class TailoringCreateController extends Controller
             $partyAccount = (int) $worker['acc_no'];
         }
 
+        // في التعديل يمكن تجاوز حساب الطرف صراحة مع بقاء ربط العامل مرئياً.
+        // An edit may explicitly override the party ledger while retaining the worker link.
+        if ($forEdit && isset($data['finance']['acc_no'])) {
+            $partyAccount = (int) $data['finance']['acc_no'];
+            $partyExists = (array) DB::connection('oracle')->selectOne(
+                'SELECT ACC_NO FROM ACCOUNTS.CHART_ACC WHERE ACC_NO = :no',
+                ['no' => $partyAccount]
+            );
+            if ($partyExists === []) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'حساب الطرف غير موجود / The party account does not exist',
+                    'errors' => ['finance.acc_no' => 'unknown account'],
+                ], 422);
+            }
+        }
+
         // ── المال ── / ── The money ──
         $finance = $data['finance'];
         $paid = (float) $finance['paid'];
         $custKnown = (bool) ($finance['cust_known'] ?? false);
         $workerLinked = ($data['customer']['worker_type'] ?? null) !== null;
 
-        if ($paid === 0.0 && ! $custKnown && ! $workerLinked) {
+        if (! $forEdit && $paid === 0.0 && ! $custKnown && ! $workerLinked) {
             return response()->json([
                 'success' => false,
                 'message' => 'العربون صفر يتطلب عميلاً معروفاً أو ربطاً بجاري العاملين'
@@ -782,9 +823,10 @@ class TailoringCreateController extends Controller
             // The size item: resolve then auto-create with the legacy template (approved).
             // بلا مقاسات لا يُنشأ صنف مقاس جديد — صنف قائم إن وُجد وإلا صنف النمط نفسه
             // Without measurements no new size item is created — an existing one, else the style item.
-            $sizeItem = $hasMeasurements
+            $existingSizeItem = TailoringModelItemResolver::findSizeItem((int) $styleItem['sanf_no'], $l1, $l5);
+            $sizeItem = $hasMeasurements && ! $deferCreation && $existingSizeItem === null
                 ? TailoringModelItemResolver::resolveSizeItem($styleItem, $l1, $l5)
-                : ['sanf_dno' => TailoringModelItemResolver::findSizeItem((int) $styleItem['sanf_no'], $l1, $l5) ?? (int) $styleItem['sanf_no'], 'created' => false];
+                : ['sanf_dno' => $existingSizeItem ?? ($hasMeasurements ? 0 : (int) $styleItem['sanf_no']), 'created' => false];
 
             // مجموعات المواصفات للاستهلاك — تُقرأ لا تُخمَّن
             // The spec groups for consumption — read, never guessed.
@@ -867,6 +909,7 @@ class TailoringCreateController extends Controller
                 $piecesCount++;
 
                 $preparedPieces[] = [
+                    'seq_no1' => isset($piece['seq_no1']) ? (int) $piece['seq_no1'] : null,
                     'sanf_no' => $sanfNo,
                     'sanf_dno' => $sanfDno,
                     'cloth_name' => $this->pick($variant, 'SANF_DNAME') ?? $this->pick($fabric, 'SANF_NAME') ?? '',
@@ -890,6 +933,7 @@ class TailoringCreateController extends Controller
             }
 
             $preparedModels[] = [
+                'seq_no' => isset($model['seq_no']) ? (int) $model['seq_no'] : null,
                 'family' => $family,
                 'styl_no' => $stylNo,
                 // اسم النوع وحده («قطري») لا وصف الشريحة الحجمية («قطري رجالي من 50 الى 70»)
@@ -906,9 +950,47 @@ class TailoringCreateController extends Controller
                     'sanf_no' => (int) $styleItem['sanf_no'],
                     'sanf_dno' => (int) $sizeItem['sanf_dno'],
                 ],
+                'size_item_pending' => (int) $sizeItem['sanf_dno'] === 0 ? [
+                    'style_item' => $styleItem,
+                    'l1' => $l1,
+                    'l5' => $l5,
+                ] : null,
                 'pieces' => $preparedPieces,
             ];
         }
+
+        $gross = round($total, 2);
+        $lineDiscount = $forEdit ? round((float) ($data['finance']['line_discount'] ?? 0), 2) : 0.0;
+        $headerDiscount = $forEdit ? round((float) ($data['finance']['discount'] ?? 0), 2) : 0.0;
+
+        if ($forEdit && ! isset($data['finance']['discount']) && isset($data['finance']['discount_rate'])) {
+            $headerDiscount = round($gross * (float) $data['finance']['discount_rate'] / 100, 2);
+        }
+        $requestedTotal = $forEdit && isset($data['finance']['total'])
+            ? round((float) $data['finance']['total'], 2)
+            : null;
+        if ($requestedTotal !== null) {
+            if ($gross > 0 && $requestedTotal > $gross - $lineDiscount + 0.01) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'الإجمالي النهائي يتجاوز إجمالي الأقمشة بعد الخصم / Final total exceeds gross less line discount',
+                    'errors' => ['finance.total' => 'total exceeds gross less line discount'],
+                ], 422);
+            }
+            $headerDiscount = $gross > 0
+                ? round(max(0, $gross - $lineDiscount - $requestedTotal), 2)
+                : 0.0;
+        }
+
+        if ($lineDiscount + $headerDiscount > $gross) {
+            return response()->json([
+                'success' => false,
+                'message' => 'الخصم أكبر من إجمالي الفاتورة / The discount exceeds the invoice total',
+                'errors' => ['finance.discount' => 'discount exceeds gross total'],
+            ], 422);
+        }
+
+        $total = round($gross - $lineDiscount - $headerDiscount, 2);
 
         if ($piecesCount > TailoringPolicy::MAX_PIECES) {
             return response()->json([
@@ -955,6 +1037,8 @@ class TailoringCreateController extends Controller
             'party_account' => $partyAccount,
             'header' => [
                 'bill_kind' => (int) $header['bill_kind'],
+                'date' => $header['date'] ?? null,
+                'manual_bill_no' => $header['manual_bill_no'] ?? null,
                 'ref_no' => $header['ref_no'] ?? null,
                 'permanent_cust' => (bool) ($header['permanent_cust'] ?? false),
                 'urgent' => $urgent,
@@ -969,8 +1053,11 @@ class TailoringCreateController extends Controller
             'finance' => [
                 'paid' => $paid,
                 'cust_known' => $custKnown,
+                'acc_no' => $partyAccount,
                 'credit_account' => (int) $finance['credit_account'],
+                'acc_no1' => (int) $finance['credit_account'],
                 'cash_account' => isset($finance['cash_account']) ? (int) $finance['cash_account'] : null,
+                'acc_no2' => isset($finance['cash_account']) ? (int) $finance['cash_account'] : null,
                 // رقم الحوالة البنكية يُكتب في SALES_BILL.FIRST_TRANSFER
                 // The bank transfer number writes SALES_BILL.FIRST_TRANSFER.
                 'transfer_no' => isset($finance['transfer_no'])
@@ -978,11 +1065,29 @@ class TailoringCreateController extends Controller
                     : null,
                 'voucher_no' => $finance['voucher_no'] ?? null,
                 'transfer_through' => $finance['transfer_through'] ?? null,
+                'discount' => $headerDiscount,
+                'discount_rate' => $forEdit
+                    ? ($requestedTotal !== null
+                        ? ($gross > 0 ? round($headerDiscount / $gross * 100, 2) : 0.0)
+                        : (float) ($data['finance']['discount_rate'] ?? 0))
+                    : 0.0,
+                'line_discount' => $lineDiscount,
+                'cur_no' => $forEdit ? (int) ($data['finance']['cur_no'] ?? 1) : 1,
+                'cur_price' => $forEdit ? (float) ($data['finance']['cur_price'] ?? 1) : 1.0,
+                'cur_no1' => $forEdit ? (int) ($data['finance']['cur_no1'] ?? 1) : 1,
+                'cur_price1' => $forEdit ? (float) ($data['finance']['cur_price1'] ?? 1) : 1.0,
+                'select1' => $forEdit ? (int) ($data['finance']['select1'] ?? 1) : 1,
+                'gross' => $gross,
+                'total' => round($total, 2),
+                'net' => round($total - $paid, 2),
+                'remaining' => round($total - $paid, 2),
             ],
             'models' => $preparedModels,
+            'gross' => $gross,
             'total' => round($total, 2),
             'pieces_count' => $piecesCount,
-            'date' => TailoringPolicy::dbYear().'-'.date('m-d'),
+            'date' => $forEdit && ! empty($header['date']) ? (string) $header['date'] : TailoringPolicy::dbYear().'-'.date('m-d'),
+            'manual_no' => $forEdit && ! empty($header['manual_bill_no']) ? (int) $header['manual_bill_no'] : null,
             'branch_no' => 1,
             'created_by' => $createdBy,
             'created_by_name' => $user?->USER_NAME_AR ?? null,
@@ -996,7 +1101,34 @@ class TailoringCreateController extends Controller
      * @param  array<string, mixed>  $input
      * @return array{customer: array<string, mixed>, created: bool}|JsonResponse
      */
-    private function resolveCustomer(Request $request, array $input)
+    public function materializePreparedPayload(array &$payload): void
+    {
+        if (($payload['customer']['mode'] ?? null) === 'new' && empty($payload['customer']['cust_no'])) {
+            $payload['customer'] = TailoringCustomerResolver::create(
+                (string) $payload['customer']['name'],
+                $payload['customer']['phone'] ?? null,
+                null,
+                $payload['customer']['address'] ?? null
+            );
+            $payload['customer_created'] = true;
+        }
+
+        foreach ($payload['models'] as &$model) {
+            if (! empty($model['size_item_pending'])) {
+                $pending = $model['size_item_pending'];
+                $resolved = TailoringModelItemResolver::resolveSizeItem(
+                    $pending['style_item'],
+                    (float) $pending['l1'],
+                    (float) $pending['l5']
+                );
+                $model['item']['sanf_dno'] = (int) $resolved['sanf_dno'];
+                $model['size_item_pending'] = null;
+            }
+        }
+        unset($model);
+    }
+
+    private function resolveCustomer(Request $request, array $input, bool $deferCreation = false, bool $forEdit = false)
     {
         $mode = (string) $input['mode'];
 
@@ -1011,7 +1143,7 @@ class TailoringCreateController extends Controller
                 ], 422);
             }
 
-            if ((int) ($customer['stopping_cust'] ?? 0) === 1) {
+            if (! $forEdit && (int) ($customer['stopping_cust'] ?? 0) === 1) {
                 return response()->json([
                     'success' => false,
                     'message' => 'العميل موقوف — لا يمكن إصدار فاتورة له'
@@ -1053,6 +1185,21 @@ class TailoringCreateController extends Controller
         }
 
         $phone = $input['phone'] ?? null;
+
+        if ($deferCreation) {
+            return [
+                'customer' => [
+                    'mode' => 'new',
+                    'name' => $name,
+                    'phone' => $phone !== null && $phone !== '' ? $phone : null,
+                    'address' => $input['address'] ?? null,
+                    'acc_no' => TailoringPolicy::CUSTOMER_CONTROL_ACCOUNT,
+                    'stopping_cust' => 0,
+                ],
+                'created' => false,
+            ];
+        }
+
         $customer = TailoringCustomerResolver::create(
             $name,
             $phone !== null && $phone !== '' ? $phone : null,

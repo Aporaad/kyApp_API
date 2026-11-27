@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use App\Support\ActivityLogger;
+use App\Support\ArabicEncoding;
 use App\Support\PermissionResolver;
 use App\Support\SessionPolicy;
 use App\Support\SettingsStore;
@@ -267,12 +268,18 @@ class AuthController extends Controller
 
         // التحقق من عدم استخدام نفس device_token من قِبل مستخدم آخر (جهاز واحد لكل مستخدم)
         // Reject a device token already bound to another account: one device per user.
+        $deviceToken = (string) $request->input('device_token');
+
         $existingUser = User::query()
-            ->whereRaw('DEVICE_TOKEN = ?', [(string) $request->input('device_token')])
+            ->whereRaw('DEVICE_TOKEN = ?', [$deviceToken])
             ->where('USER_ID', '!=', $this->idOf($user))
             ->first();
 
-        if ($existingUser) {
+        // ربط معطَّل (إلغاء فشل على جهاز فقد الشبكة) لا يحجز الجهاز إلى الأبد. الربط النشط
+        // وحده يرفض بـ 409؛ أمّا المعطَّل فيُحرَّر ثم يُمنح للمستخدم الحالي.
+        // A disabled binding (a revoke that failed on an offline device) must not hold the
+        // device forever. Only an active binding refuses with 409; a disabled one is released.
+        if ($existingUser && (int) $existingUser->getAttribute('BIOMETRIC_ENABLED') === 1) {
             $this->activity->failed('biometric_enroll', [
                 'user_id' => $this->idOf($user),
                 'module_code' => 'system',
@@ -285,12 +292,31 @@ class AuthController extends Controller
             ], 409);
         }
 
+        if ($existingUser) {
+            User::where('USER_ID', $this->idOf($existingUser))
+                ->update([
+                    'DEVICE_TOKEN' => null,
+                    'DEVICE_NAME' => null,
+                    'PLATFORM' => null,
+                    'BIOMETRIC_ENABLED' => 0,
+                ]);
+        }
+
+        // اسم الجهاز قد يحمل عربية (اسم الآيفون مثلاً)، فيُكتب بالمسار الوحيد الصحيح لأوراكل
+        // A device name can carry Arabic (an iPhone's name), so it goes through the one
+        // correct Oracle write path instead of landing as replacement characters.
+        $rawDeviceName = (string) $request->input('device_name');
+        $deviceName = (string) ArabicEncoding::toOracleSearchChars($rawDeviceName);
+        if ($deviceName === '') {
+            $deviceName = 'Unknown Device';
+        }
+
         // حفظ بيانات البصمة في APP_USERS
         // Persist the biometric enrollment on APP_USERS
         User::where('USER_ID', $this->idOf($user))
             ->update([
-                'DEVICE_TOKEN' => $request->input('device_token'),
-                'DEVICE_NAME' => $request->input('device_name'),
+                'DEVICE_TOKEN' => $deviceToken,
+                'DEVICE_NAME' => $deviceName,
                 'PLATFORM' => $request->input('platform'),
                 'BIOMETRIC_ENABLED' => 1,
                 'BIOMETRIC_REGISTERED_AT' => now(),

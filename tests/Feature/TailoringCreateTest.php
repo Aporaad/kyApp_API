@@ -1,10 +1,12 @@
 <?php
 
+use App\Http\Controllers\Tailoring\TailoringCreateController;
 use App\Models\User;
 use App\Support\ArabicEncoding;
 use App\Support\Tailoring\TailoringModelItemResolver;
 use App\Support\Tailoring\TailoringPolicy;
 use App\Support\Tailoring\TailoringPosting;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
 
@@ -94,9 +96,8 @@ test('an ungranted caller is refused on every creation route with tailoring.crea
     ];
 
     foreach ($samples as [$verb, $path]) {
-        $this->json($verb, $path)
-            ->assertForbidden()
-            ->assertJsonPath('errors.permission', ['tailoring.create']);
+        $response = $this->json($verb, $path)->assertForbidden();
+        expect($response->json('errors.permission'))->toContain('tailoring.create');
     }
 });
 
@@ -126,6 +127,33 @@ test('the creation reference carries the dictionaries and the estimated numbers'
         ->and(count($data['model_families']))->toBe(12)
         ->and($data['specs'])->toHaveKey('button_type');
 });
+
+test('prepared pieces keep the habna_duabl key expected by the writer', function (bool $habnaDuabl) {
+    $request = Request::create('/api/tailoring/create/bills', 'POST', [
+        'customer' => ['mode' => 'existing', 'cust_no' => 25566, 'phone' => '776422777'],
+        'header' => ['bill_kind' => 1, 'measurements_by' => 'محمد السريحي'],
+        'models' => [[
+            'shape_style_no' => 2,
+            'measurements' => ['l1' => 56, 'l5' => 18],
+            'specs' => ['button_type' => 'طقطق', 'tipper_type' => 'A'],
+            'pieces' => [[
+                'sanf_no' => 2193,
+                'sanf_dno' => 10101063005,
+                'cloth_type' => 'عرضين',
+                'price' => 15000,
+                'habna_duabl' => $habnaDuabl,
+                'button_no' => 5,
+            ]],
+        ]],
+        'finance' => ['paid' => 0, 'cust_known' => true, 'credit_account' => 41210001],
+    ]);
+    $request->setUserResolver(fn () => tailoringCreateAdmin());
+
+    $prepared = app(TailoringCreateController::class)->prepareWritePayload($request, true, false);
+
+    expect($prepared)->toBeArray()
+        ->and($prepared['models'][0]['pieces'][0]['habna_duabl'])->toBe($habnaDuabl);
+})->with([true, false]);
 
 test('a bill with missing required fields is refused 422 before any write', function () {
     Sanctum::actingAs(tailoringCreateAdmin(), ['*']);

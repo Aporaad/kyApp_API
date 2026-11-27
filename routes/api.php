@@ -14,6 +14,10 @@ use App\Http\Controllers\Finance\VoucherController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\MyStatementController;
 use App\Http\Controllers\PermissionController;
+use App\Http\Controllers\Production\ApprovalController;
+use App\Http\Controllers\Production\CutDeliveryController;
+use App\Http\Controllers\Production\CutReceiptController;
+use App\Http\Controllers\Production\ProductionSummaryController;
 use App\Http\Controllers\Purchases\PurchaseInvoiceController;
 use App\Http\Controllers\Purchases\PurchaseReportController;
 use App\Http\Controllers\Purchases\PurchaseReturnController;
@@ -39,6 +43,7 @@ use App\Http\Controllers\Stores\TransferOrderController;
 use App\Http\Controllers\SupportInquiryController;
 use App\Http\Controllers\TableQueryController;
 use App\Http\Controllers\Tailoring\TailoringCreateController;
+use App\Http\Controllers\Tailoring\TailoringEditController;
 use App\Http\Controllers\Tailoring\TailoringLookupController;
 use App\Http\Controllers\TailoringController;
 use App\Http\Controllers\UserAdminController;
@@ -260,7 +265,7 @@ Route::middleware(['auth:sanctum', 'permission:invoices.view'])->group(function 
 // ============================================================
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/tailoring/reference', [TailoringController::class, 'reference'])
-        ->middleware('permission:tailoring.view,tailoring.create');
+        ->middleware('permission:tailoring.view,tailoring.create,tailoring.update');
     Route::get('/tailoring/bills', [TailoringController::class, 'index'])
         ->middleware('permission:tailoring.view');
     // خيارات الفلترة (facets): الأنواع والسنوات والفروع المميزة — تُملأ منها القوائم المنسدلة.
@@ -287,34 +292,100 @@ Route::middleware('auth:sanctum')->group(function () {
 // ============================================================
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/tailoring/create/reference', [TailoringLookupController::class, 'reference'])
-        ->middleware('permission:tailoring.create');
+        ->middleware('permission:tailoring.create,tailoring.update');
     Route::get('/tailoring/create/next-numbers', [TailoringLookupController::class, 'nextNumbers'])
-        ->middleware('permission:tailoring.create');
+        ->middleware('permission:tailoring.create,tailoring.update');
     Route::get('/tailoring/create/customers', [TailoringLookupController::class, 'customers'])
-        ->middleware('permission:tailoring.create');
+        ->middleware('permission:tailoring.create,tailoring.update');
     Route::get('/tailoring/create/customers/{custNo}/phones', [TailoringLookupController::class, 'phones'])
-        ->middleware('permission:tailoring.create')
+        ->middleware('permission:tailoring.create,tailoring.update')
         ->where(['custNo' => '[0-9]+']);
     Route::get('/tailoring/create/customers/{custNo}/previous-models', [TailoringLookupController::class, 'previousModels'])
-        ->middleware('permission:tailoring.create')
+        ->middleware('permission:tailoring.create,tailoring.update')
         ->where(['custNo' => '[0-9]+']);
     Route::get('/tailoring/create/customers/{custNo}/previous-models/{billNo}/{year}/{seqNo}', [TailoringLookupController::class, 'previousModelDetail'])
-        ->middleware('permission:tailoring.create')
+        ->middleware('permission:tailoring.create,tailoring.update')
         ->where(['custNo' => '[0-9]+', 'billNo' => '[0-9]+', 'year' => '[0-9]{4}', 'seqNo' => '[0-9]+']);
     Route::get('/tailoring/create/customers/{custNo}/beneficiaries', [TailoringLookupController::class, 'beneficiaries'])
-        ->middleware('permission:tailoring.create')
+        ->middleware('permission:tailoring.create,tailoring.update')
         ->where(['custNo' => '[0-9]+']);
     Route::get('/tailoring/create/workers', [TailoringLookupController::class, 'workers'])
-        ->middleware('permission:tailoring.create');
+        ->middleware('permission:tailoring.create,tailoring.update');
     Route::get('/tailoring/create/fabrics', [TailoringLookupController::class, 'fabrics'])
-        ->middleware('permission:tailoring.create');
+        ->middleware('permission:tailoring.create,tailoring.update');
     Route::get('/tailoring/create/fabrics/{sanfNo}/variants', [TailoringLookupController::class, 'fabricVariants'])
-        ->middleware('permission:tailoring.create')
+        ->middleware('permission:tailoring.create,tailoring.update')
         ->where(['sanfNo' => '[0-9]+']);
     Route::post('/tailoring/create/quote', [TailoringCreateController::class, 'quote'])
-        ->middleware('permission:tailoring.create');
+        ->middleware('permission:tailoring.create,tailoring.update');
     Route::post('/tailoring/create/bills', [TailoringCreateController::class, 'store'])
         ->middleware('permission:tailoring.create');
+});
+
+// ============================================================
+// مسارات تعديل فاتورة التفصيل — المال متاح في جميع المراحل
+// Tailoring invoice edit routes — financial fields stay editable in every stage.
+// ============================================================
+Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/tailoring/edit/bills/filters', [TailoringEditController::class, 'filters'])
+        ->middleware('permission:tailoring.update');
+    Route::get('/tailoring/edit/currency-reference', [TailoringEditController::class, 'currencyReference'])
+        ->middleware('permission:tailoring.update');
+    Route::get('/tailoring/edit/bills', [TailoringEditController::class, 'index'])
+        ->middleware('permission:tailoring.update');
+    Route::get('/tailoring/edit/bills/{billNo}/{year}', [TailoringEditController::class, 'show'])
+        ->middleware('permission:tailoring.update')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::put('/tailoring/edit/bills/{billNo}/{year}', [TailoringEditController::class, 'update'])
+        ->middleware('permission:tailoring.update')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+    Route::patch('/tailoring/edit/bills/{billNo}/{year}', [TailoringEditController::class, 'patch'])
+        ->middleware('permission:tailoring.update')
+        ->where(['billNo' => '[0-9]+', 'year' => '[0-9]{4}']);
+});
+
+// ============================================================
+// مسارات خط الإنتاج - Production-line routes (المرحلة الأولى)
+// ثلاثة أقسام فقط: الاعتماد، التسليم إلى القص، الاستلام من القص.
+// كل مسار يحمل صلاحية محطته، والعدادات تحمل أكواد العرض الثمانية (أيٌّ منها يكفي).
+// Only the first three stations; each route carries its own station grant, and the
+// counters accept any of the eight view codes.
+// ============================================================
+Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/production/summary', [ProductionSummaryController::class, 'index'])
+        ->middleware('permission:prod_approval.view,prod_to_cut.view,prod_from_cut.view,prod_cut_transfer.view,prod_to_tailor.view,prod_from_tailor.view,prod_tailor_transfer.view,prod_ready.view');
+
+    Route::prefix('production/approval')->middleware('permission:prod_approval.view')->group(function () {
+        Route::get('/invoices', [ApprovalController::class, 'invoices']);
+        Route::get('/invoices/{ohid}/pieces', [ApprovalController::class, 'pieces'])
+            ->where('ohid', '[0-9]+');
+    });
+    Route::post('/production/approval/approve', [ApprovalController::class, 'approve'])
+        ->middleware('permission:prod_approval.approve');
+    Route::post('/production/approval/unapprove', [ApprovalController::class, 'unapprove'])
+        ->middleware('permission:prod_approval.unapprove');
+
+    Route::prefix('production/cut-delivery')->middleware('permission:prod_to_cut.view')->group(function () {
+        Route::get('/invoices', [CutDeliveryController::class, 'invoices']);
+        Route::get('/invoices/{ohid}/pieces', [CutDeliveryController::class, 'pieces'])
+            ->where('ohid', '[0-9]+');
+        Route::get('/cutters', [CutDeliveryController::class, 'cutters']);
+    });
+    Route::post('/production/cut-delivery/deliver', [CutDeliveryController::class, 'deliver'])
+        ->middleware('permission:prod_to_cut.deliver');
+    Route::post('/production/cut-delivery/undo', [CutDeliveryController::class, 'undo'])
+        ->middleware('permission:prod_to_cut.undo');
+
+    Route::prefix('production/cut-receipt')->middleware('permission:prod_from_cut.view')->group(function () {
+        Route::get('/cutters', [CutReceiptController::class, 'cutters']);
+        Route::get('/invoices', [CutReceiptController::class, 'invoices']);
+        Route::get('/invoices/{ohid}/pieces', [CutReceiptController::class, 'pieces'])
+            ->where('ohid', '[0-9]+');
+    });
+    Route::post('/production/cut-receipt/receive', [CutReceiptController::class, 'receive'])
+        ->middleware('permission:prod_from_cut.receive');
+    Route::post('/production/cut-receipt/undo', [CutReceiptController::class, 'undo'])
+        ->middleware('permission:prod_from_cut.undo');
 });
 
 // ============================================================

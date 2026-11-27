@@ -46,9 +46,9 @@ test('the tailoring permissions are part of the catalog and nowhere near the old
     // ثلاث صلاحيات للتفصيل + ثلاث لمقاسات العملاء + 26 للمخازن + 9 للمبيعات رفعت الكتالوج إلى 182.
     // Three tailoring grants, three for customer measurements, 26 for stores and 9 for sales
     // bring the catalog to 182; the entries & vouchers modules (+35) bring it to 217.
-    // 240 = 217 + 23 للمشتريات (22 فعلاً + صف منح عام)
-    // 240 = 217 plus the purchases module (22 actions and one wildcard)
-    expect(PermissionCatalog::count())->toBe(240)
+    // 240 = 217 + 23 للمشتريات (22 فعلاً + صف منح عام)، ثم وحدات خط الإنتاج ترفعه إلى 284.
+    // 240 = 217 plus purchases (22 actions and one wildcard); production-line modules raise it to 284.
+    expect(PermissionCatalog::count())->toBe(284)
         ->and(PermissionCatalog::knows('tailoring.payments_view'))->toBeTrue()
         ->and(PermissionCatalog::knows('tailoring.export'))->toBeTrue()
         ->and(PermissionCatalog::knows('tailoring.progress'))->toBeTrue()
@@ -78,7 +78,7 @@ test('an ungranted caller is refused on every tailoring route', function () {
         ['get', '/api/tailoring/bills/filters', ['tailoring.view']],
         ['get', '/api/tailoring/bills/21394/2026', ['tailoring.view']],
         ['get', '/api/tailoring/bills/21394/2026/movements?ohd_ids=262133', ['tailoring.view']],
-        ['get', '/api/tailoring/reference', ['tailoring.view', 'tailoring.create']],
+        ['get', '/api/tailoring/reference', ['tailoring.view', 'tailoring.create', 'tailoring.update']],
         ['post', '/api/tailoring/bills/21394/2026/activity', ['tailoring.print', 'tailoring.export']],
     ];
 
