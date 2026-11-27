@@ -3,6 +3,7 @@
 namespace App\Support\Tailoring;
 
 use App\Support\ArabicEncoding;
+use App\Support\PermissionResolver;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -347,7 +348,6 @@ final class TailoringPolicy
         $credit = [['acc_no' => self::REVENUE_ACCOUNT, 'name' => 'مبيعات آجلة']];
         $cash = [['acc_no' => self::DEFAULT_CASH_ACCOUNT, 'name' => 'صندوق محمد السريحي']];
         $bank = [];
-
         try {
             $rows = DB::connection('oracle')->select(
                 'SELECT ACC_NO, ACC_NAME FROM ACCOUNTS.CHART_ACC
@@ -393,6 +393,51 @@ final class TailoringPolicy
             report($e);
         }
 
+        // صلاحية «اظهار حسابات الصناديق النقدية»: بلاها لا تُعرض الصناديق النقدية في
+        // قوائم اختيار الحسابات المالية إلا صندوق المستخدم المرتبط بالفاتورة نفسه
+        // (APP_USERS.CASH_ACC_NO، وإلا الصندوق الرئيسي) فهو يظهر تلقائياً بلا صلاحية،
+        // والحسابات البنكية والمحافظ ليست لها علاقة بهذا القيد.
+        // The "cash boxes view" grant: without it the cash boxes stay hidden from the
+        // financial-account pickers except the user's own box linked to the bill
+        // (APP_USERS.CASH_ACC_NO, else the main box) — it shows automatically; bank
+        // and wallet accounts are out of this rule's scope.
+        $cash = self::filterCashBoxes($cash);
+
         return ['credit' => $credit, 'cash' => $cash, 'bank' => $bank];
+    }
+
+    /**
+     * فلترة الصناديق النقدية حسب صلاحية «اظهار حسابات الصناديق النقدية» — بلاها
+     * يبقى صندوق المستخدم وحده، وبها تبقى القائمة كاملة.
+     * Filter the cash boxes by the "cash boxes view" grant — without it only the
+     * user's own box stays, with it the full list stays.
+     *
+     * @param  array<int, array<string, mixed>>  $cash
+     * @return array<int, array<string, mixed>>
+     */
+    private static function filterCashBoxes(array $cash): array
+    {
+        $user = auth()->user();
+
+        if ($user !== null && app(PermissionResolver::class)->can($user, 'tailoring.cash_boxes_view')) {
+            return $cash;
+        }
+
+        // صندوق المستخدم المرتبط بالفاتورة — يظهر تلقائياً بلا صلاحية
+        // The user's own box linked to the bill — shows automatically, no grant needed.
+        $raw = $user === null ? null : $user->getAttribute('CASH_ACC_NO');
+        $own = is_numeric($raw) ? (int) $raw : self::MAIN_CASH_ACCOUNT;
+
+        $kept = array_values(
+            array_filter($cash, static fn (array $a): bool => (int) $a['acc_no'] === $own)
+        );
+
+        if ($kept !== []) {
+            return $kept;
+        }
+
+        // صندوق المستخدم ليس من نطاق الصناديق المقروءة — يُضاف صراحة كي يبقى ظاهراً
+        // The user's box is outside the read cash range — added explicitly so it stays.
+        return [['acc_no' => $own, 'name' => null]];
     }
 }

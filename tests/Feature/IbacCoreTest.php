@@ -53,9 +53,13 @@ test('catalog gives every module its core actions in fixed order', function () {
     // وتقارير المبيعات (عرض/طباعة/تصدير) — عمليات مستقلة داخل القسم بصلاحيات مستقلة.
     // 182 = the prior 173 plus 9 for sales: sales returns (view/create/update/delete/print/export)
     // and sales reports (view/print/export) — separate operations with their own grants.
-    // 217 = 182 + 35 للقيود والسندات: ست وحدات (journal/journal_temp/receipts/payments/fin_search/wages)
-    // بـ 29 فعلاً + 6 صفوف منح عام. / 217 = 182 + 35 for entries & vouchers (29 actions + 6 wildcards).
-    expect(PermissionCatalog::count())->toBe(217);
+    // 285 = 284 قبلها + الصلاحية الجديدة tailoring.cash_boxes_view (رؤية الصناديق النقدية
+    // في قوائم اختيار الحسابات المالية باستثناء صندوق المستخدم نفسه). 284 كانت =
+    // 240 قبل خط الإنتاج + 44 له (8 وحدات × منح عام وأفعالها). الرقم 217 القديم كان متأخراً عن كتالوج 240.
+    // 285 = the 284 before it + the new tailoring.cash_boxes_view grant (cash-box visibility
+    // in the financial-account pickers, the user's own box excepted).
+    // The old 217 was already behind the 240-code catalog.
+    expect(PermissionCatalog::count())->toBe(285);
 
     foreach (PermissionCatalog::grouped() as $module) {
         $coreCodes = array_map(

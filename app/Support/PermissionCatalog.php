@@ -142,21 +142,29 @@ final class PermissionCatalog
                 // متابعة السير تُعرض في بطاقة مستقلة عن الاستعراض، فلها صلاحية مستقلة.
                 // Progress tracking is its own card, so it carries its own grant.
                 'progress' => 'متابعة سير فاتورة التفصيل',
+                // حسابات الصناديق النقدية في قوائم اختيار الحسابات المالية لا تظهر إلا
+                // لهذه الصلاحية — إلا صندوق المستخدم المرتبط بالفاتورة نفسه فهو يظهر
+                // تلقائياً بلا صلاحية، والحسابات البنكية ليست لها علاقة بهذا القيد.
+                // Cash-box accounts in the financial-account pickers show only with this
+                // grant — except the user's own box linked to the bill, which shows
+                // automatically; bank accounts are out of this rule's scope.
+                'cash_boxes_view' => 'اظهار حسابات الصناديق النقدية',
             ],
         ],
         // ── خط الإنتاج / production line ────────────────────────
-        // ثماني وحدات مستقلة داخل قسم التفصيل: كل محطة لها عرضها وعمليتها، فلا يمنح
-        // «عرض التسليم» قدرة على «الاستلام» أو «التحويل».
-        // Eight independent stations inside the tailoring section: each has its own view
-        // and action, so seeing a delivery never grants receiving or transferring.
+        // ثماني وحدات مستقلة داخل قسم التفصيل. الفعل الأساسي في هذا الكتالوج هو
+        // view فقط؛ الأفعال المخصّصة (approve/deliver/receive/transfer/finish)
+        // تُسجّل في extra اتباعاً لقاعدة CORE_ACTIONS الأربعة.
+        // Eight independent stations inside tailoring. `core` here is only `view`;
+        // the custom verbs live in `extra`, following the four-verb CORE_ACTIONS rule.
         'prod_approval' => [
             'name_ar' => 'اعتماد طلبات التفصيل',
             'core' => [
                 'view' => 'عرض طلبات الاعتماد',
-                'approve' => 'اعتماد قطع الطلب',
-                'unapprove' => 'إلغاء اعتماد قطع الطلب',
             ],
             'extra' => [
+                'approve' => 'اعتماد قطع الطلب',
+                'unapprove' => 'إلغاء اعتماد قطع الطلب',
                 'print' => 'طباعة كشف الاعتماد',
                 'export' => 'تصدير كشف الاعتماد',
             ],
@@ -165,9 +173,9 @@ final class PermissionCatalog
             'name_ar' => 'التسليم إلى القص',
             'core' => [
                 'view' => 'عرض الطلبات الجاهزة للقص',
-                'deliver' => 'تسليم القطع إلى القصاص',
             ],
             'extra' => [
+                'deliver' => 'تسليم القطع إلى القصاص',
                 'undo' => 'التراجع عن تسليم القص',
                 'print' => 'طباعة سند التسليم إلى القص',
                 'export' => 'تصدير بيانات التسليم إلى القص',
@@ -177,9 +185,9 @@ final class PermissionCatalog
             'name_ar' => 'الاستلام من القص',
             'core' => [
                 'view' => 'عرض القطع عند القصاصين',
-                'receive' => 'استلام القطع من القصاص',
             ],
             'extra' => [
+                'receive' => 'استلام القطع من القصاص',
                 'undo' => 'التراجع عن استلام القص',
                 'print' => 'طباعة سند الاستلام من القص',
                 'export' => 'تصدير بيانات الاستلام من القص',
@@ -189,9 +197,9 @@ final class PermissionCatalog
             'name_ar' => 'التحويل بين القصاصين',
             'core' => [
                 'view' => 'عرض القطع القابلة للتحويل بين القصاصين',
-                'transfer' => 'تحويل القطع إلى قصاص آخر',
             ],
             'extra' => [
+                'transfer' => 'تحويل القطع إلى قصاص آخر',
                 'print' => 'طباعة إشعار التحويل بين القصاصين',
             ],
         ],
@@ -199,9 +207,9 @@ final class PermissionCatalog
             'name_ar' => 'التسليم إلى الخياطين',
             'core' => [
                 'view' => 'عرض القطع الجاهزة للخياطة',
-                'deliver' => 'تسليم القطع إلى الخياط',
             ],
             'extra' => [
+                'deliver' => 'تسليم القطع إلى الخياط',
                 'undo' => 'التراجع عن تسليم الخياط',
                 'print' => 'طباعة سند التسليم إلى الخياط',
                 'export' => 'تصدير بيانات التسليم إلى الخياط',
@@ -211,9 +219,9 @@ final class PermissionCatalog
             'name_ar' => 'الاستلام من الخياط',
             'core' => [
                 'view' => 'عرض القطع عند الخياطين',
-                'receive' => 'استلام القطع من الخياط',
             ],
             'extra' => [
+                'receive' => 'استلام القطع من الخياط',
                 'undo' => 'التراجع عن استلام الخياط',
                 'print' => 'طباعة سند الاستلام من الخياط',
                 'export' => 'تصدير بيانات الاستلام من الخياط',
@@ -223,9 +231,9 @@ final class PermissionCatalog
             'name_ar' => 'التحويل بين الخياطين',
             'core' => [
                 'view' => 'عرض القطع القابلة للتحويل بين الخياطين',
-                'transfer' => 'تحويل القطع إلى خياط آخر',
             ],
             'extra' => [
+                'transfer' => 'تحويل القطع إلى خياط آخر',
                 'print' => 'طباعة إشعار التحويل بين الخياطين',
             ],
         ],
@@ -233,9 +241,9 @@ final class PermissionCatalog
             'name_ar' => 'التجهيز النهائي',
             'core' => [
                 'view' => 'عرض القطع الجاهزة للتجهيز النهائي',
-                'finish' => 'إنهاء تجهيز القطع',
             ],
             'extra' => [
+                'finish' => 'إنهاء تجهيز القطع',
                 'undo' => 'التراجع عن التجهيز النهائي',
                 'print' => 'طباعة كشف الجاهز للتسليم',
                 'export' => 'تصدير بيانات التجهيز النهائي',

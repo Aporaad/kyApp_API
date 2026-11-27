@@ -597,7 +597,10 @@ class TailoringCreateController extends Controller
             'models.*.specs.pen_pocket' => 'nullable|string|max:30',
             'models.*.pieces' => $forEdit
                 ? 'present|array|max:'.TailoringPolicy::MAX_PIECES
-                : 'required|array|min:1',
+                // «تأجيل الطلبات»: الموديل المؤجَّل يُحفظ بلا قماش — الفحص اليدوي أدناه
+                // "Postpone orders": a deferred model saves without fabrics — the
+                // manual check below.
+                : 'present|array|max:'.TailoringPolicy::MAX_PIECES,
             'models.*.pieces.*.seq_no1' => $forEdit ? 'nullable|integer|min:1' : 'nullable',
             'models.*.pieces.*.sanf_no' => 'required|integer|min:1',
             'models.*.pieces.*.sanf_dno' => 'required|integer|min:1',
@@ -783,6 +786,17 @@ class TailoringCreateController extends Controller
                     'message' => 'نوع الأزرار إلزامي — أو فعّل «تأجيل الطلبات» للموديل'
                         .' / The button type is required — or defer the model',
                     'errors' => ['models.*.specs.button_type' => 'required unless deferred'],
+                ], 422);
+            }
+
+            // «تأجيل الطلبات»: الموديل المؤجَّل يُحفظ بلا أقمشة تابعة له
+            // "Postpone orders": a deferred model saves without its fabrics.
+            if (! $deferred && count($model['pieces']) === 0) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'أضف قطعة واحدة على الأقل — أو فعّل «تأجيل الطلبات» للموديل'
+                        .' / Add at least one piece — or defer the model',
+                    'errors' => ['models.*.pieces' => 'required unless deferred'],
                 ], 422);
             }
 

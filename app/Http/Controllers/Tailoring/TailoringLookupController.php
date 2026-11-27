@@ -99,10 +99,20 @@ class TailoringLookupController extends Controller
             if ($search !== '') {
                 $oracle = ArabicEncoding::toOracleSearchChars($search);
                 $bindings['search_oracle'] = '%'.($oracle ?? $search).'%';
-                $bindings['search_plain'] = '%'.$search.'%';
+                $bindings['search_name'] = '%'.$search.'%';
+                $bindings['search_tel1'] = '%'.$search.'%';
+                $bindings['search_tel2'] = '%'.$search.'%';
+                $bindings['search_bill_tel'] = '%'.$search.'%';
 
-                $clauses[] = '(CUST_NAME LIKE :search_oracle OR CUST_NAME LIKE :search_plain
-                               OR TEL1 LIKE :search_plain OR TEL2 LIKE :search_plain)';
+                // البحث بالهاتف يفحص TEL1/TEL2 بأسماء ربط مميزة لكل موضع، ويشمل أيضاً
+                // الأرقام التاريخية المسجلة على فواتير التفصيل فقط (طلب المستخدم الحرفي).
+                // Phone search checks TEL1/TEL2 with a distinct bind name per place, and
+                // also matches the historical numbers recorded on cutting bills only.
+                $clauses[] = '(CUST_NAME LIKE :search_oracle OR CUST_NAME LIKE :search_name
+                               OR TEL1 LIKE :search_tel1 OR TEL2 LIKE :search_tel2
+                               OR CUST_NO IN (SELECT CUST_NO FROM ACCOUNTS.SALES_BILL
+                                               WHERE TEL_NO1 LIKE :search_bill_tel
+                                                 AND ROWNUM <= 100))';
 
                 if (is_numeric($search)) {
                     $clauses[] = 'CUST_NO = :search_no';
