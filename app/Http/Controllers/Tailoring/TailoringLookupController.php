@@ -102,17 +102,15 @@ class TailoringLookupController extends Controller
                 $bindings['search_name'] = '%'.$search.'%';
                 $bindings['search_tel1'] = '%'.$search.'%';
                 $bindings['search_tel2'] = '%'.$search.'%';
-                $bindings['search_bill_tel'] = '%'.$search.'%';
 
-                // البحث بالهاتف يفحص TEL1/TEL2 بأسماء ربط مميزة لكل موضع، ويشمل أيضاً
-                // الأرقام التاريخية المسجلة على فواتير التفصيل فقط (طلب المستخدم الحرفي).
-                // Phone search checks TEL1/TEL2 with a distinct bind name per place, and
-                // also matches the historical numbers recorded on cutting bills only.
+                // البحث بالهاتف يفحص TEL1/TEL2 بأسماء ربط مميزة لكل موضع كي لا يعتمد
+                // على إعادة استخدام وسيط واحد — جدول CUST صغير فالبحث فوري، ولا يُلمس
+                // SALES_BILL الضخم هنا كي لا تتجاوز المهلة (انهيار نافذة العملاء).
+                // Phone search checks TEL1/TEL2 with a distinct bind name per place —
+                // CUST is small so it is instant; the huge SALES_BILL is never touched
+                // here (it blew past the receive timeout and crashed the picker).
                 $clauses[] = '(CUST_NAME LIKE :search_oracle OR CUST_NAME LIKE :search_name
-                               OR TEL1 LIKE :search_tel1 OR TEL2 LIKE :search_tel2
-                               OR CUST_NO IN (SELECT CUST_NO FROM ACCOUNTS.SALES_BILL
-                                               WHERE TEL_NO1 LIKE :search_bill_tel
-                                                 AND ROWNUM <= 100))';
+                               OR TEL1 LIKE :search_tel1 OR TEL2 LIKE :search_tel2)';
 
                 if (is_numeric($search)) {
                     $clauses[] = 'CUST_NO = :search_no';

@@ -3,6 +3,7 @@
 namespace App\Support\Tailoring;
 
 use App\Support\ArabicEncoding;
+use App\Support\PermissionCatalog;
 use App\Support\PermissionResolver;
 use Illuminate\Support\Facades\DB;
 
@@ -409,8 +410,14 @@ final class TailoringPolicy
     /**
      * فلترة الصناديق النقدية حسب صلاحية «اظهار حسابات الصناديق النقدية» — بلاها
      * يبقى صندوق المستخدم وحده، وبها تبقى القائمة كاملة.
-     * Filter the cash boxes by the "cash boxes view" grant — without it only the
-     * user's own box stays, with it the full list stays.
+     *
+     * الفحص هنا صريح فقط عمداً: المنح العام tailoring.* لا يشمل هذه الصلاحية —
+     * رؤية الصناديق النقدية حِسّاسة مالياً فلا تُسحب مع منح عام، ولا يراها إلا
+     * المدير العام أو حامل system.* أو من مُنح الصلاحية الحرفية بنفسه.
+     * The check here is deliberately explicit-only: the tailoring.* wildcard does NOT
+     * cover this grant — cash-box visibility is financially sensitive so it is never
+     * swept in by a broad wildcard; only the admin, a system.* holder, or someone
+     * granted the literal code sees the boxes.
      *
      * @param  array<int, array<string, mixed>>  $cash
      * @return array<int, array<string, mixed>>
@@ -419,8 +426,14 @@ final class TailoringPolicy
     {
         $user = auth()->user();
 
-        if ($user !== null && app(PermissionResolver::class)->can($user, 'tailoring.cash_boxes_view')) {
-            return $cash;
+        if ($user !== null) {
+            $codes = app(PermissionResolver::class)->codesFor($user);
+
+            if ($user->isAdmin()
+                || in_array(PermissionCatalog::SYSTEM_WILDCARD, $codes, true)
+                || in_array('tailoring.cash_boxes_view', $codes, true)) {
+                return $cash;
+            }
         }
 
         // صندوق المستخدم المرتبط بالفاتورة — يظهر تلقائياً بلا صلاحية
