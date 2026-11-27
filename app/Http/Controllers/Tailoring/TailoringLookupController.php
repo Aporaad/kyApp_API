@@ -102,15 +102,25 @@ class TailoringLookupController extends Controller
                 $bindings['search_name'] = '%'.$search.'%';
                 $bindings['search_tel1'] = '%'.$search.'%';
                 $bindings['search_tel2'] = '%'.$search.'%';
+                $bindings['search_bill_tel'] = '%'.$search.'%';
 
-                // البحث بالهاتف يفحص TEL1/TEL2 بأسماء ربط مميزة لكل موضع كي لا يعتمد
-                // على إعادة استخدام وسيط واحد — جدول CUST صغير فالبحث فوري، ولا يُلمس
-                // SALES_BILL الضخم هنا كي لا تتجاوز المهلة (انهيار نافذة العملاء).
-                // Phone search checks TEL1/TEL2 with a distinct bind name per place —
-                // CUST is small so it is instant; the huge SALES_BILL is never touched
-                // here (it blew past the receive timeout and crashed the picker).
+                // البحث بالهاتف بأسماء ربط مميزة لكل موضع، ويشمل الأرقام المحفوظة على
+                // أحدث 20000 فاتورة فقط — المسح المحدّد بفهرس BILL_NO فوري (~15ms)
+                // بينما المسح الكامل لـSALES_BILL يتجاوز مهلة الاستقبال.
+                // Phone search with a distinct bind per place, also matching numbers kept
+                // only on the latest 20000 bills — the BILL_NO-indexed capped scan is
+                // instant (~15ms) while a full SALES_BILL scan blows the timeout.
                 $clauses[] = '(CUST_NAME LIKE :search_oracle OR CUST_NAME LIKE :search_name
-                               OR TEL1 LIKE :search_tel1 OR TEL2 LIKE :search_tel2)';
+                               OR TEL1 LIKE :search_tel1 OR TEL2 LIKE :search_tel2
+                               OR CUST_NO IN (
+                                   SELECT CUST_NO
+                                     FROM (SELECT CUST_NO, TEL_NO1
+                                             FROM ACCOUNTS.SALES_BILL
+                                            WHERE TEL_NO1 IS NOT NULL
+                                            ORDER BY BILL_NO DESC)
+                                    WHERE ROWNUM <= 20000
+                                      AND TEL_NO1 LIKE :search_bill_tel
+                                      AND ROWNUM <= 50))';
 
                 if (is_numeric($search)) {
                     $clauses[] = 'CUST_NO = :search_no';
@@ -284,6 +294,7 @@ class TailoringLookupController extends Controller
                            MAX(b.MANUAL_BILL_NO) AS MANUAL_BILL_NO,
                            MAX(b.CUST_NO) AS CUST_NO,
                            MAX(b.CUST_NAME) AS CUST_NAME,
+                           MAX(b.TEL_NO1) AS BILL_TEL,
                            TO_CHAR(MAX(b.DAT), 'YYYY-MM-DD') AS DAT_ISO,
                            COUNT(m.SEQ_NO1) AS PIECES
                       FROM ACCOUNTS.SALES_DETAILES_SHAPES s
@@ -312,6 +323,10 @@ class TailoringLookupController extends Controller
                     'beneficiary' => CuttingViewReader::txt($data, 'BENEFICIARYNAME'),
                     'cust_no' => CuttingViewReader::num($data, 'CUST_NO'),
                     'cust_name' => CuttingViewReader::txt($data, 'CUST_NAME'),
+                    // هاتف العميل من الفاتورة — ليدعم البحث برقم الهاتف في النافذة
+                    // The customer's phone from the bill — enables phone search in the
+                    // window.
+                    'phone' => CuttingViewReader::txt($data, 'BILL_TEL'),
                     'manual_bill_no' => CuttingViewReader::num($data, 'MANUAL_BILL_NO'),
                     'date' => CuttingViewReader::txt($data, 'DAT_ISO'),
                     'pieces_count' => (int) (CuttingViewReader::num($data, 'PIECES') ?? 0),

@@ -609,7 +609,10 @@ class TailoringCreateController extends Controller
                     $fail('عرض القماش غير مدعوم / Unsupported fabric width');
                 }
             }],
-            'models.*.pieces.*.price' => 'required|numeric|gt:0',
+            // قماش الموديل المؤجَّل يُحفظ بلا تسعير — الفحص اليدوي أدناه يفرض أكبر من
+            // صفر على غير المؤجَّل فقط / a deferred model's fabric saves unpriced —
+            // the manual check below enforces > 0 for non-deferred models only.
+            'models.*.pieces.*.price' => 'required|numeric|min:0',
             'models.*.pieces.*.button_no' => 'nullable|integer|min:0',
             'models.*.pieces.*.from_store' => 'nullable|integer|in:1,2',
             'models.*.pieces.*.gabzor_hand' => 'nullable|boolean',
@@ -859,6 +862,19 @@ class TailoringCreateController extends Controller
                 $sanfNo = (int) $piece['sanf_no'];
                 $sanfDno = (int) $piece['sanf_dno'];
                 $fromStore = (int) ($piece['from_store'] ?? TailoringPolicy::CLOTH_FROM_SHOP);
+
+                // قماش الموديل المؤجَّل يُحفظ بلا تسعير حتى لو كانت له مقاسات —
+                // السعر أكبر من صفر يُفرض على غير المؤجَّل فقط (طلب المستخدم الحرفي)
+                // A deferred model's fabric saves unpriced even with measurements —
+                // a price above zero is enforced for non-deferred models only (literal).
+                if (! $deferred && (float) $piece['price'] <= 0) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'سعر القطعة يجب أن يكون أكبر من صفر — أو فعّل «تأجيل الطلبات» للموديل'
+                            .' / The piece price must be above zero — or defer the model',
+                        'errors' => ['models.*.pieces.*.price' => 'gt:0 unless deferred'],
+                    ], 422);
+                }
 
                 // القماش الفرعي يجب أن يعود للقماش الرئيسي — إعادة التحقق لا الثقة بالواجهة
                 // The variant must belong to the main fabric — revalidated, never trusted.

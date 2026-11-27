@@ -467,6 +467,9 @@ class TailoringController extends Controller
             // بيانات الطلب من صف الفاتورة — تُدمج في الترويسة بدل حقل منفصل في الواجهة.
             // Order data from the bill row, merged into the header rather than a separate box.
             $header = array_merge($header, [
+                // رقم الطلب الرئيسي من SALES_BILL نفسه، لا من اشتقاق OHDID أو من الواجهة.
+                // The main order id comes from SALES_BILL itself, never derived from OHDID or the view.
+                'ohid' => $this->lower($billRow, 'OHID'),
                 'tel_no2' => $this->lower($billRow, 'TEL_NO2'),
                 'address' => $this->lower($billRow, 'ADDRESS'),
                 'ref_no' => $this->lower($billRow, 'REF_NO'),
@@ -913,7 +916,9 @@ class TailoringController extends Controller
                         AND m.SEQ_NO = v.SEQ_NO
                         AND m.SEQ_NO1 = v.SEQ_NO1';
 
-        return 'SELECT v.SEQ_NO, v.SEQ_NO1, v.OHDID, v.BENEFICIARY_NAME, v.QTY AS PIECE_QTY,
+        return 'SELECT v.SEQ_NO, v.SEQ_NO1,
+                       m.OHDID AS CLOTH_OHDID, m.QTY AS CLOTH_QTY,
+                       v.BENEFICIARY_NAME, v.QTY AS PIECE_QTY,
                        '.$widthSelect.',
                        v.FIXED_FLEXED, m.HABNA_DUABL, m.TATRYZ_NO,
                        v.SHAPE_STYLE_NO, v.STYLE_NAME, st.STYLE_NAME AS SHAPE_NAME,
@@ -1030,9 +1035,12 @@ class TailoringController extends Controller
 
             $models[$seqNo]['pieces'][] = [
                 'seq_no1' => $this->num($row, 'SEQ_NO1'),
-                // رقم طلب القماش في الواجهة — مفتاح سجل حركة هذا القماش
-                // The fabric order id in the view — the key of this fabric's movement log.
-                'ohdid' => $this->num($row, 'OHDID'),
+                // رقم الطلب الفرعي من MULTI_CLOTHS نفسه — مصدر البطاقة والباركود وسجل الحركة.
+                // The sub-order id comes from MULTI_CLOTHS itself — the card, barcode and movement key.
+                'ohdid' => $this->num($row, 'CLOTH_OHDID'),
+                // كمية صف القماش نفسه، حتى لا يتكرر عدد الموديل على بطاقة كل قماش.
+                // The fabric row's own quantity, so a model total is never repeated on every cloth card.
+                'qty' => $this->num($row, 'CLOTH_QTY'),
                 // عرض القماش بالأرقام (58/45/38) من MULTI_CLOTHS — فارغ إن غاب العمود
                 // The numeric cloth width (58/45/38) from MULTI_CLOTHS — empty when absent.
                 'cloth_width' => $this->txt($row, 'CLOTH_WIDTH'),

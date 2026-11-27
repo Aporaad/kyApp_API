@@ -185,7 +185,7 @@ test('the bill detail folds pieces into models and carries measurements', functi
         ->assertJsonStructure([
             'data' => [
                 'header' => [
-                    'bill_no', 'year', 'manual_bill_no', 'date', 'cust_name',
+                    'bill_no', 'year', 'ohid', 'manual_bill_no', 'date', 'cust_name',
                     'ordsdid', 'models_count', 'pieces_count', 'urgent',
                 ],
                 'payment',
@@ -193,6 +193,16 @@ test('the bill detail folds pieces into models and carries measurements', functi
                 'measure_labels',
             ],
         ]);
+
+    // رقم الطلب الرئيسي يصل من SALES_BILL.OHID نفسه، لا من اشتقاق رقم الطلب الفرعي.
+    // The main order id arrives from SALES_BILL.OHID itself, never derived from a sub-order id.
+    $billIdentity = array_change_key_case((array) DB::connection('oracle')->selectOne(
+        'SELECT OHID FROM ACCOUNTS.SALES_BILL WHERE BILL_NO = :bill_no AND YEAR = :year',
+        ['bill_no' => $billNo, 'year' => $year]
+    ), CASE_UPPER);
+    expect($response->json('data.header.ohid'))->toBe(
+        isset($billIdentity['OHID']) ? (int) $billIdentity['OHID'] : null
+    );
 
     $models = $response->json('data.models');
     expect($models)->toBeArray()->not->toBeEmpty();
@@ -206,6 +216,22 @@ test('the bill detail folds pieces into models and carries measurements', functi
             expect(array_keys($piece))->toContain('seq_no1', 'cloth_name', 'cutter_name', 'tailor_name', 'cutting_done');
         }
     }
+
+    // رقم الطلب الفرعي وكميته يصلان من صف MULTI_CLOTHS المطابق للقطعة نفسها.
+    // The sub-order id and quantity arrive from the MULTI_CLOTHS row matching this exact piece.
+    $firstPiece = $models[0]['pieces'][0];
+    $clothRow = array_change_key_case((array) DB::connection('oracle')->selectOne(
+        'SELECT OHDID, QTY FROM ACCOUNTS.MULTI_CLOTHS
+          WHERE BILL_NO = :bill_no AND YEAR = :year AND SEQ_NO = :seq_no AND SEQ_NO1 = :seq_no1',
+        [
+            'bill_no' => $billNo,
+            'year' => $year,
+            'seq_no' => $models[0]['seq_no'],
+            'seq_no1' => $firstPiece['seq_no1'],
+        ]
+    ), CASE_UPPER);
+    expect($firstPiece['ohdid'])->toBe(isset($clothRow['OHDID']) ? (int) $clothRow['OHDID'] : null)
+        ->and($firstPiece['qty'])->toBe(isset($clothRow['QTY']) ? (int) $clothRow['QTY'] : null);
 
     // التسميات تأتي من GENERAL_LABELS_CODING لا من ثوابت في الشاشة.
     // The labels come from GENERAL_LABELS_CODING, not from constants in the screen.

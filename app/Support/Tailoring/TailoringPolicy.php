@@ -427,11 +427,28 @@ final class TailoringPolicy
         $user = auth()->user();
 
         if ($user !== null) {
-            $codes = app(PermissionResolver::class)->codesFor($user);
+            // الاستعلام مباشرة من جدول المنح — صريح فقط وحديث لحظياً بلا كاش، ولا يعتمد
+            // على PermissionResolver (الذي يشمل المنح العام ولا يمكن استبداله في الاختبارات)
+            // Queried straight from the grants table — explicit-only, fresh without the
+            // 5-minute cache, and independent of PermissionResolver (which honours
+            // wildcards and is mockable in tests).
+            $allowed = (array) DB::connection('oracle')->selectOne(
+                'SELECT 1 AS OK
+                   FROM ACCOUNTS.APP_USERS_PERMISSIONS up
+                   JOIN ACCOUNTS.APP_PERMISSIONS p
+                     ON p.PERMISSION_ID = up.PERMISSION_ID
+                  WHERE up.USER_ID = :id
+                    AND up.IS_ACTIVE = 1
+                    AND p.IS_ACTIVE = 1
+                    AND (up.EXPIRES_ON IS NULL OR up.EXPIRES_ON > SYSDATE)
+                    AND p.PERMISSION_CODE IN (:code, :sys)
+                    AND ROWNUM <= 1',
+                ['id' => (int) $user->getAuthIdentifier(),
+                    'code' => 'tailoring.cash_boxes_view',
+                    'sys' => PermissionCatalog::SYSTEM_WILDCARD, ]
+            );
 
-            if ($user->isAdmin()
-                || in_array(PermissionCatalog::SYSTEM_WILDCARD, $codes, true)
-                || in_array('tailoring.cash_boxes_view', $codes, true)) {
+            if ($user->isAdmin() || $allowed !== []) {
                 return $cash;
             }
         }

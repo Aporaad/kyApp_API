@@ -57,13 +57,25 @@ final class TailoringCustomerResolver
         // The customer balance is computed from their own movements (ENTRY_MNT scoped
         // by account AND customer number) — never CHART_ACC.BALANCE, which thousands
         // of customers share through the control account (same scoping as the statement).
+        //
+        // أحدث رقم هاتف على فواتير العميل — KEEP DENSE_RANK بدل inline view متداخل:
+        // Oracle 11g لا يدعم الربط بمحرف خارجي داخل inline view متداخل (ORA-904)،
+        // وهو ما كان يفشل البحث والإنشاء كله.
+        // The customer's newest bill phone — KEEP DENSE_RANK instead of a nested
+        // inline view: 11g forbids outer correlation inside one (ORA-904), which broke
+        // search and creation alike.
         $row = (array) DB::connection('oracle')->selectOne(
             'SELECT c.CUST_NO, c.CUST_NAME, c.TEL1, c.TEL2, c.ADDR, c.ACC_NO,
                     c.STOPPING_CUST,
                     (SELECT NVL(SUM(es.ENTRY_MNT), 0)
                        FROM ACCOUNTS.ENTRY_SUB es
                       WHERE es.ACC_NO = c.ACC_NO
-                        AND es.GIVING = c.CUST_NO) AS ACC_BALANCE
+                        AND es.GIVING = c.CUST_NO) AS ACC_BALANCE,
+                    (SELECT MAX(b.TEL_NO1)
+                            KEEP (DENSE_RANK LAST ORDER BY b.BILL_NO)
+                       FROM ACCOUNTS.SALES_BILL b
+                      WHERE b.CUST_NO = c.CUST_NO
+                        AND b.TEL_NO1 IS NOT NULL) AS BILL_TEL
                FROM ACCOUNTS.CUST c
               WHERE c.CUST_NO = :no',
             ['no' => $custNo]
@@ -200,7 +212,11 @@ final class TailoringCustomerResolver
         return [
             'cust_no' => (int) (self::pickNum($row, 'CUST_NO') ?? 0),
             'cust_name' => $name === null ? null : ArabicEncoding::fixMojibake($name),
-            'tel1' => self::pickText($row, 'TEL1'),
+            // الهاتف الأساسي يرجع لأحدث فاتورة للعميل عندما يكون TEL1 فارغاً في
+            // CUST — آلاف العملاء لا تحمل بطاقاتهم رقماً (طلب المستخدم الحرفي).
+            // The primary phone falls back to the newest bill's number when CUST.TEL1
+            // is blank — thousands of customers carry no number on their card (literal).
+            'tel1' => self::pickText($row, 'TEL1') ?? self::pickText($row, 'BILL_TEL'),
             'tel2' => self::pickText($row, 'TEL2'),
             'addr' => (function () use ($row): ?string {
                 $addr = self::pickText($row, 'ADDR');
