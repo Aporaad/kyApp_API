@@ -209,6 +209,66 @@ test('shape update binds exactly the placeholders used by Oracle', function () {
     }
 });
 
+test('piece update binds exactly the placeholders used by Oracle', function () {
+    $connection = Mockery::mock(Connection::class);
+    $connection->shouldReceive('update')->once()->withArgs(
+        static function (string $query, array $bindings): bool {
+            preg_match_all('/:([a-zA-Z0-9_]+)/', $query, $matches);
+            $placeholders = array_values(array_unique($matches[1]));
+            $bound = array_keys($bindings);
+            sort($placeholders);
+            sort($bound);
+
+            expect($bound)->toBe($placeholders);
+
+            return true;
+        }
+    );
+
+    $manager = DB::getFacadeRoot();
+    DB::shouldReceive('connection')->with('oracle')->andReturn($connection);
+
+    try {
+        $writer = app(TailoringEditWriter::class);
+        $method = new ReflectionMethod($writer, 'updatePiece');
+        $method->setAccessible(true);
+        $piece = [
+            'seq_no1' => 139282,
+            'ohdid' => 2621154631,
+            'sanf_no' => 2024,
+            'sanf_dno' => 10101055007,
+            'cloth_name' => 'قماش أسود',
+            'cloth_type' => 'عرضين',
+            'color_no' => null,
+            'hinsh' => 2.69,
+            'yards' => 87.0,
+            'hinsh1' => null,
+            'sharkh' => null,
+            'gabzor_hand' => false,
+            'tatryz_in' => false,
+            'tatryz_no' => null,
+            'habna_duabl' => false,
+            'button_no' => 3,
+            'price' => 16000.0,
+            'sanf_cost' => null,
+            'stk_cost' => null,
+            'from_store' => 1,
+        ];
+        $model = [
+            'item' => ['sanf_dno' => 10101055007],
+            'family' => 2,
+            'style_label' => 'قطري',
+        ];
+        $old = [
+            'identity' => ['bill_no' => 22213, 'year' => 2026, 'ohid' => 262115463],
+            'created_by_name' => 'HOSAM',
+        ];
+        $method->invoke($writer, $piece, 86106, $model, ['f_cancel' => 0], $old);
+    } finally {
+        DB::swap($manager);
+    }
+});
+
 test('full edit preparation preserves removed fields and calculates total without a total input', function () {
     $writer = app(TailoringEditWriter::class);
     $method = new ReflectionMethod($writer, 'preserveRemovedEditFields');

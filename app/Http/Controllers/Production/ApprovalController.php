@@ -29,7 +29,9 @@ final class ApprovalController extends ProductionBaseController
         try {
             [$rows, $total] = $this->query->approvalInvoices([
                 'search' => trim((string) $request->input('search', '')),
-                'kind' => $request->input('kind') === 'blocked' ? 'blocked' : 'active',
+                'status' => (string) $request->input('status', 'unapproved'),
+                'classification' => (string) $request->input('classification', 'all'),
+                'sort' => $request->input('sort') === 'desc' ? 'desc' : 'asc',
             ], $page, $limit);
 
             return $this->ok(

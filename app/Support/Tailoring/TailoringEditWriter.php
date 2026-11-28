@@ -588,6 +588,11 @@ final class TailoringEditWriter
 
             return;
         }
+        $bindings = $this->pieceBindings($piece, $seqNo, $model, $old);
+        // هذه المفاتيح للإدراج فقط؛ وجودها في UPDATE بلا Placeholders يسبب ORA-01036.
+        // These keys are insert-only; binding them to this UPDATE causes ORA-01036.
+        unset($bindings['seq_no'], $bindings['ohid'], $bindings['ohdid'], $bindings['created_by_name']);
+
         DB::connection('oracle')->update(
             'UPDATE ACCOUNTS.MULTI_CLOTHS
                 SET SANF_NO = :sanf_no, SANF_DNO = :sanf_dno, PROD_NO = :prod_no,
@@ -599,7 +604,7 @@ final class TailoringEditWriter
                     STK_COST = :stk_cost, SHAPE_STYLE_NO = :family, STYLE_NAME = :style_name,
                     CLOTH_FRM_LOCAL_STORE = :from_store
               WHERE SEQ_NO1 = :seq_no1 AND BILL_NO = :bill_no AND YEAR = :year',
-            TailoringDocumentWriter::bindings($this->pieceBindings($piece, $seqNo, $model, $old))
+            TailoringDocumentWriter::bindings($bindings)
         );
     }
 

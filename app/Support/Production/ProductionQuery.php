@@ -22,7 +22,7 @@ final class ProductionQuery
      */
     private const INVOICE_GROUP_BY = ' GROUP BY sb.OHID, sb.BILL_NO, sb.YEAR, sb.MANUAL_BILL_NO,
         sb.DAT, sb.CUST_NO, sb.CUST_NAME, sb.TEL_NO1, sb.BENEFICIARY_NAME,
-        sb.GROUP_NO, sb.BILLS_KINDS, sb.ORDSID';
+        sb.GROUP_NO, sb.BILLS_KINDS, sb.ORDSID, sb.BILL_TYPE, sb.TOTAL, sb.NET, sb.AMOUNT_PAID';
 
     /**
      * عدادات الأقسام الثلاثة المنفّذة — استعلامات صغيرة منفصلة أوضح من تجميع شرطي هش
@@ -92,40 +92,88 @@ final class ProductionQuery
      * @param  array{search?: string, kind?: string}  $filters
      * @return array{0: list<array<string, mixed>>, 1: int}
      */
+    /**
+     * فواتير الاعتماد — بحث وحالة وتصنيف وترتيب، مع المدفوع والمبلغ والقطع المعلّقة
+     * Approval invoices — search, status, classification and sort, with paid/total/pending pieces.
+     *
+     * @param  array{search?: string, status?: string, classification?: string, sort?: string}  $filters
+     * @return array{0: list<array<string, mixed>>, 1: int}
+     */
     public function approvalInvoices(array $filters, int $page, int $limit): array
     {
         $binds = [];
         $search = trim((string) ($filters['search'] ?? ''));
+        $status = (string) ($filters['status'] ?? 'unapproved');
+        $classification = (string) ($filters['classification'] ?? 'all');
+        $sort = ($filters['sort'] ?? 'asc') === 'desc' ? 'DESC' : 'ASC';
 
         $where = ' FROM ACCOUNTS.SALES_BILL sb
                    JOIN ACCOUNTS.MULTI_CLOTHS mc ON mc.OHID = sb.OHID
-                  WHERE mc.ORDSDID = 0
-                    AND NVL(mc.F_CANCEL, 0) = 0
-                    AND NVL(sb.HANDING_DONE, 0) <> 1
-                    AND NVL(mc.CUTTING_DONE, 0) <> 1';
+                  WHERE NVL(mc.F_CANCEL, 0) = 0
+                    AND NVL(sb.HANDING_DONE, 0) <> 1';
 
-        $where .= (($filters['kind'] ?? 'active') === 'blocked')
-            ? ' AND sb.BILLS_KINDS IN (2, 3, 4)'
-            : ' AND sb.BILLS_KINDS = 1';
+        switch ($status) {
+            case 'approved':
+                $where .= ' AND sb.BILLS_KINDS = 1 AND sb.ORDSID = 1';
+                break;
+
+            case 'stopped':
+                $where .= ' AND sb.BILLS_KINDS = 2';
+                break;
+
+            case 'cancelled':
+                $where .= ' AND sb.BILLS_KINDS = 3';
+                break;
+
+            case 'pending':
+                $where .= ' AND sb.BILLS_KINDS = 4';
+                break;
+
+            case 'all':
+                break;
+
+            case 'unapproved':
+            default:
+                $where .= ' AND sb.BILLS_KINDS = 1 AND NVL(sb.ORDSID, 0) = 0';
+                break;
+        }
+
+        if ($classification === 'orders') {
+            $where .= ' AND sb.BILL_TYPE = 2';
+        } elseif ($classification === 'ready') {
+            $where .= ' AND sb.BILL_TYPE = 1';
+        }
 
         $where .= $this->searchClause($binds, $search, [
             'sb.CUST_NAME',
             'sb.BENEFICIARY_NAME',
             'sb.TEL_NO1',
-        ], 'sb.BILL_NO');
+        ], 'sb.BILL_NO', 'sb.OHID');
 
         $where .= self::INVOICE_GROUP_BY;
+
+        // «غير معتمدة» لا تعرض فاتورة انتهت قطعها فعلاً وإن تأخر عمود حالتها.
+        // Unapproved never lists an invoice whose pieces are all approved, even if the
+        // legacy header status lagged behind.
+        if ($status === 'unapproved') {
+            $where .= ' HAVING SUM(CASE WHEN mc.ORDSDID = 0 THEN 1 ELSE 0 END) > 0';
+        }
 
         $select = 'SELECT sb.OHID, sb.BILL_NO, sb.YEAR, sb.MANUAL_BILL_NO,
                           TO_CHAR(sb.DAT, \'YYYY-MM-DD\') AS DAT_ISO,
                           TO_CHAR(sb.DAT, \'DD/MM/YYYY\') AS DAT_TXT,
                           sb.CUST_NO, sb.CUST_NAME, sb.TEL_NO1, sb.BENEFICIARY_NAME,
-                          sb.GROUP_NO, sb.BILLS_KINDS, sb.ORDSID,
+                          sb.GROUP_NO, sb.BILLS_KINDS, sb.ORDSID, sb.BILL_TYPE,
+                          NVL(sb.TOTAL, 0) AS TOTAL, NVL(sb.NET, 0) AS NET,
+                          NVL(sb.AMOUNT_PAID, 0) AS AMOUNT_PAID,
                           COUNT(*) AS PIECES,
+                          SUM(CASE WHEN mc.ORDSDID = 0 THEN 1 ELSE 0 END) AS PENDING_PIECES,
                           SUM(CASE WHEN NVL(mc.GABZOR_HAND, 0) = 1 THEN 1 ELSE 0 END) AS GABZOR_COUNT,
                           SUM(CASE WHEN NVL(mc.TATRYZ_IN, 0) = 1 THEN 1 ELSE 0 END) AS TATRYZ_COUNT';
 
-        return $this->page($select, $where, $binds, 'sb.DAT ASC, sb.BILL_NO ASC', $page, $limit);
+        $order = 'sb.DAT '.$sort.', sb.BILL_NO '.$sort;
+
+        return $this->page($select, $where, $binds, $order, $page, $limit);
     }
 
     /**
@@ -394,8 +442,13 @@ final class ProductionQuery
      * @param  array<string, mixed>  $binds
      * @param  list<string>  $textColumns
      */
-    private function searchClause(array &$binds, string $search, array $textColumns, string $billColumn): string
-    {
+    private function searchClause(
+        array &$binds,
+        string $search,
+        array $textColumns,
+        string $billColumn,
+        ?string $orderColumn = null
+    ): string {
         if ($search === '') {
             return '';
         }
@@ -416,6 +469,11 @@ final class ProductionQuery
             $binds['s_bill_no'] = (int) $search;
             $binds['s_manual_no'] = (int) $search;
             $parts[] = $billColumn.' = :s_bill_no OR sb.MANUAL_BILL_NO = :s_manual_no';
+
+            if ($orderColumn !== null) {
+                $binds['s_order_no'] = (int) $search;
+                $parts[] = $orderColumn.' = :s_order_no';
+            }
         }
 
         return ' AND ('.implode(' OR ', $parts).')';
