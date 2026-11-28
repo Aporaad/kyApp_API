@@ -470,6 +470,9 @@ class TailoringController extends Controller
                 // رقم الطلب الرئيسي من SALES_BILL نفسه، لا من اشتقاق OHDID أو من الواجهة.
                 // The main order id comes from SALES_BILL itself, never derived from OHDID or the view.
                 'ohid' => $this->lower($billRow, 'OHID'),
+                // اسم من أخذ المقاسات محفوظ في VOUCHER_NO كما في نموذج الإنشاء والتعديل.
+                // The measurement taker is stored in VOUCHER_NO, matching the create/edit form.
+                'measurements_by' => $this->lower($billRow, 'VOUCHER_NO'),
                 'tel_no2' => $this->lower($billRow, 'TEL_NO2'),
                 'address' => $this->lower($billRow, 'ADDRESS'),
                 'ref_no' => $this->lower($billRow, 'REF_NO'),
@@ -896,10 +899,10 @@ class TailoringController extends Controller
      */
     private function detailSql(): string
     {
-        // عرض القماش (58/45/38) ليس في الواجهة: يُقرأ من MULTI_CLOTHS بربط على مفتاح القطعة،
-        // ويُقرأ معه «خبنة دبل» و«رقم التطريز» لأنهما ليسا في الواجهة أيضاً.
-        // The cloth width (58/45/38) is not in the view: it is read from MULTI_CLOTHS on the piece
-        // key, together with the double-habna and embroidery number, which the view lacks too.
+        // عرض القماش ومرحلة القطعة ليسا في الواجهة: يُقرآن من MULTI_CLOTHS على مفتاح القطعة،
+        // وتُقرأ معهما «خبنة دبل» و«رقم التطريز» واسم المرحلة من قاموس ORDSTATE.
+        // Cloth width and piece stage are absent from the view: they come from MULTI_CLOTHS on the
+        // piece key, with double habna, embroidery number and the stage name from ORDSTATE.
         $widthColumn = $this->clothWidthColumn();
         $widthSelect = $widthColumn === null
             ? 'CAST(NULL AS VARCHAR2(20)) AS CLOTH_WIDTH'
@@ -914,10 +917,13 @@ class TailoringController extends Controller
                          ON m.BILL_NO = v.BILL_NO
                         AND m.YEAR = v.YEAR
                         AND m.SEQ_NO = v.SEQ_NO
-                        AND m.SEQ_NO1 = v.SEQ_NO1';
+                        AND m.SEQ_NO1 = v.SEQ_NO1
+                  LEFT JOIN '.self::TABLE_ORDSTATE.' os
+                         ON os.ORDSID = m.ORDSDID';
 
         return 'SELECT v.SEQ_NO, v.SEQ_NO1,
                        m.OHDID AS CLOTH_OHDID, m.QTY AS CLOTH_QTY,
+                       m.ORDSDID AS CLOTH_ORDSDID, os.ORDSNAME AS CLOTH_ORDS_NAME,
                        v.BENEFICIARY_NAME, v.QTY AS PIECE_QTY,
                        '.$widthSelect.',
                        v.FIXED_FLEXED, m.HABNA_DUABL, m.TATRYZ_NO,
@@ -1038,6 +1044,11 @@ class TailoringController extends Controller
                 // رقم الطلب الفرعي من MULTI_CLOTHS نفسه — مصدر البطاقة والباركود وسجل الحركة.
                 // The sub-order id comes from MULTI_CLOTHS itself — the card, barcode and movement key.
                 'ohdid' => $this->num($row, 'CLOTH_OHDID'),
+                // مرحلة القطعة من صف MULTI_CLOTHS نفسه، واسمها من ORDSTATE لا من أعلام الإنجاز.
+                // The piece stage comes from its MULTI_CLOTHS row and its name from ORDSTATE,
+                // never inferred from completion flags.
+                'ordsdid' => $this->num($row, 'CLOTH_ORDSDID'),
+                'ords_name' => $this->txt($row, 'CLOTH_ORDS_NAME'),
                 // كمية صف القماش نفسه، حتى لا يتكرر عدد الموديل على بطاقة كل قماش.
                 // The fabric row's own quantity, so a model total is never repeated on every cloth card.
                 'qty' => $this->num($row, 'CLOTH_QTY'),

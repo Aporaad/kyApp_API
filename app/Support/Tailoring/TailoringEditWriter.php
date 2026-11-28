@@ -46,6 +46,7 @@ final class TailoringEditWriter
             $prepared['manual_no'] = (int) $old['identity']['manual_bill_no'];
             $prepared['header']['bill_kind'] = (int) $old['identity']['bill_kind'];
             $this->assertEditableIdentity($request, $old);
+            $this->preserveRemovedEditFields($prepared, $old, $request);
             if ($prepared['models'] === [] && $old['models'] !== []) {
                 throw new TailoringEditException(
                     'لا يمكن حذف كل موديلات الفاتورة / An invoice cannot be left without models',
@@ -100,15 +101,14 @@ final class TailoringEditWriter
             $finance = $this->financialPayload($request, $old);
             $this->applyPiecePrices($request, $billNo, $year);
             $gross = $this->grossFromPieces($billNo, $year);
-            $lineDiscount = round((float) ($request->input('sales_detail_discount.amount') ?? $finance['line_discount'] ?? 0), 2);
+            $lineDiscount = round((float) ($finance['line_discount'] ?? 0), 2);
             $discount = (float) ($finance['discount'] ?? 0);
-            if ($request->input('sales_detail_discount.rate') !== null && $request->input('finance.discount') === null) {
-                $discount = round($gross * (float) $request->input('sales_detail_discount.rate') / 100, 2);
-            }
             if ($lineDiscount + $discount > $gross) {
                 throw new TailoringEditException('الخصم أكبر من إجمالي الفاتورة / Discount exceeds gross total');
             }
-            $total = round($gross - $lineDiscount - $discount, 2);
+            $total = $gross > 0
+                ? round($gross - $lineDiscount - $discount, 2)
+                : round((float) ($old['finance']['total'] ?? 0), 2);
             if ($request->input('finance.total') !== null) {
                 $total = round((float) $request->input('finance.total'), 2);
                 if ($gross > 0 && $total > $gross - $lineDiscount + 0.01) {
@@ -177,10 +177,9 @@ final class TailoringEditWriter
         $allowed = [
             'expected_revision' => [],
             'header' => ['ref_no', 'details', 'permanent_cust', 'urgent', 'giving_note', 'measurements_by'],
-            'customer' => ['phone', 'address'],
-            'finance' => ['paid', 'cust_known', 'acc_no', 'acc_no1', 'acc_no2', 'cur_no', 'cur_price', 'cur_no1', 'cur_price1', 'select1', 'transfer_no', 'transfer_through', 'discount', 'discount_rate', 'total'],
+            'customer' => ['phone'],
+            'finance' => ['paid', 'cust_known', 'acc_no1', 'acc_no2', 'transfer_no', 'total'],
             'piece_prices' => ['seq_no1', 'price'],
-            'sales_detail_discount' => ['rate', 'amount'],
         ];
         $errors = [];
         foreach ($request->all() as $key => $value) {
@@ -228,27 +227,15 @@ final class TailoringEditWriter
             'header.giving_note' => 'nullable|string|max:100',
             'header.measurements_by' => 'nullable|string|max:20',
             'customer.phone' => 'nullable|string|max:15',
-            'customer.address' => 'nullable|string|max:120',
             'finance.paid' => 'nullable|numeric|min:0',
             'finance.cust_known' => 'nullable|boolean',
-            'finance.acc_no' => 'nullable|integer|min:1',
             'finance.acc_no1' => 'nullable|integer|min:1',
             'finance.acc_no2' => 'nullable|integer|min:1',
-            'finance.cur_no' => 'nullable|integer|min:1',
-            'finance.cur_price' => 'nullable|numeric|gt:0',
-            'finance.cur_no1' => 'nullable|integer|min:1',
-            'finance.cur_price1' => 'nullable|numeric|gt:0',
-            'finance.select1' => 'nullable|integer|in:1,2',
             'finance.transfer_no' => 'nullable|string|max:15',
-            'finance.transfer_through' => 'nullable|string|max:30',
-            'finance.discount' => 'nullable|numeric|min:0',
-            'finance.discount_rate' => 'nullable|numeric|min:0|max:100',
             'finance.total' => 'nullable|numeric|min:0',
             'piece_prices' => 'nullable|array|max:200',
             'piece_prices.*.seq_no1' => 'required|integer|min:1',
             'piece_prices.*.price' => 'required|numeric|gt:0',
-            'sales_detail_discount.rate' => 'nullable|numeric|min:0|max:100',
-            'sales_detail_discount.amount' => 'nullable|numeric|min:0',
         ]);
         if ($validator->fails()) {
             $errors = array_merge($errors, $validator->errors()->toArray());
@@ -318,6 +305,60 @@ final class TailoringEditWriter
         }
     }
 
+    /**
+     * الحفاظ على الحقول المحذوفة من واجهة التعديل بقيمها المخزّنة، وحفظ إجمالي الفاتورة القديمة بلا قطع.
+     * Preserve removed edit fields at their stored values and keep the legacy total for piece-less bills.
+     */
+    private function preserveRemovedEditFields(array &$prepared, array $old, Request $request): void
+    {
+        $prepared['customer']['address'] = $old['header']['address'] ?? null;
+        $prepared['party_account'] = $old['finance']['acc_no'] ?? $prepared['party_account'];
+
+        $defaults = [
+            'acc_no' => $prepared['party_account'],
+            'cur_no' => 1,
+            'cur_price' => 1.0,
+            'cur_no1' => 1,
+            'cur_price1' => 1.0,
+            'select1' => 1,
+            'transfer_through' => null,
+            'line_discount' => 0.0,
+        ];
+        foreach ($defaults as $key => $default) {
+            $prepared['finance'][$key] = $old['finance'][$key] ?? $default;
+        }
+
+        $gross = round((float) ($prepared['finance']['gross'] ?? $prepared['gross'] ?? 0), 2);
+        $lineDiscount = round((float) $prepared['finance']['line_discount'], 2);
+        $requestedTotal = $request->input('finance.total');
+        if (is_numeric($requestedTotal)) {
+            $total = round((float) $requestedTotal, 2);
+            if ($gross > 0 && $total > $gross - $lineDiscount + 0.01) {
+                throw new TailoringEditException(
+                    'الإجمالي النهائي يتجاوز إجمالي الأقمشة بعد الخصم / Final total exceeds gross less line discount',
+                    422,
+                    'invalid_total'
+                );
+            }
+            $discount = $gross > 0 ? round(max(0, $gross - $lineDiscount - $total), 2) : 0.0;
+        } else {
+            $discount = round((float) ($old['finance']['discount'] ?? 0), 2);
+            $total = $gross > 0
+                ? round($gross - $lineDiscount - $discount, 2)
+                : round((float) ($old['finance']['total'] ?? 0), 2);
+        }
+        if ($total < 0) {
+            throw new TailoringEditException('الخصم أكبر من إجمالي الفاتورة / Discount exceeds gross total');
+        }
+
+        $prepared['finance']['discount'] = $discount;
+        $prepared['finance']['discount_rate'] = $gross > 0 ? round($discount / $gross * 100, 2) : 0.0;
+        $prepared['finance']['total'] = $total;
+        $prepared['finance']['net'] = round($total - (float) $prepared['finance']['paid'], 2);
+        $prepared['finance']['remaining'] = $prepared['finance']['net'];
+        $prepared['total'] = $total;
+    }
+
     private function syncCustomerName(Request $request, array &$prepared, array $old): void
     {
         $name = trim((string) $request->input('customer.name', ''));
@@ -357,14 +398,12 @@ final class TailoringEditWriter
         $oldModels = [];
         $oldPieces = [];
         $maxModelSuffix = 0;
-        $maxPieceSuffix = 0;
         foreach ($old['models'] as $model) {
             $oldModels[(int) $model['seq_no']] = $model;
             $suffix = self::ohdidSuffix((int) $ohid, $model['ohdid'] ?? null);
             $maxModelSuffix = max($maxModelSuffix, $suffix);
             foreach ($model['pieces'] as $piece) {
                 $oldPieces[(int) $piece['seq_no1']] = $piece;
-                $maxPieceSuffix = max($maxPieceSuffix, self::ohdidSuffix((int) $ohid, $piece['ohdid'] ?? null));
             }
         }
 
@@ -392,9 +431,13 @@ final class TailoringEditWriter
                 }
                 if ($pieceSeq === null) {
                     $pieceSeq = TailoringNumbering::nextPieceSeq();
-                    $maxPieceSuffix++;
                     $piece['seq_no1'] = $pieceSeq;
-                    $piece['ohdid'] = TailoringNumbering::pieceOhdid($ohid, $maxPieceSuffix);
+                    // OHDID بترقيم القديم المقيس: كل أقمشة الموديل تشترك برقم الموديل
+                    // نفسه (مقيس على فاتورة قديمة: ست قطع بموديل واحد بـOHDID واحداً)
+                    // OHDID in the measured legacy numbering: every fabric of the model
+                    // shares the model's own number (measured on a legacy bill: six
+                    // pieces of one model carrying one OHDID).
+                    $piece['ohdid'] = $model['ohdid'];
                     $this->insertPiece($piece, $seqNo, $model, $old);
                 } else {
                     $this->updatePiece($piece, $seqNo, $model, $oldPieces[$pieceSeq], $old);
@@ -455,6 +498,11 @@ final class TailoringEditWriter
 
     private function updateShape(array $model, array $old): void
     {
+        $bindings = $this->shapeBindings($model, $old);
+        // OHID/OHDID خاصان بالإدراج فقط؛ إرسالهما إلى UPDATE بلا Placeholders يسبب ORA-01036.
+        // OHID/OHDID are insert-only; binding them to this UPDATE causes ORA-01036.
+        unset($bindings['ohid'], $bindings['ohdid']);
+
         DB::connection('oracle')->update(
             'UPDATE ACCOUNTS.SALES_DETAILES_SHAPES
                 SET SHAPE_STYLE_NO = :family, STYL_NO = :styl_no, STYLE_NAME = :style_name,
@@ -467,7 +515,7 @@ final class TailoringEditWriter
                     L1 = :l1, L2 = :l2, L3 = :l3, L4 = :l4, L5 = :l5, L6 = :l6, L7 = :l7, L8 = :l8, L9 = :l9, L10 = :l10,
                     SANF_NO = :sanf_no, SANF_DNO = :sanf_dno, SHAPE_GABROZ_NO = :gabzor_hand
               WHERE SEQ_NO = :seq_no AND BILL_NO = :bill_no AND YEAR = :year',
-            TailoringDocumentWriter::bindings($this->shapeBindings($model, $old))
+            TailoringDocumentWriter::bindings($bindings)
         );
     }
 
@@ -655,11 +703,9 @@ final class TailoringEditWriter
         $set = [];
         $bindings = ['bill_no' => $old['identity']['bill_no'], 'year' => $old['identity']['year']];
         $allowed = [
-            'paid' => 'AMOUNT_PAID', 'discount' => 'DISCOUNT', 'discount_rate' => 'DIS_RATE', 'cust_known' => 'CUST_KNOWN',
-            'acc_no' => 'ACC_NO', 'acc_no1' => 'ACC_NO1', 'acc_no2' => 'ACC_NO2',
-            'cur_no' => 'CUR_NO', 'cur_price' => 'CUR_PRICE', 'cur_no1' => 'CUR_NO1',
-            'cur_price1' => 'CUR_PRICE1', 'select1' => 'SELECT1',
-            'transfer_no' => 'FIRST_TRANSFER', 'transfer_through' => 'TRANSFER_THROUGH',
+            'paid' => 'AMOUNT_PAID', 'cust_known' => 'CUST_KNOWN',
+            'acc_no1' => 'ACC_NO1', 'acc_no2' => 'ACC_NO2',
+            'transfer_no' => 'FIRST_TRANSFER',
         ];
         foreach ($allowed as $key => $column) {
             if ($request->exists("finance.$key")) {
@@ -675,11 +721,9 @@ final class TailoringEditWriter
         $bindings['net'] = $finance['net'];
         $bindings['discount_value'] = $finance['discount'];
         $bindings['discount_rate_value'] = $finance['discount_rate'];
-        foreach (['phone' => 'TEL_NO1', 'address' => 'ADDRESS'] as $key => $column) {
-            if ($request->input("customer.$key") !== null) {
-                $set[] = "$column = :$key";
-                $bindings[$key] = TailoringDocumentWriter::clip((string) $request->input("customer.$key"), $key === 'phone' ? 15 : 120);
-            }
+        if ($request->input('customer.phone') !== null) {
+            $set[] = 'TEL_NO1 = :phone';
+            $bindings['phone'] = TailoringDocumentWriter::clip((string) $request->input('customer.phone'), 15);
         }
         foreach (['ref_no' => 'REF_NO', 'details' => 'DETAILES', 'urgent' => 'URGENT', 'giving_in' => 'GIVING_IN', 'measurements_by' => 'VOUCHER_NO', 'permanent_cust' => 'PERMANENT_CUST'] as $key => $column) {
             if ($request->exists("header.$key")) {
@@ -767,15 +811,15 @@ final class TailoringEditWriter
     private function financialPayload(Request $request, array $old): array
     {
         $finance = $old['finance'];
-        foreach (['paid', 'cust_known', 'discount', 'discount_rate', 'acc_no', 'acc_no1', 'acc_no2', 'cur_no', 'cur_price', 'cur_no1', 'cur_price1', 'select1', 'transfer_no', 'transfer_through'] as $key) {
+        foreach (['paid', 'cust_known', 'acc_no1', 'acc_no2', 'transfer_no'] as $key) {
             if (! $request->exists("finance.$key")) {
                 continue;
             }
             $value = $request->input("finance.$key");
             $finance[$key] = match ($key) {
                 'cust_known' => (bool) $value,
-                'acc_no', 'acc_no1', 'acc_no2', 'cur_no', 'cur_no1', 'select1' => $value === null ? null : (int) $value,
-                'transfer_no', 'transfer_through' => $value,
+                'acc_no1', 'acc_no2' => $value === null ? null : (int) $value,
+                'transfer_no' => $value,
                 default => (float) $value,
             };
         }

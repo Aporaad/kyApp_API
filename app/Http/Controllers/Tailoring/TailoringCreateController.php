@@ -465,9 +465,15 @@ class TailoringCreateController extends Controller
                     'bill_no' => $billNo,
                     'year' => $year,
                     'ohid' => $ohid,
-                    // ربط نصي يبدأ 1 بلا تبطين — مثال مقيس: 262112846+39 = 26211284639
-                    // String concat from 1, no padding — measured: 262112846+39 = 26211284639.
-                    'ohdid' => TailoringNumbering::pieceOhdid($ohid, $piecesCount + $pieceIndex + 1),
+                    // OHDID بترقيم القديم المقيس: لكل موديل رقم واحد تشترك به كل أقمشته
+                    // (مقيس على الفاتورة القديمة 10852: ست قطع بموديل واحد تحمل OHDID
+                    // واحداً) — الترقيم لكل قطعة كان يولّد قيماً مكررة عبر الموديلات
+                    // (2621154723 على قطعتين في فاتورة 22211).
+                    // OHDID in the measured legacy numbering: one per model shared by all
+                    // its fabrics (measured on legacy bill 10852: six pieces of one model
+                    // carry a single OHDID) — the per-piece numbering produced duplicates
+                    // across models (2621154723 on two pieces of bill 22211).
+                    'ohdid' => $ohdid,
                     'sanf_no' => $piece['sanf_no'],
                     'sanf_dno' => $piece['sanf_dno'],
                     // رقم صنف المقاس للموديل كما تكتبه الصفوف القديمة (PROD_NO)
@@ -772,34 +778,37 @@ class TailoringCreateController extends Controller
             $l1Raw = $model['measurements']['l1'] ?? null;
             $l5Raw = $model['measurements']['l5'] ?? null;
 
-            // الطول والعرض ونوع الأزرار إلزامية إلا في الموديل المؤجَّل
-            // Length, width and the button type are mandatory unless the model is deferred.
-            if (! $deferred && ($l1Raw === null || $l5Raw === null)) {
+            // الحفظ النهائي للفاتورة يفرض الإلزامي كاملاً على كل موديل — «تأجيل
+            // الطلبات» يريح حفظ الموديل والقماش فقط ولا يمتد لحفظ الفاتورة
+            // (طلب المستخدم الحرفي)، وبالطول والعرض يُحتسب استهلاك القماش دائماً.
+            // The bill's final save enforces every mandatory field on every model —
+            // "postpone orders" relaxes the model/fabric windows only, never the bill
+            // (literal request); with length and width the fabric consumption is
+            // always computed.
+            if ($l1Raw === null || $l5Raw === null) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'الطول والعرض إلزاميان — أو فعّل «تأجيل الطلبات» للموديل'
-                        .' / Length and width are required — or defer the model',
-                    'errors' => ['models.*.measurements.l1' => 'required unless deferred'],
+                    'message' => 'الطول والعرض إلزاميان لكل موديل عند حفظ الفاتورة'
+                        .' / Length and width are required for every model at bill save',
+                    'errors' => ['models.*.measurements.l1' => 'required at bill save'],
                 ], 422);
             }
 
-            if (! $deferred && trim((string) ($model['specs']['button_type'] ?? '')) === '') {
+            if (trim((string) ($model['specs']['button_type'] ?? '')) === '') {
                 return response()->json([
                     'success' => false,
-                    'message' => 'نوع الأزرار إلزامي — أو فعّل «تأجيل الطلبات» للموديل'
-                        .' / The button type is required — or defer the model',
-                    'errors' => ['models.*.specs.button_type' => 'required unless deferred'],
+                    'message' => 'نوع الأزرار إلزامي لكل موديل عند حفظ الفاتورة'
+                        .' / The button type is required for every model at bill save',
+                    'errors' => ['models.*.specs.button_type' => 'required at bill save'],
                 ], 422);
             }
 
-            // «تأجيل الطلبات»: الموديل المؤجَّل يُحفظ بلا أقمشة تابعة له
-            // "Postpone orders": a deferred model saves without its fabrics.
-            if (! $deferred && count($model['pieces']) === 0) {
+            if (count($model['pieces']) === 0) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'أضف قطعة واحدة على الأقل — أو فعّل «تأجيل الطلبات» للموديل'
-                        .' / Add at least one piece — or defer the model',
-                    'errors' => ['models.*.pieces' => 'required unless deferred'],
+                    'message' => 'أضف قطعة واحدة على الأقل لكل موديل عند حفظ الفاتورة'
+                        .' / Add at least one piece for every model at bill save',
+                    'errors' => ['models.*.pieces' => 'required at bill save'],
                 ], 422);
             }
 
@@ -863,16 +872,16 @@ class TailoringCreateController extends Controller
                 $sanfDno = (int) $piece['sanf_dno'];
                 $fromStore = (int) ($piece['from_store'] ?? TailoringPolicy::CLOTH_FROM_SHOP);
 
-                // قماش الموديل المؤجَّل يُحفظ بلا تسعير حتى لو كانت له مقاسات —
-                // السعر أكبر من صفر يُفرض على غير المؤجَّل فقط (طلب المستخدم الحرفي)
-                // A deferred model's fabric saves unpriced even with measurements —
-                // a price above zero is enforced for non-deferred models only (literal).
-                if (! $deferred && (float) $piece['price'] <= 0) {
+                // سعر القطعة أكبر من صفر عند الحفظ النهائي للفاتورة — «تأجيل
+                // الطلبات» لا يعفي منه (طلب المستخدم الحرفي)
+                // A piece price above zero at the bill's final save — "postpone
+                // orders" never exempts it (literal request).
+                if ((float) $piece['price'] <= 0) {
                     return response()->json([
                         'success' => false,
-                        'message' => 'سعر القطعة يجب أن يكون أكبر من صفر — أو فعّل «تأجيل الطلبات» للموديل'
-                            .' / The piece price must be above zero — or defer the model',
-                        'errors' => ['models.*.pieces.*.price' => 'gt:0 unless deferred'],
+                        'message' => 'سعر القطعة يجب أن يكون أكبر من صفر عند حفظ الفاتورة'
+                            .' / The piece price must be above zero at bill save',
+                        'errors' => ['models.*.pieces.*.price' => 'gt:0 at bill save'],
                     ], 422);
                 }
 
@@ -1134,12 +1143,26 @@ class TailoringCreateController extends Controller
     public function materializePreparedPayload(array &$payload): void
     {
         if (($payload['customer']['mode'] ?? null) === 'new' && empty($payload['customer']['cust_no'])) {
-            $payload['customer'] = TailoringCustomerResolver::create(
+            $previous = $payload['customer'];
+            $created = TailoringCustomerResolver::create(
                 (string) $payload['customer']['name'],
                 $payload['customer']['phone'] ?? null,
                 null,
                 $payload['customer']['address'] ?? null
             );
+            // هاتف/عنوان الفاتورة يبقيان على الرأس: النموذج أولاً ثم الملف — مصفوفة
+            // create() الخام تحمل tel1/addr فقط، وبلا هذه الخطوة يُكتب TEL_NO1 فارغاً
+            // (المشكلة المرصودة على فواتير العملاء الجدد 22211/22213).
+            // The bill's phone/address stay on the header: the form first, then the
+            // file — create()'s raw array carries only tel1/addr, and without this step
+            // TEL_NO1 was written empty (observed on new-customer bills 22211/22213).
+            $created['phone'] = isset($previous['phone']) && trim((string) $previous['phone']) !== ''
+                ? trim((string) $previous['phone'])
+                : ($created['tel1'] ?? null);
+            $created['address'] = isset($previous['address']) && trim((string) $previous['address']) !== ''
+                ? trim((string) $previous['address'])
+                : ($created['addr'] ?? null);
+            $payload['customer'] = $created;
             $payload['customer_created'] = true;
         }
 

@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\User;
+use App\Support\ArabicEncoding;
 use App\Support\PermissionCatalog;
 use App\Support\PermissionResolver;
 use Illuminate\Support\Facades\DB;
@@ -185,7 +186,7 @@ test('the bill detail folds pieces into models and carries measurements', functi
         ->assertJsonStructure([
             'data' => [
                 'header' => [
-                    'bill_no', 'year', 'ohid', 'manual_bill_no', 'date', 'cust_name',
+                    'bill_no', 'year', 'ohid', 'measurements_by', 'manual_bill_no', 'date', 'cust_name',
                     'ordsdid', 'models_count', 'pieces_count', 'urgent',
                 ],
                 'payment',
@@ -204,6 +205,16 @@ test('the bill detail folds pieces into models and carries measurements', functi
         isset($billIdentity['OHID']) ? (int) $billIdentity['OHID'] : null
     );
 
+    // اسم من أخذ المقاسات يصل من VOUCHER_NO نفسه، لا من رقم السند أو التخمين.
+    // The measurement taker arrives from VOUCHER_NO itself, never from a voucher number or guesswork.
+    $measurementTaker = array_change_key_case((array) DB::connection('oracle')->selectOne(
+        'SELECT VOUCHER_NO FROM ACCOUNTS.SALES_BILL WHERE BILL_NO = :bill_no AND YEAR = :year',
+        ['bill_no' => $billNo, 'year' => $year]
+    ), CASE_UPPER);
+    expect($response->json('data.header.measurements_by'))->toBe(
+        isset($measurementTaker['VOUCHER_NO']) ? ArabicEncoding::fixMojibake((string) $measurementTaker['VOUCHER_NO']) : null
+    );
+
     $models = $response->json('data.models');
     expect($models)->toBeArray()->not->toBeEmpty();
 
@@ -213,7 +224,7 @@ test('the bill detail folds pieces into models and carries measurements', functi
             ->and($model['pieces'])->toBeArray()->not->toBeEmpty();
 
         foreach ($model['pieces'] as $piece) {
-            expect(array_keys($piece))->toContain('seq_no1', 'cloth_name', 'cutter_name', 'tailor_name', 'cutting_done');
+            expect(array_keys($piece))->toContain('seq_no1', 'cloth_name', 'cutter_name', 'tailor_name', 'cutting_done', 'ordsdid', 'ords_name');
         }
     }
 
@@ -221,8 +232,10 @@ test('the bill detail folds pieces into models and carries measurements', functi
     // The sub-order id and quantity arrive from the MULTI_CLOTHS row matching this exact piece.
     $firstPiece = $models[0]['pieces'][0];
     $clothRow = array_change_key_case((array) DB::connection('oracle')->selectOne(
-        'SELECT OHDID, QTY FROM ACCOUNTS.MULTI_CLOTHS
-          WHERE BILL_NO = :bill_no AND YEAR = :year AND SEQ_NO = :seq_no AND SEQ_NO1 = :seq_no1',
+        'SELECT m.OHDID, m.QTY, m.ORDSDID, os.ORDSNAME
+           FROM ACCOUNTS.MULTI_CLOTHS m
+           LEFT JOIN ACCOUNTS.ORDSTATE os ON os.ORDSID = m.ORDSDID
+          WHERE m.BILL_NO = :bill_no AND m.YEAR = :year AND m.SEQ_NO = :seq_no AND m.SEQ_NO1 = :seq_no1',
         [
             'bill_no' => $billNo,
             'year' => $year,
@@ -231,7 +244,11 @@ test('the bill detail folds pieces into models and carries measurements', functi
         ]
     ), CASE_UPPER);
     expect($firstPiece['ohdid'])->toBe(isset($clothRow['OHDID']) ? (int) $clothRow['OHDID'] : null)
-        ->and($firstPiece['qty'])->toBe(isset($clothRow['QTY']) ? (int) $clothRow['QTY'] : null);
+        ->and($firstPiece['qty'])->toBe(isset($clothRow['QTY']) ? (int) $clothRow['QTY'] : null)
+        ->and($firstPiece['ordsdid'])->toBe(isset($clothRow['ORDSDID']) ? (int) $clothRow['ORDSDID'] : null)
+        ->and($firstPiece['ords_name'])->toBe(
+            isset($clothRow['ORDSNAME']) ? ArabicEncoding::fixMojibake((string) $clothRow['ORDSNAME']) : null
+        );
 
     // التسميات تأتي من GENERAL_LABELS_CODING لا من ثوابت في الشاشة.
     // The labels come from GENERAL_LABELS_CODING, not from constants in the screen.

@@ -37,6 +37,11 @@ class TailoringLookupController extends Controller
     /** The previous-models ceiling — the newest 100 models are plenty for picking. */
     private const MAX_PREVIOUS_MODELS = 100;
 
+    // «كل المقاسات» تمتد لكل عملاء ومستفيدي النظام — سقف أوسع من قائمة العميل
+    // "All measurements" spans every customer and beneficiary in the system — a wider
+    // cap than the per-customer list.
+    private const MAX_ALL_PREVIOUS_MODELS = 300;
+
     /** سقف قائمة المستفيدين / the beneficiaries ceiling */
     private const MAX_BENEFICIARIES = 100;
 
@@ -89,7 +94,18 @@ class TailoringLookupController extends Controller
      */
     public function customers(Request $request): JsonResponse
     {
-        $search = trim((string) ($request->input('search') ?? ''));
+        // الأرقام العربية المشرقية (٠-٩ / ۰-۹) تُطبَّع إلى لاتينية قبل أي فحص —
+        // القاعدة تخزن الأرقام لاتينية والكيبورد العربي يكتبها مشرقية، وبلا تطبيع
+        // يفشل البحث برقم الهاتف كلياً (المشكلة المرصودة).
+        // Arabic-Indic digits (٠-٩ / ۰-۹) normalize to Latin before any check — the
+        // database stores Latin digits while an Arabic keyboard types Eastern ones;
+        // without this phone search never matches (observed failure).
+        $search = strtr(trim((string) ($request->input('search') ?? '')), [
+            '٠' => '0', '١' => '1', '٢' => '2', '٣' => '3', '٤' => '4',
+            '٥' => '5', '٦' => '6', '٧' => '7', '٨' => '8', '٩' => '9',
+            '۰' => '0', '۱' => '1', '۲' => '2', '۳' => '3', '۴' => '4',
+            '۵' => '5', '۶' => '6', '۷' => '7', '۸' => '8', '۹' => '9',
+        ]);
         $limit = $this->resolveLimit($request);
 
         try {
@@ -102,25 +118,17 @@ class TailoringLookupController extends Controller
                 $bindings['search_name'] = '%'.$search.'%';
                 $bindings['search_tel1'] = '%'.$search.'%';
                 $bindings['search_tel2'] = '%'.$search.'%';
-                $bindings['search_bill_tel'] = '%'.$search.'%';
 
-                // البحث بالهاتف بأسماء ربط مميزة لكل موضع، ويشمل الأرقام المحفوظة على
-                // أحدث 20000 فاتورة فقط — المسح المحدّد بفهرس BILL_NO فوري (~15ms)
-                // بينما المسح الكامل لـSALES_BILL يتجاوز مهلة الاستقبال.
-                // Phone search with a distinct bind per place, also matching numbers kept
-                // only on the latest 20000 bills — the BILL_NO-indexed capped scan is
-                // instant (~15ms) while a full SALES_BILL scan blows the timeout.
+                // البحث بالاسم (الصيغتين) والهاتف على CUST وحده — الجدول صغير فالبحث
+                // فوري. البحث في أرقام الفواتير يُنفَّذ منفصلاً أدناه وليس بـ OR + IN
+                // في نفس الجملة: دمجهما يدمّر خطة المحرِّر ويعلق الاستعلام دقائق
+                // (المشكلة المرصودة — كل طلبات النافذة كانت تتعطل خلفه).
+                // Name and phone search runs on CUST alone — small table, instant. The
+                // bill-phone lookup runs as a separate second phase, never as OR + IN in
+                // one statement: combining them wrecks the plan and hangs the query for
+                // minutes (the observed failure — every picker request stalled behind it).
                 $clauses[] = '(CUST_NAME LIKE :search_oracle OR CUST_NAME LIKE :search_name
-                               OR TEL1 LIKE :search_tel1 OR TEL2 LIKE :search_tel2
-                               OR CUST_NO IN (
-                                   SELECT CUST_NO
-                                     FROM (SELECT CUST_NO, TEL_NO1
-                                             FROM ACCOUNTS.SALES_BILL
-                                            WHERE TEL_NO1 IS NOT NULL
-                                            ORDER BY BILL_NO DESC)
-                                    WHERE ROWNUM <= 20000
-                                      AND TEL_NO1 LIKE :search_bill_tel
-                                      AND ROWNUM <= 50))';
+                               OR TEL1 LIKE :search_tel1 OR TEL2 LIKE :search_tel2)';
 
                 if (is_numeric($search)) {
                     $clauses[] = 'CUST_NO = :search_no';
@@ -141,6 +149,34 @@ class TailoringLookupController extends Controller
             );
 
             $items = [];
+
+            // المرحلة الثانية — بحث الهاتف على أحدث فواتير التفصيل: للأرقام فقط
+            // وعندما لم يجد CUST شيئاً. المسح محدود بأحدث 20000 فاتورة بفهرس
+            // BILL_NO فهو فوري (~15ms، مقيس).
+            // Phase two — the bill-phone search over the latest cutting bills: numbers
+            // only and only when CUST found nothing. Capped at the latest 20000 bills
+            // via the BILL_NO index — instant (~15ms, measured).
+            if ($search !== '' && is_numeric($search) && $rows === []) {
+                $billRows = DB::connection('oracle')->select(
+                    'SELECT DISTINCT CUST_NO
+                       FROM (SELECT CUST_NO, TEL_NO1
+                               FROM ACCOUNTS.SALES_BILL
+                              WHERE TEL_NO1 IS NOT NULL
+                              ORDER BY BILL_NO DESC)
+                      WHERE ROWNUM <= 20000
+                        AND TEL_NO1 LIKE :search_bill_tel
+                        AND ROWNUM <= :bill_max',
+                    ['search_bill_tel' => '%'.$search.'%', 'bill_max' => $limit]
+                );
+
+                foreach ($billRows as $billRow) {
+                    $custNo = (int) (CuttingViewReader::num((array) $billRow, 'CUST_NO') ?? 0);
+
+                    if ($custNo > 0 && ($customer = TailoringCustomerResolver::find($custNo)) !== null) {
+                        $items[] = $customer;
+                    }
+                }
+            }
 
             foreach ($rows as $row) {
                 $items[] = TailoringCustomerResolver::find(
@@ -251,8 +287,9 @@ class TailoringLookupController extends Controller
     {
         $scope = (string) $request->query('scope', '');
         $beneficiary = trim((string) $request->query('beneficiary', ''));
+        $search = trim((string) $request->query('search', ''));
 
-        if ($custNo <= 0 && $scope !== 'all' && $beneficiary === '') {
+        if ($custNo <= 0 && $scope !== 'all' && $beneficiary === '' && $search === '') {
             return response()->json([
                 'success' => false,
                 'message' => 'رقم العميل غير صالح / Invalid customer number',
@@ -265,15 +302,19 @@ class TailoringLookupController extends Controller
                 'cap' => self::MAX_PREVIOUS_MODELS,
             ];
 
-            // فلتر العميل يسقط عند scope=all أو فلتر المستفيد الصريح
-            // The customer filter drops for scope=all or an explicit beneficiary filter.
+            // فلتر العميل يسقط عند scope=all أو فلتر المستفيد الصريح أو البحث الحرفي
+            // The customer filter drops for scope=all, an explicit beneficiary filter
+            // or a free-text search.
             $custFilter = '';
 
-            if ($scope !== 'all' && $beneficiary === '') {
+            if ($scope !== 'all' && $beneficiary === '' && $search === '') {
                 $custFilter = 'WHERE b.CUST_NO = :cust AND b.CUTTING_OR_SLAES = :k';
                 $bindings['cust'] = $custNo;
             } else {
                 $custFilter = 'WHERE b.CUTTING_OR_SLAES = :k';
+                // البحث و«كل المقاسات» يمتدان لكل النظام — سقف أوسع
+                // Search and "all measurements" span the whole system — wider cap.
+                $bindings['cap'] = self::MAX_ALL_PREVIOUS_MODELS;
             }
 
             if ($beneficiary !== '') {
@@ -281,6 +322,22 @@ class TailoringLookupController extends Controller
                 // Searching the converted form — the C1 encoding contract.
                 $custFilter .= ' AND s.BENEFICIARYNAME = :ben';
                 $bindings['ben'] = ArabicEncoding::toOracleSearchChars($beneficiary);
+            }
+
+            if ($search !== '') {
+                // البحث الحرفي يمرّ على المستفيد واسم العميل ونوع الموديل بالصيغتين
+                // — كي يجد أي اسم داخل النظام مهما كان العميل المحدد بالفاتورة
+                // (طلب المستخدم الحرفي).
+                // The free-text search sweeps beneficiary, customer name and model type
+                // in both byte forms — so any name in the system is found regardless of
+                // the bill's own customer (literal request).
+                $oracleSearch = ArabicEncoding::toOracleSearchChars($search);
+                $custFilter .= ' AND (s.BENEFICIARYNAME LIKE :search_oracle
+                                OR b.CUST_NAME LIKE :search_plain
+                                OR s.STYLE_NAME LIKE :search_style)';
+                $bindings['search_oracle'] = '%'.($oracleSearch ?? $search).'%';
+                $bindings['search_plain'] = '%'.$search.'%';
+                $bindings['search_style'] = '%'.$search.'%';
             }
 
             $rows = DB::connection('oracle')->select(
