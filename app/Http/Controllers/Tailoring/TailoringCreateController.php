@@ -385,7 +385,11 @@ class TailoringCreateController extends Controller
             'am_pm' => TailoringPolicy::AM_PM_TEXT,
             'permanent_cust' => $header['permanent_cust'] ? 1 : 0,
             'cust_known' => $finance['cust_known'] ? 1 : 0,
-            'bills_kinds' => TailoringPolicy::BILL_KIND,
+            // فاتورة بلا عربون وبلا «عميل معروف» وبلا ربط عامل تُحفظ معلقة (4)
+            // A bill with no deposit, no known customer and no worker link saves
+            // suspended (4); everything else keeps the ordinary kind.
+            'bills_kinds' => ($paid === 0.0 && ! $custKnown && ! $workerLinked)
+                ? 4 : TailoringPolicy::BILL_KIND,
             'branch_no' => $payload['branch_no'],
             'created_by' => $payload['created_by'],
             'created_by_name' => TailoringDocumentWriter::clip($payload['created_by_name'], 100),
@@ -560,7 +564,11 @@ class TailoringCreateController extends Controller
             'customer.address' => 'nullable|string|max:120',
             'customer.worker_type' => 'nullable|in:employee,cutter,tailor',
             'customer.worker_no' => 'nullable|integer|min:1',
-            'header.bill_kind' => $forEdit ? 'required|integer|in:1,2,3,4' : 'required|integer|in:1',
+            // الإنشاء يقبل العادية (1) والمعلقة (4) — الفاتورة بلا عربون وبلا «عميل معروف»
+            // وبلا ربط عامل تُرسل معلقة (طلب المستخدم الحرفي)
+            // Creation accepts ordinary (1) and suspended (4) — a bill with no deposit,
+            // no known customer and no worker link is sent suspended (literal request).
+            'header.bill_kind' => $forEdit ? 'required|integer|in:1,2,3,4' : 'required|integer|in:1,4',
             'header.manual_bill_no' => $forEdit ? 'nullable|integer|min:1' : 'nullable',
             'header.date' => $forEdit ? 'nullable|date_format:Y-m-d' : 'nullable',
             'header.ref_no' => 'nullable|string|max:20',
@@ -717,14 +725,10 @@ class TailoringCreateController extends Controller
         $custKnown = (bool) ($finance['cust_known'] ?? false);
         $workerLinked = ($data['customer']['worker_type'] ?? null) !== null;
 
-        if (! $forEdit && $paid === 0.0 && ! $custKnown && ! $workerLinked) {
-            return response()->json([
-                'success' => false,
-                'message' => 'العربون صفر يتطلب عميلاً معروفاً أو ربطاً بجاري العاملين'
-                    .' / A zero deposit requires a known customer or a worker link',
-                'errors' => ['finance.paid' => 'zero deposit requires cust_known or a worker link'],
-            ], 422);
-        }
+        // عربون صفر بلا «عميل معروف» وبلا ربط بجاري العاملين يُسمح به — تُحفظ
+        // الفاتورة معلقة BILLS_KINDS=4 بدل رفضها (طلب المستخدم الحرفي).
+        // A zero deposit without a known customer or a worker link is allowed — the
+        // bill saves suspended (BILLS_KINDS=4) instead of being refused (literal).
 
         if ($paid > 0) {
             if (($finance['cash_account'] ?? null) === null) {

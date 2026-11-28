@@ -203,10 +203,14 @@ test('a bill with missing required fields is refused 422 before any write', func
         'finance' => ['paid' => 0, 'cust_known' => true, 'credit_account' => 41210001],
     ])->assertStatus(422);
 
-    // عربون صفر بلا عميل معروف وبلا عامل / zero deposit without a known customer or worker
+    // عربون صفر بلا عميل معروف وبلا عامل لم يعد يُرفض — تُحفظ الفاتورة معلقة
+    // BILLS_KINDS=4 (قرار المستخدم)، فالاختبار يتحقق من حد الرفض الأول قبل أي
+    // كتابة عبر عميل غير موجود / a zero deposit without a known customer or worker
+    // is no longer refused — the bill saves suspended (BILLS_KINDS=4, user decision),
+    // so this test keeps to the first pre-write refusal via an unknown customer.
     $this->postJson('/api/tailoring/create/bills', [
-        'customer' => ['mode' => 'existing', 'cust_no' => 1],
-        'header' => ['bill_kind' => 1],
+        'customer' => ['mode' => 'existing', 'cust_no' => 999999],
+        'header' => ['bill_kind' => 4],
         'models' => [[
             'shape_style_no' => 1,
             'measurements' => ['l1' => 38, 'l5' => 14],
